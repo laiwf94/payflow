@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: payflow
+  main:
+    banner-mode: off
+server:
+  port: ${PAYFLOW_PORT:8080}

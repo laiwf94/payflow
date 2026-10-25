@@ -1,0 +1,99 @@
+import net.ltgt.gradle.errorprone.errorprone
+import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+    java
+    jacoco
+    id("org.springframework.boot") version "3.5.16"
+    id("com.diffplug.spotless") version "8.9.0"
+    id("net.ltgt.errorprone") version "5.1.1"
+}
+
+group = "io.github.laiwf94"
+version = "0.1.0"
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencyLocking {
+    lockAllConfigurations()
+}
+
+dependencies {
+    implementation(platform(SpringBootPlugin.BOM_COORDINATES))
+    implementation("org.springframework.boot:spring-boot-starter-web")
+
+    errorprone("com.google.errorprone:error_prone_core:2.50.0")
+
+    testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+    options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all,-processing", "-Werror"))
+    options.errorprone {
+        disableWarningsInGeneratedCode = true
+        allErrorsAsWarnings = false
+    }
+}
+
+tasks.test {
+    useJUnitPlatform()
+    maxHeapSize = "1g"
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+    finalizedBy(tasks.jacocoTestReport)
+}
+
+jacoco {
+    toolVersion = "0.8.15"
+}
+
+tasks.jacocoTestReport {
+    dependsOn(tasks.test)
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+tasks.jacocoTestCoverageVerification {
+    dependsOn(tasks.test)
+    violationRules {
+        rule {
+            limit {
+                counter = "LINE"
+                minimum = "0.90".toBigDecimal()
+            }
+        }
+    }
+}
+
+tasks.check {
+    dependsOn(tasks.jacocoTestCoverageVerification)
+}
+
+spotless {
+    java {
+        googleJavaFormat("1.36.1")
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+    kotlinGradle {
+        target("*.gradle.kts")
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
