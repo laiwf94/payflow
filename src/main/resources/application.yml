@@ -3,5 +3,14 @@ spring:
     name: payflow
   main:
     banner-mode: off
+  datasource:
+    url: ${PAYFLOW_DB_URL:jdbc:postgresql://localhost:5432/payflow}
+    username: ${PAYFLOW_DB_USER:payflow}
+    password: ${PAYFLOW_DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${PAYFLOW_DB_POOL:20}
+      connection-timeout: 5000
+  flyway:
+    locations: classpath:db/migration
 server:
   port: ${PAYFLOW_PORT:8080}
