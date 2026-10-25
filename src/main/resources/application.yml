@@ -41,6 +41,7 @@ spring:
 server:
   port: ${PAYFLOW_PORT:8080}
 payflow:
+  api-keys: ${PAYFLOW_API_KEYS:}
   simulator:
     enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
     key: ${PAYFLOW_SIMULATOR_KEY:}

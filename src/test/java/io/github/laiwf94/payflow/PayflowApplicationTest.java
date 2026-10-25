@@ -1,7 +1,9 @@
 package io.github.laiwf94.payflow;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.github.laiwf94.payflow.security.ApiKeys;
 import io.github.laiwf94.payflow.support.Containers;
 import io.github.laiwf94.payflow.support.TestInfrastructure;
 import org.junit.jupiter.api.Test;
@@ -31,5 +33,15 @@ class PayflowApplicationTest {
             "--spring.datasource.password=payflow")) {
       assertThat(app.isRunning()).isTrue();
     }
+  }
+
+  @Test
+  void keygenPrintsAKeyAndTheMatchingConfigEntry() {
+    String out = PayflowApplication.keygen("acme");
+    String key = out.lines().findFirst().orElseThrow().substring("key:  ".length());
+    assertThat(out).contains("PAYFLOW_API_KEYS entry: acme:" + ApiKeys.hash(key));
+    assertThatThrownBy(() -> PayflowApplication.keygen("Not Valid"))
+        .isInstanceOf(IllegalArgumentException.class);
+    PayflowApplication.main(new String[] {"keygen", "acme"});
   }
 }
