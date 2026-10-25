@@ -3,6 +3,9 @@ spring:
     name: payflow
   main:
     banner-mode: off
+  threads:
+    virtual:
+      enabled: true
   datasource:
     url: ${PAYFLOW_DB_URL:jdbc:postgresql://localhost:5432/payflow}
     username: ${PAYFLOW_DB_USER:payflow}
