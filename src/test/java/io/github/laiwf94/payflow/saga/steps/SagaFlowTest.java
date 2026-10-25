@@ -255,6 +255,22 @@ class SagaFlowTest {
   }
 
   @Test
+  void aShipmentWhoseAnswerWasLostIsCancelledWhenTheStepGivesUp() {
+    List<Fault> script = new java.util.ArrayList<>(List.of(Fault.UNKNOWN_AFTER));
+    script.addAll(java.util.Collections.nCopies(20, Fault.ERROR));
+    faults.set("shipping.create", new FaultPlan(0, 0, 0, Duration.ZERO, script));
+    Order o = insert();
+    Order done = drive(o);
+    assertThat(done.state()).isEqualTo(FAILED);
+    assertThat(done.failureCode()).isEqualTo("step_timeout");
+    assertThat(shipping.shipment(o.id().toString()))
+        .get()
+        .extracting(ShippingSimulator.Shipment::status)
+        .isEqualTo(ShippingSimulator.Status.CANCELLED);
+    assertThat(done.refundedMinor()).isEqualTo(2500);
+  }
+
+  @Test
   void compensationsAreSafeToRunTwice() {
     Order o = insert();
     worker.runOnce();

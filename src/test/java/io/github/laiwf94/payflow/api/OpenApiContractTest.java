@@ -41,6 +41,7 @@ class OpenApiContractTest {
   @Autowired SagaWorker worker;
   @Autowired FilterRegistrationBean<IdempotencyFilter> idempotency;
   @Autowired JdbcClient jdbc;
+  @Autowired io.github.laiwf94.payflow.sim.Faults faults;
 
   private Map<String, Object> spec;
   private SchemaValidator validator;
@@ -50,6 +51,8 @@ class OpenApiContractTest {
   @BeforeEach
   void setUp() throws Exception {
     Db.truncateAll(jdbc);
+    // The context, and with it the simulators, is shared with other test classes.
+    faults.reset(new java.util.SplittableRandom(1));
     try (InputStream in = getClass().getResourceAsStream("/static/openapi.yaml")) {
       spec = new Yaml().load(in);
     }

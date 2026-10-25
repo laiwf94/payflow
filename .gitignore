@@ -4,3 +4,4 @@ build/
 *.iml
 .DS_Store
 bench/results/
+.jqwik-database
