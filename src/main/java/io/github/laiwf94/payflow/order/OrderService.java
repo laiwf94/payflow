@@ -9,6 +9,8 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -18,6 +20,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Service
 public class OrderService {
 
+  private static final Logger log = LoggerFactory.getLogger(OrderService.class);
   private static final Set<String> COUNTRIES = Set.of(Locale.getISOCountries());
 
   /** Another merchant's order is reported exactly like a missing one. */
@@ -93,6 +96,7 @@ public class OrderService {
             clock.instant());
     transitions.create(order);
     wakeWorkerAfterCommit();
+    log.info("order {} created for {} {}", order.id(), total.minorUnits(), currency);
     return order;
   }
 

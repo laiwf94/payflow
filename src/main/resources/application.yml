@@ -49,3 +49,31 @@ payflow:
   simulator:
     enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
     key: ${PAYFLOW_SIMULATOR_KEY:}
+management:
+  server:
+    # Metrics and health details stay off the public port; set PAYFLOW_MANAGEMENT_ADDRESS=0.0.0.0
+    # only where the network already limits who can reach it.
+    port: ${PAYFLOW_MANAGEMENT_PORT:8081}
+    address: ${PAYFLOW_MANAGEMENT_ADDRESS:127.0.0.1}
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+        add-additional-paths: true
+      group:
+        # Kafka being down must not take the API out of rotation: orders are still accepted and
+        # their events wait in the outbox. Readiness is the database only.
+        readiness:
+          include: readinessState,db
+  metrics:
+    tags:
+      application: payflow
+logging:
+  structured:
+    format:
+      console: ${PAYFLOW_LOG_FORMAT:logstash}

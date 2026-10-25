@@ -6,6 +6,8 @@ import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.StateChange;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -48,6 +50,7 @@ public class SagaWorker implements SmartLifecycle {
   private final Clock clock;
   private final Backoff backoff;
   private final CrashPoints crash;
+  private final MeterRegistry meters;
   private final Semaphore permits;
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   private final Object signal = new Object();
@@ -62,13 +65,15 @@ public class SagaWorker implements SmartLifecycle {
       SagaProperties props,
       Clock clock,
       Backoff backoff,
-      CrashPoints crash) {
+      CrashPoints crash,
+      MeterRegistry meters) {
     this.repo = repo;
     this.transitions = transitions;
     this.props = props;
     this.clock = clock;
     this.backoff = backoff;
     this.crash = crash;
+    this.meters = meters;
     this.permits = new Semaphore(props.maxInFlight());
     for (SagaStep s : stepList) {
       if (steps.put(s.handles(), s) != null) {
@@ -124,12 +129,18 @@ public class SagaWorker implements SmartLifecycle {
       outcome = new StepOutcome.Retry("no step handles " + state);
     } else {
       crash.at("before:" + state);
+      long started = System.nanoTime();
       try {
         outcome = step.execute(order, resumed);
       } catch (RuntimeException e) {
         log.warn("step {} failed unexpectedly", state, e);
         outcome = new StepOutcome.Retry("unexpected " + e.getClass().getSimpleName());
       }
+      Timer.builder("payflow.saga.step")
+          .tag("state", state.name())
+          .tag("outcome", outcome.getClass().getSimpleName().toLowerCase(java.util.Locale.ROOT))
+          .register(meters)
+          .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
       crash.at("after:" + state);
     }
     return switch (outcome) {
@@ -160,6 +171,7 @@ public class SagaWorker implements SmartLifecycle {
     if (delay.compareTo(r.minDelay()) < 0) {
       delay = r.minDelay();
     }
+    meters.counter("payflow.saga.retries", "state", state.name()).increment();
     if (state.isCompensating() && next >= COMPENSATION_ALERT_ATTEMPTS) {
       log.error("compensation {} still failing after {} attempts: {}", state, next, r.reason());
     } else {
@@ -210,6 +222,9 @@ public class SagaWorker implements SmartLifecycle {
       return null;
     }
     log.info("order {} -> {}", order.state(), next);
+    meters
+        .counter("payflow.saga.transitions", "from", order.state().name(), "to", next.name())
+        .increment();
     crash.at("committed:" + order.state());
     return updated.get();
   }

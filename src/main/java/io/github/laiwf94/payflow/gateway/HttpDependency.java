@@ -15,6 +15,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
@@ -87,6 +88,10 @@ final class HttpDependency {
               .header(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey.get())
               .accept(MediaType.APPLICATION_JSON);
       headers.forEach(req::header);
+      String correlationId = MDC.get("correlation_id");
+      if (correlationId != null) {
+        req.header("X-Request-Id", correlationId);
+      }
       if (body != null) {
         req.contentType(MediaType.APPLICATION_JSON).body(body);
       }

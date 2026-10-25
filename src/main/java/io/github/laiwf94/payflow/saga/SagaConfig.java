@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.saga;
 import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.util.EnumSet;
 import java.util.List;
@@ -30,7 +31,8 @@ public class SagaConfig {
       SagaProperties props,
       Clock clock,
       Backoff backoff,
-      ObjectProvider<CrashPoints> crash) {
+      ObjectProvider<CrashPoints> crash,
+      MeterRegistry meters) {
     requireEveryStep(steps);
     return new SagaWorker(
         repo,
@@ -39,7 +41,8 @@ public class SagaConfig {
         props,
         clock,
         backoff,
-        crash.getIfAvailable(() -> CrashPoints.NONE));
+        crash.getIfAvailable(() -> CrashPoints.NONE),
+        meters);
   }
 
   /** Fails startup if some non-terminal state has no step, rather than parking orders there. */

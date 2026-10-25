@@ -79,7 +79,8 @@ class UnknownOutcomeTest {
             props,
             clock,
             new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
-            CrashPoints.NONE);
+            CrashPoints.NONE,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
   }
 
   private void lose(String operation, Fault... script) {

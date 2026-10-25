@@ -1,6 +1,7 @@
 package io.github.laiwf94.payflow.outbox;
 
 import io.github.laiwf94.payflow.saga.CrashPoints;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.beans.factory.ObjectProvider;
@@ -29,8 +30,16 @@ public class OutboxConfig {
       OutboxProperties props,
       OutboxSignal signal,
       Clock clock,
-      ObjectProvider<CrashPoints> crash) {
+      ObjectProvider<CrashPoints> crash,
+      MeterRegistry meters) {
     return new OutboxRelay(
-        jdbc, tx, kafka, props, signal, clock, crash.getIfAvailable(() -> CrashPoints.NONE));
+        jdbc,
+        tx,
+        kafka,
+        props,
+        signal,
+        clock,
+        crash.getIfAvailable(() -> CrashPoints.NONE),
+        meters);
   }
 }

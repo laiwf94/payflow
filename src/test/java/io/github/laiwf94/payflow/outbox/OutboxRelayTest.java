@@ -88,7 +88,15 @@ class OutboxRelayTest {
   }
 
   private OutboxRelay relay(CrashPoints crash) {
-    return new OutboxRelay(jdbc, tx, kafka, props(), signal, clock, crash);
+    return new OutboxRelay(
+        jdbc,
+        tx,
+        kafka,
+        props(),
+        signal,
+        clock,
+        crash,
+        new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
   }
 
   /** Writes {@code n} events for one order through the real writer, one transaction each. */
@@ -253,7 +261,8 @@ class OutboxRelayTest {
                 Duration.ofDays(1)),
             signal,
             clock,
-            CrashPoints.NONE);
+            CrashPoints.NONE,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     try {
       assertThatThrownBy(r::relayOnce).isInstanceOf(RuntimeException.class);
       assertThat(unpublished()).isEqualTo(2);
@@ -339,6 +348,22 @@ class OutboxRelayTest {
     Set<Long> seqs = new HashSet<>();
     consumeAll(4).forEach(rec -> seqs.add(seq(rec)));
     assertThat(seqs).containsExactlyInAnyOrder(0L, 1L, 2L, 3L);
+  }
+
+  @Test
+  void backlogGaugesTrackUnpublishedEvents() {
+    var meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+    OutboxRelay r =
+        new OutboxRelay(jdbc, tx, kafka, props(), signal, clock, CrashPoints.NONE, meters);
+    eventsFor(3);
+    clock.advance(Duration.ofSeconds(42));
+    r.refreshBacklog();
+    assertThat(meters.get("payflow.outbox.pending").gauge().value()).isEqualTo(3);
+    assertThat(meters.get("payflow.outbox.oldest.age").gauge().value()).isEqualTo(42);
+    r.relayOnce();
+    r.refreshBacklog();
+    assertThat(meters.get("payflow.outbox.pending").gauge().value()).isZero();
+    assertThat(meters.get("payflow.outbox.published").counter().count()).isEqualTo(3);
   }
 
   @Test

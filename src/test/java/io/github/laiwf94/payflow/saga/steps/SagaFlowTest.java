@@ -79,7 +79,8 @@ class SagaFlowTest {
             props,
             clock,
             new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
-            crash);
+            crash,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
   }
 
   private Order insert(String method, ShippingAddress address) {

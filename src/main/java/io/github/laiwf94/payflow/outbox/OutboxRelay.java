@@ -1,6 +1,9 @@
 package io.github.laiwf94.payflow.outbox;
 
 import io.github.laiwf94.payflow.saga.CrashPoints;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -12,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,9 +61,13 @@ public class OutboxRelay implements SmartLifecycle {
   private final OutboxSignal signal;
   private final Clock clock;
   private final CrashPoints crash;
+  private final Counter published;
+  private final AtomicLong pending = new AtomicLong();
+  private final AtomicLong oldestAgeSeconds = new AtomicLong();
   private volatile boolean running;
   private Thread thread;
   private Instant lastCleanup = Instant.EPOCH;
+  private Instant lastBacklog = Instant.EPOCH;
 
   public OutboxRelay(
       JdbcClient jdbc,
@@ -68,7 +76,8 @@ public class OutboxRelay implements SmartLifecycle {
       OutboxProperties props,
       OutboxSignal signal,
       Clock clock,
-      CrashPoints crash) {
+      CrashPoints crash,
+      MeterRegistry meters) {
     this.jdbc = jdbc;
     this.tx = tx;
     this.kafka = kafka;
@@ -76,6 +85,15 @@ public class OutboxRelay implements SmartLifecycle {
     this.signal = signal;
     this.clock = clock;
     this.crash = crash;
+    this.published = meters.counter("payflow.outbox.published");
+    // Read by the scrape; refreshed by the relay loop so a scrape never queries the database.
+    Gauge.builder("payflow.outbox.pending", pending, AtomicLong::get)
+        .description("unpublished events")
+        .register(meters);
+    Gauge.builder("payflow.outbox.oldest.age", oldestAgeSeconds, AtomicLong::get)
+        .description("age of the oldest unpublished event")
+        .baseUnit("seconds")
+        .register(meters);
   }
 
   /** Publishes one batch. Returns the number of events published. */
@@ -149,7 +167,26 @@ public class OutboxRelay implements SmartLifecycle {
         .param("now", clock.instant().atOffset(ZoneOffset.UTC))
         .param("ids", rows.stream().map(Row::id).toArray(Long[]::new))
         .update();
+    published.increment(rows.size());
     return rows.size();
+  }
+
+  /** Recomputes the backlog gauges. */
+  public void refreshBacklog() {
+    Instant now = clock.instant();
+    jdbc.sql(
+            """
+            SELECT count(*), min(created_at) FROM outbox WHERE published_at IS NULL
+            """)
+        .query(
+            rs -> {
+              rs.next();
+              pending.set(rs.getLong(1));
+              java.time.OffsetDateTime oldest = rs.getObject(2, java.time.OffsetDateTime.class);
+              oldestAgeSeconds.set(
+                  oldest == null ? 0 : Math.max(0, now.getEpochSecond() - oldest.toEpochSecond()));
+              return Boolean.TRUE;
+            });
   }
 
   /** Deletes published events older than the retention, a bounded batch at a time. */
@@ -168,6 +205,10 @@ public class OutboxRelay implements SmartLifecycle {
       try {
         int n = relayOnce();
         Instant now = clock.instant();
+        if (now.isAfter(lastBacklog.plusSeconds(5))) {
+          lastBacklog = now;
+          refreshBacklog();
+        }
         if (now.isAfter(lastCleanup.plusSeconds(60))) {
           lastCleanup = now;
           cleanup();

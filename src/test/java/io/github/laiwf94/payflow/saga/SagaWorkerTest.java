@@ -110,7 +110,8 @@ class SagaWorkerTest {
         p,
         clock,
         new Backoff(p.backoffBase(), p.backoffCap(), new SplittableRandom(1)),
-        crash);
+        crash,
+        new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
   }
 
   private SagaWorker worker() {
@@ -369,7 +370,8 @@ class SagaWorkerTest {
                     p,
                     clock,
                     new Backoff(p.backoffBase(), p.backoffCap(), new SplittableRandom()),
-                    CrashPoints.NONE))
+                    CrashPoints.NONE,
+                    new io.micrometer.core.instrument.simple.SimpleMeterRegistry()))
         .hasMessageContaining("two steps");
   }
 
