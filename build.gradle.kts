@@ -62,6 +62,9 @@ tasks.withType<JavaCompile>().configureEach {
 
 tasks.test {
     useJUnitPlatform()
+    // ProcessCrashRecoveryTest runs the real jar in a child JVM and kills it.
+    dependsOn(tasks.bootJar)
+    systemProperty("payflow.bootJar", tasks.bootJar.get().archiveFile.get().asFile.absolutePath)
     maxHeapSize = "1g"
     testLogging {
         events("failed")

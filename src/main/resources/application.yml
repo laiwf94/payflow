@@ -40,6 +40,10 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       properties:
         isolation.level: read_committed
+        # A consumer that died keeps its partitions until this runs out; 10 s instead of the
+        # 45 s default lets a restarted instance catch up sooner.
+        session.timeout.ms: 10000
+        heartbeat.interval.ms: 3000
     listener:
       ack-mode: record
 server:
