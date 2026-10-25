@@ -1,0 +1,71 @@
+# Local stack: Postgres, Redpanda (Kafka API), the fake providers and payflow.
+# The keys below are for this demo stack only.
+name: payflow
+
+services:
+  postgres:
+    image: postgres:17.10-alpine
+    environment:
+      POSTGRES_DB: payflow
+      POSTGRES_USER: payflow
+      POSTGRES_PASSWORD: payflow-demo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payflow -d payflow"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.9
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --kafka-addr=internal://0.0.0.0:9092
+      - --advertise-kafka-addr=internal://redpanda:9092
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  simulator:
+    build: .
+    image: payflow:local
+    command: ["simulator"]
+    environment:
+      PAYFLOW_PORT: "8090"
+      PAYFLOW_SIMULATOR_KEY: sim_demo_key_0123456789abcdef
+    ports:
+      - "127.0.0.1:${PAYFLOW_HOST_SIMULATOR_PORT:-8090}:8090"
+
+  app:
+    image: payflow:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+    environment:
+      PAYFLOW_DB_URL: jdbc:postgresql://postgres:5432/payflow
+      PAYFLOW_DB_PASSWORD: payflow-demo
+      PAYFLOW_KAFKA_BOOTSTRAP: redpanda:9092
+      # Demo merchant "acme"; the key is pf_demo_acme_0123456789abcdefghijklmnop.
+      PAYFLOW_API_KEYS: acme:da4c799cd4e103221d18a07d2090e355b5aa1d3936add5cbf39afd6449ed320b
+      PAYFLOW_SIMULATOR_ENABLED: "false"
+      PAYFLOW_DEPENDENCIES_PAYMENT_BASE_URL: http://simulator:8090/sim/payments
+      PAYFLOW_DEPENDENCIES_PAYMENT_API_KEY: sim_demo_key_0123456789abcdef
+      PAYFLOW_DEPENDENCIES_INVENTORY_BASE_URL: http://simulator:8090/sim/inventory/reservations
+      PAYFLOW_DEPENDENCIES_INVENTORY_API_KEY: sim_demo_key_0123456789abcdef
+      PAYFLOW_DEPENDENCIES_SHIPPING_BASE_URL: http://simulator:8090/sim/shipping/shipments
+      PAYFLOW_DEPENDENCIES_SHIPPING_API_KEY: sim_demo_key_0123456789abcdef
+      # Short lease so the crash demo resumes in seconds; it must stay above the slowest call.
+      PAYFLOW_SAGA_LEASE: 8s
+      # Reachable only through the loopback port mapping below.
+      PAYFLOW_MANAGEMENT_ADDRESS: 0.0.0.0
+    ports:
+      - "127.0.0.1:${PAYFLOW_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${PAYFLOW_HOST_MANAGEMENT_PORT:-8081}:8081"

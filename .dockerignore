@@ -1,0 +1,7 @@
+.git
+.gradle
+build
+bench/results
+examples
+docs
+*.md
