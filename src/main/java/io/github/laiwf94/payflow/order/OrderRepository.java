@@ -165,6 +165,43 @@ public class OrderRepository {
         .optional();
   }
 
+  /**
+   * Flags a cancel if the order hasn't been captured yet, and makes it due now so a pending retry
+   * doesn't delay the cancellation. The worker honours the flag at its next decision point.
+   */
+  public Optional<Order> requestCancel(String merchantId, UUID id, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET cancel_requested = true,
+                next_attempt_at = LEAST(next_attempt_at, :now),
+                version = version + 1, updated_at = :now
+            WHERE id = :id AND merchant_id = :merchant
+              AND state IN ('PENDING', 'INVENTORY_RESERVED', 'PAYMENT_AUTHORIZED')
+            RETURNING *
+            """)
+        .param("now", ts(now))
+        .param("id", id)
+        .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /** Moves a completed order to {@code REFUNDING}. Completed orders are never leased. */
+  public Optional<Order> requestRefund(String merchantId, UUID id, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET state = 'REFUNDING', attempt = 0, step_started_at = :now,
+                next_attempt_at = :now, version = version + 1, updated_at = :now
+            WHERE id = :id AND merchant_id = :merchant AND state = 'COMPLETED'
+            RETURNING *
+            """)
+        .param("now", ts(now))
+        .param("id", id)
+        .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
   /** Gives the lease back without changing anything else. */
   public boolean release(UUID id, UUID leaseToken) {
     return jdbc.sql(

@@ -377,6 +377,13 @@ class SagaWorkerTest {
   }
 
   @Test
+  void productionWiringRefusesToStartWithAStateNobodyHandles() {
+    assertThatThrownBy(() -> SagaConfig.requireEveryStep(List.of()))
+        .hasMessageContaining("PENDING")
+        .hasMessageContaining("REFUNDING");
+  }
+
+  @Test
   void propertiesAreValidated() {
     assertThatThrownBy(() -> props(0, Duration.ofSeconds(1), false))
         .isInstanceOf(IllegalArgumentException.class);

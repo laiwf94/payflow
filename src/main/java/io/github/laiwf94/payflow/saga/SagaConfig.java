@@ -1,8 +1,10 @@
 package io.github.laiwf94.payflow.saga;
 
 import io.github.laiwf94.payflow.order.OrderRepository;
+import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import java.time.Clock;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.SplittableRandom;
 import org.springframework.beans.factory.ObjectProvider;
@@ -29,6 +31,7 @@ public class SagaConfig {
       Clock clock,
       Backoff backoff,
       ObjectProvider<CrashPoints> crash) {
+    requireEveryStep(steps);
     return new SagaWorker(
         repo,
         transitions,
@@ -37,5 +40,19 @@ public class SagaConfig {
         clock,
         backoff,
         crash.getIfAvailable(() -> CrashPoints.NONE));
+  }
+
+  /** Fails startup if some non-terminal state has no step, rather than parking orders there. */
+  static void requireEveryStep(List<SagaStep> steps) {
+    EnumSet<OrderState> missing = EnumSet.noneOf(OrderState.class);
+    for (OrderState s : OrderState.values()) {
+      if (!s.isTerminal()) {
+        missing.add(s);
+      }
+    }
+    steps.forEach(s -> missing.remove(s.handles()));
+    if (!missing.isEmpty()) {
+      throw new IllegalStateException("no saga step for " + missing);
+    }
   }
 }
