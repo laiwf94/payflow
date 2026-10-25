@@ -91,6 +91,14 @@ class HttpDependencyTest {
   }
 
   @Test
+  void anOversizedAnswerIsNotBufferedAndCountsAsUnknown() {
+    status.set(200);
+    body.set("{\"id\":\"" + "x".repeat(HttpDependency.MAX_RESPONSE_BYTES) + "\"}");
+    assertThat(gateway(base()).capture("k", "p", 1))
+        .isEqualTo(new CallResult.Unknown<>("payment sent an oversized response"));
+  }
+
+  @Test
   void unreadableBodies() {
     status.set(200);
     body.set("not json");

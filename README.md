@@ -107,7 +107,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 `invalid_argument` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
 `not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
 `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
-`idempotency_key_reused` 422, `internal` 500. Another merchant's order is a 404, the same as a
+`idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a 404, the same as a
 missing one.
 
 ## How it is tested
@@ -127,7 +127,7 @@ missing one.
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 240 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 242 tests, 90% line coverage floor (currently 95%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

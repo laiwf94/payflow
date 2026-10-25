@@ -20,6 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -40,6 +43,8 @@ import org.springframework.web.util.ContentCachingResponseWrapper;
  * work back and releases the key, so the client's retry runs fresh.
  */
 public final class IdempotencyFilter extends OncePerRequestFilter {
+
+  private static final Logger log = LoggerFactory.getLogger(IdempotencyFilter.class);
 
   public static final String HEADER = "Idempotency-Key";
   public static final String REPLAYED_HEADER = "Idempotent-Replayed";
@@ -91,8 +96,15 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
     }
     String merchant = (String) req.getAttribute(ApiKeyFilter.MERCHANT_ATTRIBUTE);
     String path = req.getRequestURI();
-    IdempotencyStore.Claim claim =
-        store.claim(merchant, key, req.getMethod(), path, hash(req.getMethod(), path, body));
+    IdempotencyStore.Claim claim;
+    try {
+      claim = store.claim(merchant, key, req.getMethod(), path, hash(req.getMethod(), path, body));
+    } catch (DataAccessException e) {
+      log.error("can't reach the database to claim an idempotency key", e);
+      ApiErrors.write(
+          req, res, json, 503, "unavailable", "temporarily unavailable; retry with the same key");
+      return;
+    }
     switch (claim) {
       case IdempotencyStore.Claim.Mismatch m -> {
         count("reused");

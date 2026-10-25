@@ -35,6 +35,9 @@ final class HttpDependency {
 
   private static final Logger log = LoggerFactory.getLogger(HttpDependency.class);
 
+  /** Far above any real answer; a dependency can't make us buffer more than this. */
+  static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+
   /** Maps a 2xx or 4xx answer to a result. */
   interface Answer<T> {
     CallResult<T> map(int status, JsonNode body);
@@ -98,7 +101,11 @@ final class HttpDependency {
       return req.exchange(
           (request, response) -> {
             int status = response.getStatusCode().value();
-            byte[] bytes = response.getBody().readAllBytes();
+            byte[] bytes = response.getBody().readNBytes(MAX_RESPONSE_BYTES + 1);
+            if (bytes.length > MAX_RESPONSE_BYTES) {
+              // Not read to the end, so we can't tell what it said: treat it as unanswered.
+              return new CallResult.Unknown<>(name + " sent an oversized response");
+            }
             return classify(status, bytes, answer);
           },
           true);

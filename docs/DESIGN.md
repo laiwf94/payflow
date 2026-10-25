@@ -261,7 +261,7 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
 | Malformed event on the topic | Moved to the dead-letter topic | Consumer continues |
-| Postgres down | Requests fail with 500; workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
+| Postgres down | POSTs get 503 `unavailable` before doing anything; workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
 | Client retries a POST | Replay of the first response | Idempotency key |
 | Wrong credentials for a provider | Retried as transient, error logged | Fix configuration; orders resume |
 
@@ -270,6 +270,7 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | Limit | Value | Where |
 |---|---|---|
 | Request body | 64 KiB, checked before buffering | `BodyLimitFilter.MAX_BODY_BYTES` |
+| Provider response body | 1 MiB; larger counts as an unknown outcome | `HttpDependency.MAX_RESPONSE_BYTES` |
 | Lines per order | 1-50 | `CreateOrderRequest` |
 | Quantity per line | 1-1,000 | `CreateOrderRequest` |
 | Unit amount and order total | 1-99,999,999 minor units | `Money.MAX_MINOR_UNITS` |

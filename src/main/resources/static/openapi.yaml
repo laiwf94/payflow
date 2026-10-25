@@ -9,6 +9,9 @@ info:
 
     Every POST needs an `Idempotency-Key`. Retrying with the same key and body returns the first
     response, errors included.
+
+    Any endpoint can also answer 500 (`internal`) or, when the database is unreachable, 503
+    (`unavailable`), with the same error body. Both are safe to retry with the same key.
   license:
     name: MIT
 servers:
