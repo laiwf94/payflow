@@ -23,10 +23,12 @@ class ReversePaymentStep implements SagaStep {
 
   private final PaymentGateway payments;
   private final SagaProperties props;
+  private final UnknownOutcomes unknown;
 
-  ReversePaymentStep(PaymentGateway payments, SagaProperties props) {
+  ReversePaymentStep(PaymentGateway payments, SagaProperties props, UnknownOutcomes unknown) {
     this.payments = payments;
     this.props = props;
+    this.unknown = unknown;
   }
 
   @Override
@@ -52,6 +54,9 @@ class ReversePaymentStep implements SagaStep {
       PaymentInfo now = p;
       if (r != null) {
         if (!(r instanceof CallResult.Success<PaymentInfo> ok)) {
+          if (r instanceof CallResult.Unknown<PaymentInfo>) {
+            unknown.seen("reverse");
+          }
           return r instanceof CallResult.Unknown<PaymentInfo>
               ? new StepOutcome.Retry("reversal outcome unknown", props.unknownOutcomeDelay())
               : new StepOutcome.Retry("reversal failed: " + r);

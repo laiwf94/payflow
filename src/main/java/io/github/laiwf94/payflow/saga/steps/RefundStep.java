@@ -21,10 +21,12 @@ class RefundStep implements SagaStep {
 
   private final PaymentGateway payments;
   private final SagaProperties props;
+  private final UnknownOutcomes unknown;
 
-  RefundStep(PaymentGateway payments, SagaProperties props) {
+  RefundStep(PaymentGateway payments, SagaProperties props, UnknownOutcomes unknown) {
     this.payments = payments;
     this.props = props;
+    this.unknown = unknown;
   }
 
   @Override
@@ -45,6 +47,9 @@ class RefundStep implements SagaStep {
       if (p.status() == PaymentStatus.CAPTURED && p.netCaptured() > 0) {
         CallResult<PaymentInfo> r = payments.refund(Keys.refund(p.id()), p.id(), p.netCaptured());
         if (!(r instanceof CallResult.Success<PaymentInfo> ok)) {
+          if (r instanceof CallResult.Unknown<PaymentInfo>) {
+            unknown.seen("refund");
+          }
           return r instanceof CallResult.Unknown<PaymentInfo>
               ? new StepOutcome.Retry("refund outcome unknown", props.unknownOutcomeDelay())
               : new StepOutcome.Retry("refund failed: " + r);
