@@ -12,5 +12,14 @@ spring:
       connection-timeout: 5000
   flyway:
     locations: classpath:db/migration
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    default-property-inclusion: non_null
+    deserialization:
+      fail-on-unknown-properties: true
 server:
   port: ${PAYFLOW_PORT:8080}
+payflow:
+  simulator:
+    enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
+    key: ${PAYFLOW_SIMULATOR_KEY:}
