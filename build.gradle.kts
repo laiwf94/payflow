@@ -34,6 +34,7 @@ dependencies {
 
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("net.jqwik:jqwik:1.10.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
