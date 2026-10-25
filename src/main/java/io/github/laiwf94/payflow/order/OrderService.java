@@ -63,7 +63,9 @@ public class OrderService {
    * @throws InvalidMoneyException when the total overflows the per-charge cap
    * @throws IllegalArgumentException when the country isn't an ISO 3166 code
    */
-  @Transactional
+  // A refused request writes nothing, and the caller (the idempotency filter) still has to commit
+  // the stored error response in the same transaction, so refusals must not mark it rollback-only.
+  @Transactional(noRollbackFor = IllegalArgumentException.class)
   public Order create(
       String merchantId,
       List<LineItem> items,
@@ -98,7 +100,7 @@ public class OrderService {
     return repo.findForMerchant(merchantId, id).orElseThrow(NotFound::new);
   }
 
-  @Transactional
+  @Transactional(noRollbackFor = {NotFound.class, WrongState.class})
   public Order cancel(String merchantId, UUID id) {
     Optional<Order> o = transitions.requestCancel(merchantId, id, clock.instant());
     if (o.isPresent()) {
@@ -117,7 +119,7 @@ public class OrderService {
             + " captured can be cancelled, use refund after completion");
   }
 
-  @Transactional
+  @Transactional(noRollbackFor = {NotFound.class, WrongState.class})
   public Order refund(String merchantId, UUID id) {
     Optional<Order> o = transitions.requestRefund(merchantId, id, clock.instant());
     if (o.isPresent()) {

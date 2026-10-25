@@ -245,6 +245,7 @@ class OrderApiTest {
         HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/v1/orders"))
             .header("Authorization", "Bearer " + TestKeys.ACME)
             .header("Content-Type", "application/json")
+            .header("Idempotency-Key", "chunked-too-big")
             .POST(
                 HttpRequest.BodyPublishers.ofInputStream(
                     () ->

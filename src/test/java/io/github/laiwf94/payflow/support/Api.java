@@ -8,6 +8,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.UUID;
 
 /** A small HTTP client for API tests, over a real socket. */
 public final class Api {
@@ -61,6 +62,10 @@ public final class Api {
     }
     if (body != null) {
       b.header("Content-Type", "application/json");
+    }
+    if (method.equals("POST")) {
+      // Every POST needs a key; tests that care about keys pass their own.
+      b.setHeader("Idempotency-Key", UUID.randomUUID().toString());
     }
     for (int i = 0; i < headers.length; i += 2) {
       b.setHeader(headers[i], headers[i + 1]);
