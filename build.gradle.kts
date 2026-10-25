@@ -38,6 +38,23 @@ dependencies {
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
 
+    // Security patches newer than the ones Spring Boot 3.5.16 manages. Each is a patch release of
+    // the line Boot already uses; osv-scanner in CI fails if one of these falls behind again.
+    constraints {
+        listOf(
+            "com.fasterxml.jackson.core:jackson-core:2.21.7",
+            "com.fasterxml.jackson.core:jackson-databind:2.21.7",
+            "org.apache.tomcat.embed:tomcat-embed-core:10.1.61",
+            "org.apache.tomcat.embed:tomcat-embed-el:10.1.61",
+            "org.apache.tomcat.embed:tomcat-embed-websocket:10.1.61",
+            "org.postgresql:postgresql:42.7.14",
+            "at.yawk.lz4:lz4-java:1.11.4",
+            "org.apache.logging.log4j:log4j-api:2.25.5",
+            "org.apache.logging.log4j:log4j-to-slf4j:2.25.5",
+        ).forEach { implementation(it) }
+        testImplementation("org.apache.commons:commons-compress:1.28.0")
+    }
+
     errorprone("com.google.errorprone:error_prone_core:2.50.0")
 
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
