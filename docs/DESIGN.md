@@ -1,25 +1,19 @@
 # payflow design
 
-## Goals
+payflow exists to charge a customer exactly what they owe, once, or not at all. That has to hold
+when the payment provider, the inventory system or the carrier fails, answers slowly, or does the
+work and then loses the answer, and when the payflow process itself is killed at any instruction.
+Three further requirements follow. Every order reaches a final state without a human, unless a
+compensation keeps failing, in which case it keeps retrying and says so loudly. A merchant can
+retry any request safely: the same request with the same key gives the same answer, and never
+creates a second order or a second refund. Other systems learn about every state change, in order
+per order, even if Kafka is down when the change happens.
 
-A customer is charged exactly what they owe, once, or not at all. That has to hold when the
-payment provider, the inventory system or the carrier fails, answers slowly, or does the work and
-then loses the answer, and when the payflow process itself is killed at any instruction.
+This version leaves out partial captures and partial refunds, multiple payments per order (split
+tender), inventory reservation expiry, and running the saga across regions. Some of these come up
+under [Growing past one database](#growing-past-one-database).
 
-Every order reaches a final state without a human, unless a compensation keeps failing, in which
-case it keeps retrying and says so loudly.
-
-A merchant can retry any request safely. The same request with the same key gives the same
-answer; it never creates a second order or a second refund.
-
-Other systems learn about every state change, in order per order, even if Kafka is down when the
-change happens.
-
-Non-goals for this version: partial captures and partial refunds, multiple payments per order
-(split tender), inventory reservation expiry, and running the saga across regions. Some of these
-are discussed under [Scaling out](#scaling-out).
-
-## Data model
+## The order row
 
 An order row is both the business record and the saga's durable state:
 
@@ -43,7 +37,7 @@ with no minor unit (XAU, XTS, XXX) are refused.
 The other tables are `outbox` (events waiting for Kafka), `inbox` and `order_timeline` (the
 consumer's deduplication and its projection), and `idempotency_keys`.
 
-## Order state machine
+## States, and the database that enforces them
 
 ```text
 PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED -> REFUNDING -> REFUNDED
@@ -59,7 +53,7 @@ Forward states record what has been done; compensating states record what is bei
 table lives in `OrderState` and, independently, in a CHECK constraint. A CHECK constraint can't
 see the old row, so a trigger copies the old state into `previous_state` on every update and the
 constraint judges the pair. (The trigger also overwrites any `previous_state` a client tries to
-set, so it can't be forged.) A detail that matters: `(NULL, 'COMPLETED') IN (...)` is NULL, and a
+set, so it can't be forged.) There is a trap here: `(NULL, 'COMPLETED') IN (...)` is NULL, and a
 NULL CHECK passes, so the constraint is a `CASE` that requires `PENDING` when there is no
 previous state.
 
@@ -73,7 +67,7 @@ pairs through raw SQL and checks the database accepts exactly the 15 legal ones.
 Every write the saga makes is a compare-and-set on `(id, lease_token, state)`, so a worker that
 lost its lease, or that is looking at an old copy of the row, changes nothing.
 
-## Saga execution
+## Running the saga
 
 The saga is orchestrated, as in Garcia-Molina and Salem's
 [*Sagas*](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf): one component decides
@@ -81,7 +75,9 @@ the next step from the stored state, rather than services reacting to each other
 three dependencies and a strict order between them, the whole flow is easier to read, test and
 change in one place.
 
-**Claiming.** A dispatcher thread runs
+### Claiming orders
+
+A dispatcher thread runs
 
 ```sql
 WITH due AS (
@@ -100,45 +96,60 @@ the lease, because no transaction stays open across a call to another system. A 
 open across a two-second provider timeout would pin a pooled connection and row locks for that
 long, under load, for every order in flight.
 
-**Running.** Each claimed order runs on its own virtual thread, up to 256 at a time. The thread
+### Running steps
+
+Each claimed order runs on its own virtual thread, up to 256 at a time. The thread
 runs steps until the order is terminal, has to wait for a retry, or loses its lease. Each step
 returns one of three outcomes: advance to a state (with what it learned, such as the payment id),
 retry later, or fail into a compensation. The worker turns that into one fenced update plus its
 outbox event, in one transaction. A new order wakes the dispatcher after commit instead of
 waiting for the 100 ms poll.
 
-**Retries.** Delays use exponential backoff with full jitter: attempt *n* waits a uniform random
-time in `[0, min(30 s, 200 ms * 2^n)]` (Marc Brooker,
-[*Exponential Backoff And Jitter*](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)).
-Spreading retries over the whole window keeps workers from hitting a recovering dependency in
-lockstep. A step can ask for a minimum delay; after an unknown outcome it asks for two seconds,
-so the provider has time to finish before we ask what happened.
+### Retries
 
-**Deadlines.** A forward step that has not succeeded after 8 attempts or 2 minutes gives up and
+Delays use exponential backoff with full jitter: attempt *n* waits a uniform random
+time in `[0, min(30 s, 200 ms * 2^n)]`, rather than the ceiling itself or the ceiling plus a
+little noise. When a dependency recovers from an outage, every order that failed during it is
+due again; with a fixed or lightly jittered delay they come back together and knock it over
+again. Drawing from the whole window spreads them out evenly, at the cost of some retries coming
+sooner than a plain exponential schedule would allow. A step can ask for a
+minimum delay; after an unknown outcome it asks for two seconds, so the provider has time to
+finish before we ask what happened.
+
+### Deadlines
+
+A forward step that has not succeeded after 8 attempts or 2 minutes gives up and
 the order goes to the step's compensation. Compensations have no deadline: giving up on a refund
 would leave the customer charged. They retry with backoff capped at 30 s, count retries in a
 metric, and log at error level after ten attempts, which is the signal for a human.
 
-**Crashes.** If the process dies mid-step, nothing is written; the lease simply runs out (30 s by
+### Crashes
+
+If the process dies mid-step, nothing is written; the lease simply runs out (30 s by
 default). The next worker to claim the order sees that the previous lease expired instead of
 being released and passes `resumed = true` to the step. A step that resumes, or retries, checks
-what already happened before doing anything (see the next section). The lease must be longer
+what already happened before doing anything (see
+[When nobody knows what happened](#when-nobody-knows-what-happened)). The lease must be longer
 than the slowest single step, which is bounded by the dependency timeouts.
 
-**Cancel and refund.** A cancel sets a flag, accepted only before capture, and pulls the order's
+### Cancel and refund
+
+A cancel sets a flag, accepted only before capture, and pulls the order's
 next attempt forward. The worker checks the flag before each forward step and diverts to that
 step's compensation; the order ends `CANCELLED` unless something else had already failed. A
 cancel that lands while a capture is in flight takes effect after it: the capture completes, the
 next decision sees the flag, and the money is refunded. A refund moves a `COMPLETED` order to
 `REFUNDING` and the worker refunds whatever the provider still holds.
 
-**Compensations look before they act.** `CANCELLING_SHIPMENT` asks the carrier for a shipment by
+### Compensations look before they act
+
+`CANCELLING_SHIPMENT` asks the carrier for a shipment by
 reference and cancels it if one exists. `REVERSING_PAYMENT` asks the provider for every payment
 with the order's reference and voids each hold and refunds each capture. Neither trusts the order
 row, because the forward step they undo may have happened without the row knowing. Running
 either twice changes nothing the second time.
 
-## Unknown outcomes
+## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what
 the design rests on:
@@ -179,7 +190,7 @@ re-reads the provider's list before acting) narrow this; closing it entirely nee
 offer either a status query by idempotency key or a guarantee about in-flight requests, which
 real providers document in different ways.
 
-## Transactional outbox
+## Getting events to Kafka
 
 Publishing to Kafka from the request (or the step) and committing to Postgres are two systems; a
 crash between them loses the event or publishes one for a change that rolled back. The
@@ -216,7 +227,7 @@ after seven days.
 When Kafka is down, orders keep flowing: readiness depends on Postgres only, events wait in the
 table, and a gauge shows the backlog and the age of its oldest event.
 
-## Consumer and inbox
+## The consumer side
 
 The order timeline (`GET /v1/orders/{id}/events`) is built by a Kafka consumer, as any downstream
 system would build its view. Each event is applied in one transaction that first inserts
@@ -248,7 +259,7 @@ differs from Stripe, which replays 500s, and is safe here because the rollback g
 happened. A claim whose request died holds a lock for 60 s, after which another request with the
 same key takes it over; its work had rolled back with it, so starting over is safe.
 
-## Failure modes
+## What fails, and what happens next
 
 | Failure | Effect | Recovery |
 |---|---|---|
@@ -294,7 +305,9 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 
 ## Security
 
-**Authentication.** Merchants authenticate with `Authorization: Bearer <key>`. Keys are 32 random
+### Authentication
+
+Merchants authenticate with `Authorization: Bearer <key>`. Keys are 32 random
 bytes (`pf_` plus base64url) and configuration holds only their SHA-256, as `merchant:hash`
 pairs, so a leaked config or database dump has no usable keys. SHA-256 instead of a password hash
 such as bcrypt: the keys have 256 bits of entropy, so there is nothing to brute-force, and a slow
@@ -302,29 +315,39 @@ hash on every request would cost CPU for nothing. A presented key is hashed once
 every configured hash using `MessageDigest.isEqual`, without stopping at a match, so the timing
 reveals neither which merchant matched nor how much of a hash did.
 
-**Authorization.** Every query on orders, idempotency keys and the timeline includes the merchant
+### Authorization
+
+Every query on orders, idempotency keys and the timeline includes the merchant
 id. Another merchant's order is a 404, indistinguishable from a missing one; `OrderApiTest`
 checks every endpoint.
 
-**Input.** Bean Validation on every field, and the same rules again in the database for the ones
+### Input
+
+Bean Validation on every field, and the same rules again in the database for the ones
 that matter (state, amount, currency format, merchant format). JSON is read strictly: unknown
 fields, strings where numbers belong (`"2"`), decimals where integers belong and numbers that
 overflow are all 400s. The total is computed on the server. Free text may contain markup, which
 is stored and returned as data inside JSON and never rendered; control characters are refused.
 Bodies are capped before they are buffered, including chunked ones.
 
-**Outbound credentials.** Provider keys are only sent to the base URL from configuration, which
+### Outbound credentials
+
+Provider keys are only sent to the base URL from configuration, which
 must be a plain `http(s)://host[:port][/path]` with no user info, query or fragment. Ids that come
 back in provider responses (a payment id, a shipment id) are encoded as single path segments, so
 a hostile id can't add path components or a query; the client doesn't follow redirects. Responses
 are read tolerantly (unknown fields ignored), because a provider adding a field shouldn't cause an
 outage.
 
-**Secrets in logs.** Keys are never logged; `SimulatorKey` and `ApiKeys` override `toString`.
+### Secrets in logs
+
+Keys are never logged; `SimulatorKey` and `ApiKeys` override `toString`.
 `ObservabilityTest` runs a full order and checks no API key, provider key or `Bearer` string
 appears in any log line.
 
-**Operational surface.** Actuator runs on a separate management port bound to 127.0.0.1 and
+### Operational surface
+
+Actuator runs on a separate management port bound to 127.0.0.1 and
 exposes only health and Prometheus; liveness and readiness are also served on the API port. The
 fake providers require their own bearer key and can be switched off
 (`PAYFLOW_SIMULATOR_ENABLED=false`); a production deployment would. The container image is
@@ -357,23 +380,28 @@ line (they are fixed in 7.0): Server-Sent Event fragment rendering and `XsltView
 neither, and `osv-scanner.toml` records why they are ignored. Moving to Spring Boot 4 removes
 both.
 
-## Scaling out
+## Growing past one database
 
 The design already runs as several identical instances against one Postgres: workers and relays
 coordinate only through `SKIP LOCKED`, leases and compare-and-set, and nothing is held in memory
 between requests. What would change with more volume:
 
-- **Commits.** An order costs around a dozen commits (idempotency claim and response, saga
-  transitions, inbox). At the benchmark's saturation point Postgres waits on WAL writes. Grouping
-  a worker's transition and the next step's lease extension, or applying several consumer events
-  per transaction, would cut that; so would faster storage than a laptop's virtual disk.
-- **Hot tables.** `orders` is updated several times per order and `outbox` is insert-then-update.
-  Partitioning `outbox` by day turns cleanup into dropping partitions instead of deletes.
-- **Relay throughput.** One relay per instance with head-of-queue locking scales with the number
-  of distinct orders in flight. Logical decoding (reading the WAL with Debezium or a native
-  subscriber) would remove the polling and the update per event, at the cost of another moving
-  part.
-- **Many merchants.** Rate limits per merchant and per dependency would stop one merchant's burst
-  or one slow provider from occupying all 256 in-flight slots.
-- **Multiple regions.** The saga assumes one Postgres primary. Running across regions means
-  choosing a home region per order and routing its steps there, rather than replicating leases.
+Commits come first. An order costs around a dozen of them (idempotency claim and response, saga
+transitions, inbox), and at the benchmark's saturation point Postgres waits on WAL writes.
+Grouping a worker's transition with the next step's lease extension, or applying several
+consumer events per transaction, would cut that; so would faster storage than a laptop's
+virtual disk.
+
+`orders` is updated several times per order and `outbox` is insert-then-update, which makes them
+the hot tables. Partitioning `outbox` by day turns cleanup into dropping partitions instead of
+deletes.
+
+One relay per instance with head-of-queue locking scales with the number of distinct orders in
+flight. Logical decoding (reading the WAL with Debezium or a native subscriber) would remove the
+polling and the update per event, at the cost of another moving part.
+
+With many merchants, rate limits per merchant and per dependency would stop one merchant's burst
+or one slow provider from occupying all 256 in-flight slots.
+
+The saga assumes one Postgres primary. Running across regions means choosing a home region per
+order and routing its steps there, rather than replicating leases.

@@ -26,42 +26,7 @@ order.payment_captured
 order.completed
 ```
 
-## What it does
-
-An order moves through reserve stock, authorize the card, capture, and book the shipment. If a
-step fails for good (a decline, no stock, an address the carrier refuses) or runs out of time,
-the saga undoes what came before it: cancel the shipment, void or refund the payment, release the
-stock. The order ends `COMPLETED`, `FAILED`, `CANCELLED` or, after a refund, `REFUNDED`.
-
-The interesting failure is the one where nobody knows what happened. A capture that times out
-may have moved the money. payflow never retries a payment call blind: when a step runs again,
-after a timeout or after a crash, it first asks the provider what exists for the order and acts
-on that. Every attempt of a step also carries the same idempotency key. The tests switch the fake
-provider's key handling off, and money still moves exactly once.
-
-- **Crash-safe saga.** State lives in Postgres, not memory. Workers lease orders with
-  `FOR UPDATE SKIP LOCKED`, hold no transaction across a network call, and fence every write
-  with the lease token. A killed process leaves its lease to expire; the next worker resumes the
-  step and is told it is resuming.
-- **State machine in the database.** Illegal transitions are refused by a CHECK constraint, and
-  further constraints tie terminal states to money: a completed order is fully captured, a failed
-  one kept nothing.
-- **Transactional outbox** ([Richardson](https://microservices.io/patterns/data/transactional-outbox.html)).
-  Each state change writes its event in the same transaction; a relay publishes to Kafka in order
-  per order, at least once. The consumer deduplicates through an inbox table.
-- **Idempotency keys** with Stripe's rules ([Leach, *Implementing Stripe-like Idempotency Keys in Postgres*](https://brandur.org/idempotency-keys)):
-  same key and body replays the stored response, errors included; a different body is a 422; a
-  concurrent duplicate is a 409. The response is stored in the same transaction as the order.
-- **Retries** with exponential backoff and full jitter, a deadline per forward step, and
-  compensations that never give up.
-- **Money** as `long` minor units with an ISO 4217 currency, overflow-checked.
-- **Fake providers** that fail like real ones: errors, latency, and calls that are applied but
-  never answered. They run in-process or as their own container.
-- **Production basics.** Hashed API keys compared in constant time and scoped per merchant,
-  strict JSON with size limits, JSON logs with a correlation id that follows an order into Kafka
-  headers, Prometheus metrics, liveness and readiness probes, actuator on a loopback port.
-
-## Quick start
+## Running locally
 
 ```console
 $ docker compose up -d --build
@@ -87,7 +52,48 @@ Configuration is environment variables; the main ones are listed in
 [application.yml](src/main/resources/application.yml) and the limits in
 [docs/DESIGN.md](docs/DESIGN.md#limits).
 
-## API
+## The order flow
+
+An order moves through reserve stock, authorize the card, capture, and book the shipment. If a
+step fails for good (a decline, no stock, an address the carrier refuses) or runs out of time,
+the saga undoes what came before it: cancel the shipment, void or refund the payment, release the
+stock. The order ends `COMPLETED`, `FAILED`, `CANCELLED` or, after a refund, `REFUNDED`.
+
+The interesting failure is the one where nobody knows what happened. A capture that times out
+may have moved the money. payflow never retries a payment call blind: when a step runs again,
+after a timeout or after a crash, it first asks the provider what exists for the order and acts
+on that. Every attempt of a step also carries the same idempotency key. The tests switch the fake
+provider's key handling off, and money still moves exactly once.
+
+The saga is crash-safe because its state lives in Postgres, not memory. Workers lease orders
+with `FOR UPDATE SKIP LOCKED`, hold no transaction across a network call, and fence every write
+with the lease token. A killed process leaves its lease to expire, and the next worker resumes
+the step knowing it is a resume.
+
+The state machine is enforced by the database too. A CHECK constraint refuses illegal
+transitions, and further constraints tie terminal states to money: a completed order is fully
+captured, and a failed one kept nothing.
+
+Events leave through a transactional outbox
+([Richardson](https://microservices.io/patterns/data/transactional-outbox.html)): each state
+change writes its event in the same transaction, and a relay publishes to Kafka in order per
+order, at least once. The consumer deduplicates through an inbox table.
+
+Idempotency keys follow Stripe's rules
+([Leach, *Implementing Stripe-like Idempotency Keys in Postgres*](https://brandur.org/idempotency-keys)).
+The same key and body replays the stored response, errors included; a different body is a 422;
+a concurrent duplicate is a 409. The response is stored in the same transaction as the order.
+
+Retries use exponential backoff with full jitter, each forward step has a deadline, and
+compensations never give up. Money is `long` minor units with an ISO 4217 currency, and every
+sum is overflow-checked. The fake providers fail like real ones, with errors, latency and calls
+that are applied but never answered, and they run in-process or as their own container.
+
+Around the saga sit hashed API keys compared in constant time and scoped per merchant, strict
+JSON with size limits, JSON logs with a correlation id that follows an order into Kafka headers,
+Prometheus metrics, liveness and readiness probes, and actuator on a loopback port.
+
+## HTTP API
 
 All `/v1` endpoints take `Authorization: Bearer <key>`. Every POST needs an `Idempotency-Key`.
 The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), also served at
@@ -107,10 +113,10 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 `invalid_argument` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
 `not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
 `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
-`idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a 404, the same as a
-missing one.
+`idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a
+404, the same as a missing one.
 
-## How it is tested
+## Test suite
 
 | What | How |
 |---|---|
@@ -131,7 +137,7 @@ $ ./gradlew check          # format, Error Prone, 242 tests, 90% line coverage f
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
-## Performance
+## Load results
 
 `bench/run.sh` on an Apple M4 Max: payflow runs natively with the in-process providers (no added
 latency), Postgres and Redpanda run in Docker Desktop, k6 creates orders at a fixed rate for 30 s
@@ -152,13 +158,12 @@ queueing. Sampling `pg_stat_activity` at saturation shows the backends waiting o
 `WalSync`, the Postgres write-ahead log on Docker Desktop's virtual disk, and the service's
 connection pool full of requests waiting on those commits.
 
-## Design
+## Code and design notes
 
-[docs/DESIGN.md](docs/DESIGN.md) covers the state machine, how the saga runs and recovers,
-unknown outcomes, the outbox and inbox, idempotency keys, failure modes, limits, security, the
-dependencies and why each is there, and what would change at a larger scale.
-
-## Layout
+The reasoning behind all of this is in [docs/DESIGN.md](docs/DESIGN.md): the state machine, how
+the saga runs and recovers, unknown outcomes, the outbox and inbox, idempotency keys, failure
+modes, limits, security, the dependencies and why each is there, and what would change at a
+larger scale. The code is laid out like this:
 
 ```text
 src/main/java/io/github/laiwf94/payflow/
