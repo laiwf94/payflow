@@ -4,6 +4,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.redpanda.RedpandaContainer;
 
 /** Points Spring at the shared containers. Import it from any {@code @SpringBootTest}. */
 @TestConfiguration(proxyBeanMethods = false)
@@ -13,5 +14,11 @@ public class TestInfrastructure {
   @ServiceConnection
   PostgreSQLContainer<?> postgres() {
     return Containers.POSTGRES;
+  }
+
+  @Bean
+  @ServiceConnection
+  RedpandaContainer redpanda() {
+    return Containers.REDPANDA;
   }
 }

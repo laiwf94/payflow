@@ -17,6 +17,19 @@ spring:
     default-property-inclusion: non_null
     deserialization:
       fail-on-unknown-properties: true
+  kafka:
+    bootstrap-servers: ${PAYFLOW_KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+        linger.ms: 5
+        max.block.ms: 5000
 server:
   port: ${PAYFLOW_PORT:8080}
 payflow:
