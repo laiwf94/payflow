@@ -23,7 +23,6 @@ import io.github.laiwf94.payflow.sim.ShippingSimulator;
 import io.github.laiwf94.payflow.sim.SimulatorSettings;
 import io.github.laiwf94.payflow.support.Db;
 import io.github.laiwf94.payflow.support.MutableClock;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
@@ -35,7 +34,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /**
@@ -49,7 +47,6 @@ import org.springframework.jdbc.core.simple.JdbcClient;
       "payflow.simulator.answer-delay=600ms",
       "payflow.dependencies.payment.read-timeout=300ms"
     })
-@Import(TestInfrastructure.class)
 class UnknownOutcomeTest {
 
   @Autowired OrderRepository repo;

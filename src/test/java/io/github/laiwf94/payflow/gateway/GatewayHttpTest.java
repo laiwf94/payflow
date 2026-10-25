@@ -12,7 +12,6 @@ import io.github.laiwf94.payflow.sim.Faults;
 import io.github.laiwf94.payflow.sim.InventorySimulator;
 import io.github.laiwf94.payflow.sim.PaymentProviderSimulator;
 import io.github.laiwf94.payflow.sim.ShippingSimulator;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -21,7 +20,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 
 /** The HTTP adapters against the in-process simulators, over real sockets. */
 @SpringBootTest(
@@ -31,7 +29,6 @@ import org.springframework.context.annotation.Import;
       "payflow.dependencies.payment.read-timeout=300ms",
       "payflow.dependencies.shipping.read-timeout=300ms"
     })
-@Import(TestInfrastructure.class)
 class GatewayHttpTest {
 
   @Autowired PaymentGateway payments;

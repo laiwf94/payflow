@@ -17,6 +17,10 @@ spring:
     default-property-inclusion: non_null
     deserialization:
       fail-on-unknown-properties: true
+      accept-float-as-int: false
+      fail-on-null-for-primitives: true
+    mapper:
+      allow-coercion-of-scalars: false
   kafka:
     bootstrap-servers: ${PAYFLOW_KAFKA_BOOTSTRAP:localhost:9092}
     producer:

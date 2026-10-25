@@ -2,7 +2,6 @@ package io.github.laiwf94.payflow.security;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import io.github.laiwf94.payflow.support.TestKeys;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -11,10 +10,8 @@ import java.net.http.HttpResponse;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Import;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(TestInfrastructure.class)
 class ApiKeyAuthTest {
 
   @LocalServerPort int port;

@@ -5,15 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.laiwf94.payflow.security.ApiKeys;
 import io.github.laiwf94.payflow.support.Containers;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.annotation.Import;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(TestInfrastructure.class)
 class PayflowApplicationTest {
 
   @Autowired ApplicationContext context;

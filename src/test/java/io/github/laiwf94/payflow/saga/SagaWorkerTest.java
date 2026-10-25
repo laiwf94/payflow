@@ -13,7 +13,6 @@ import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.saga.StepOutcome.Fields;
 import io.github.laiwf94.payflow.support.Db;
 import io.github.laiwf94.payflow.support.MutableClock;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -29,14 +28,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /** The worker's mechanics with scripted steps, against real Postgres. */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.NONE,
     properties = "payflow.saga.enabled=false")
-@Import(TestInfrastructure.class)
 class SagaWorkerTest {
 
   @Autowired OrderRepository repo;

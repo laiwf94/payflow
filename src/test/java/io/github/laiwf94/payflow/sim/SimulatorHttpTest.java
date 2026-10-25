@@ -3,7 +3,6 @@ package io.github.laiwf94.payflow.sim;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -16,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Import;
 
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -24,7 +22,6 @@ import org.springframework.context.annotation.Import;
       "payflow.simulator.key=" + SimulatorHttpTest.KEY,
       "payflow.simulator.answer-delay=800ms"
     })
-@Import(TestInfrastructure.class)
 class SimulatorHttpTest {
 
   static final String KEY = "test-simulator-key-0123456789";

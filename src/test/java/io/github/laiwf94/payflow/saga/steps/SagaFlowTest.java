@@ -25,7 +25,6 @@ import io.github.laiwf94.payflow.sim.PaymentProviderSimulator.LedgerEntry;
 import io.github.laiwf94.payflow.sim.ShippingSimulator;
 import io.github.laiwf94.payflow.support.Db;
 import io.github.laiwf94.payflow.support.MutableClock;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -38,12 +37,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 /** Every saga path end to end: real steps, HTTP adapters, in-process simulators, Postgres. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(TestInfrastructure.class)
 class SagaFlowTest {
 
   @Autowired OrderRepository repo;

@@ -9,7 +9,6 @@ import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.support.Containers;
 import io.github.laiwf94.payflow.support.Db;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -27,7 +26,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.annotation.DirtiesContext;
@@ -37,7 +35,6 @@ import org.springframework.test.annotation.DirtiesContext;
     properties = {"payflow.timeline.enabled=true", "payflow.outbox.enabled=true"})
 // Its relay and consumer keep running while the context is cached; close it so they stop.
 @DirtiesContext
-@Import(TestInfrastructure.class)
 class TimelineConsumerTest {
 
   static final String TOPIC = "payflow.order-events";

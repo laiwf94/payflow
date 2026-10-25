@@ -15,7 +15,6 @@ import io.github.laiwf94.payflow.saga.CrashPoints;
 import io.github.laiwf94.payflow.support.Containers;
 import io.github.laiwf94.payflow.support.Db;
 import io.github.laiwf94.payflow.support.MutableClock;
-import io.github.laiwf94.payflow.support.TestInfrastructure;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -41,7 +40,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -49,7 +47,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** The outbox against real Postgres and Redpanda. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@Import(TestInfrastructure.class)
 class OutboxRelayTest {
 
   @Autowired JdbcClient jdbc;

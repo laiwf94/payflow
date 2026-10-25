@@ -13,7 +13,8 @@ public final class Containers {
           .withUsername("payflow")
           .withPassword("payflow")
           // Every cached Spring test context keeps its own pool.
-          .withCommand("postgres", "-c", "max_connections=400");
+          .withCommand("postgres", "-c", "max_connections=300")
+          .withSharedMemorySize(512L * 1024 * 1024);
 
   public static final RedpandaContainer REDPANDA =
       new RedpandaContainer("docker.redpanda.com/redpandadata/redpanda:v25.2.9");
