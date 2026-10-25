@@ -30,6 +30,14 @@ spring:
         request.timeout.ms: 5000
         linger.ms: 5
         max.block.ms: 5000
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        isolation.level: read_committed
+    listener:
+      ack-mode: record
 server:
   port: ${PAYFLOW_PORT:8080}
 payflow:

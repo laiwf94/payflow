@@ -11,7 +11,9 @@ public final class Containers {
       new PostgreSQLContainer<>(DockerImageName.parse("postgres:17.10-alpine"))
           .withDatabaseName("payflow")
           .withUsername("payflow")
-          .withPassword("payflow");
+          .withPassword("payflow")
+          // Every cached Spring test context keeps its own pool.
+          .withCommand("postgres", "-c", "max_connections=400");
 
   public static final RedpandaContainer REDPANDA =
       new RedpandaContainer("docker.redpanda.com/redpandadata/redpanda:v25.2.9");

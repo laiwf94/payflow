@@ -28,6 +28,9 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -62,9 +65,17 @@ class OutboxRelayTest {
   private String topic;
 
   @BeforeEach
-  void setUp() {
+  void setUp() throws Exception {
     Db.truncateAll(jdbc);
     topic = "test-events-" + UUID.randomUUID();
+    // Created up front: letting the first send auto-create it races the consumer's subscription.
+    try (AdminClient admin =
+        AdminClient.create(
+            Map.of(
+                AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG,
+                Containers.REDPANDA.getBootstrapServers()))) {
+      admin.createTopics(List.of(new NewTopic(topic, 3, (short) 1))).all().get();
+    }
   }
 
   private OutboxProperties props() {
@@ -227,8 +238,8 @@ class OutboxRelayTest {
     cfg.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
     cfg.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
     cfg.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 300);
-    KafkaTemplate<String, String> down =
-        new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(cfg));
+    DefaultKafkaProducerFactory<String, String> factory = new DefaultKafkaProducerFactory<>(cfg);
+    KafkaTemplate<String, String> down = new KafkaTemplate<>(factory);
     OutboxRelay r =
         new OutboxRelay(
             jdbc,
@@ -246,8 +257,12 @@ class OutboxRelayTest {
             signal,
             clock,
             CrashPoints.NONE);
-    assertThatThrownBy(r::relayOnce).isInstanceOf(RuntimeException.class);
-    assertThat(unpublished()).isEqualTo(2);
+    try {
+      assertThatThrownBy(r::relayOnce).isInstanceOf(RuntimeException.class);
+      assertThat(unpublished()).isEqualTo(2);
+    } finally {
+      factory.destroy();
+    }
   }
 
   @Test
