@@ -31,7 +31,7 @@ trap cleanup EXIT
 # (Docker Desktop's virtual disk, here) is not the limit.
 PG_DATA=()
 [[ ${PG_TMPFS:-0} == 1 ]] && PG_DATA=(--tmpfs /var/lib/postgresql/data)
-docker run -d --rm --name payflow-bench-pg -p 127.0.0.1:$PG_PORT:5432 "${PG_DATA[@]}" \
+docker run -d --rm --name payflow-bench-pg -p 127.0.0.1:$PG_PORT:5432 ${PG_DATA[@]+"${PG_DATA[@]}"} \
   -e POSTGRES_DB=payflow -e POSTGRES_USER=payflow -e POSTGRES_PASSWORD=bench \
   postgres:17.10-alpine -c max_connections=200 -c synchronous_commit=${PG_SYNC_COMMIT:-on} > /dev/null
 docker run -d --rm --name payflow-bench-kafka -p 127.0.0.1:$KAFKA_PORT:$KAFKA_PORT \
