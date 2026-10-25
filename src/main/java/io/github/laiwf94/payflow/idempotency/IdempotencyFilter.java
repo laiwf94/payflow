@@ -202,7 +202,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
    * Hash of method, path and body. JSON bodies are hashed in a canonical form (sorted keys, no
    * whitespace), so a client that reorders fields on retry still matches.
    */
-  byte[] hash(String method, String path, byte[] body) {
+  public byte[] hash(String method, String path, byte[] body) {
     byte[] normal = body;
     if (body.length > 0) {
       try {

@@ -1,0 +1,385 @@
+openapi: 3.1.0
+info:
+  title: payflow
+  version: 0.1.0
+  description: |
+    Payment orchestration for orders. Creating an order starts a saga that reserves stock,
+    authorizes and captures the payment and books the shipment, undoing earlier steps when a
+    later one fails. Amounts are integers in the currency's minor units (1999 EUR is 19.99 euro).
+
+    Every POST needs an `Idempotency-Key`. Retrying with the same key and body returns the first
+    response, errors included.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8080
+security:
+  - apiKey: []
+paths:
+  /v1/orders:
+    post:
+      operationId: createOrder
+      summary: Create an order and start its saga
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrder'
+      responses:
+        '201':
+          description: Created. The order starts in PENDING; poll it or read its events.
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/KeyInUse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/KeyReused'
+  /v1/orders/{id}:
+    get:
+      operationId: getOrder
+      summary: Get an order
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/orders/{id}/cancel:
+    post:
+      operationId: cancelOrder
+      summary: Cancel an order that hasn't been captured yet
+      description: |
+        Accepted when the order is PENDING, INVENTORY_RESERVED or PAYMENT_AUTHORIZED. The saga
+        stops at its next step, releases what it reserved and ends in CANCELLED.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Cancel requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/WrongState'
+  /v1/orders/{id}/refund:
+    post:
+      operationId: refundOrder
+      summary: Refund a completed order in full
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Refund started; the order moves to REFUNDING and then REFUNDED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/WrongState'
+  /v1/orders/{id}/events:
+    get:
+      operationId: getOrderEvents
+      summary: The order's history, as recorded from its events
+      description: Built by an event consumer, so it can trail the order by a moment.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Events in order.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TimelineEntry'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: A merchant API key from `payflow keygen`.
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 1-255 printable ASCII characters without spaces. Kept for 24 hours.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Correlation id, echoed back and carried through logs and events.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+  responses:
+    InvalidArgument:
+      description: The request is malformed or a field is invalid (`invalid_argument`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthenticated:
+      description: Missing or invalid API key (`unauthenticated`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No such order for this merchant (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    WrongState:
+      description: The order's state doesn't allow this (`order_not_cancellable`, `order_not_refundable`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    KeyInUse:
+      description: A request with this Idempotency-Key is still running (`idempotency_key_in_use`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    KeyReused:
+      description: The Idempotency-Key was used for a different request (`idempotency_key_reused`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: The body is over 64 KiB (`payload_too_large`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnsupportedMediaType:
+      description: The body isn't JSON (`unsupported_media_type`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    CreateOrder:
+      type: object
+      additionalProperties: false
+      required: [items, currency, shipping_address, payment_method]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/LineItem'
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 code with a minor unit (not XAU, XTS, XXX).
+        shipping_address:
+          $ref: '#/components/schemas/Address'
+        payment_method:
+          type: string
+          pattern: '^pm_[a-z0-9_]{1,64}$'
+          description: A payment method token. The simulator declines pm_card_declined, pm_card_insufficient_funds and pm_card_expired.
+    LineItem:
+      type: object
+      additionalProperties: false
+      required: [sku, quantity, unit_amount]
+      properties:
+        sku:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        unit_amount:
+          type: integer
+          minimum: 1
+          maximum: 99999999
+    Address:
+      type: object
+      additionalProperties: false
+      required: [name, line1, city, postal_code, country]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        line1:
+          type: string
+          maxLength: 200
+        line2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        postal_code:
+          type: string
+          pattern: '^[A-Za-z0-9 -]{1,20}$'
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+    Order:
+      type: object
+      additionalProperties: false
+      required:
+        [id, state, amount, currency, items, shipping_address, payment_method, cancel_requested,
+         created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum:
+            [PENDING, INVENTORY_RESERVED, PAYMENT_AUTHORIZED, PAYMENT_CAPTURED, COMPLETED,
+             CANCELLING_SHIPMENT, REVERSING_PAYMENT, RELEASING_INVENTORY, FAILED, CANCELLED,
+             REFUNDING, REFUNDED]
+        amount:
+          type: integer
+          description: Total in minor units, computed from the items.
+        currency:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LineItem'
+        shipping_address:
+          $ref: '#/components/schemas/Address'
+        payment_method:
+          type: string
+        cancel_requested:
+          type: boolean
+        payment:
+          type: object
+          additionalProperties: false
+          required: [id, captured_amount, refunded_amount]
+          properties:
+            id:
+              type: string
+            captured_amount:
+              type: integer
+            refunded_amount:
+              type: integer
+        shipment:
+          type: object
+          additionalProperties: false
+          required: [id, tracking_number]
+          properties:
+            id:
+              type: string
+            tracking_number:
+              type: string
+        failure:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                [out_of_stock, inventory_rejected, payment_declined, capture_failed,
+                 shipping_failed, step_timeout]
+            message:
+              type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TimelineEntry:
+      type: object
+      additionalProperties: false
+      required: [seq, event_type, state, occurred_at]
+      properties:
+        seq:
+          type: integer
+        event_type:
+          type: string
+        state:
+          type: string
+        failure_code:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
