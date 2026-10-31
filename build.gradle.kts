@@ -50,7 +50,10 @@ dependencies {
             "org.apache.tomcat.embed:tomcat-embed-websocket:11.0.27",
             "org.postgresql:postgresql:42.7.14",
             "at.yawk.lz4:lz4-java:1.11.4",
+            "org.xerial.snappy:snappy-java:1.1.10.9",
         ).forEach { implementation(it) }
+        // Error Prone's own Guava runs inside javac; patched the same way.
+        errorprone("com.google.guava:guava:33.7.2-jre")
     }
 
     errorprone("com.google.errorprone:error_prone_core:2.50.0")
