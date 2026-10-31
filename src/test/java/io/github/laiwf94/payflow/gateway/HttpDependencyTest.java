@@ -3,7 +3,6 @@ package io.github.laiwf94.payflow.gateway;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.sim.SimulatorKey;
@@ -21,6 +20,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.web.client.RestClient;
+import tools.jackson.databind.ObjectMapper;
 
 /** Outcome classification against a server that answers whatever the test wants. */
 class HttpDependencyTest {

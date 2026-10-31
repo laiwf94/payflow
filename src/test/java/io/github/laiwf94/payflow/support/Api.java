@@ -1,7 +1,5 @@
 package io.github.laiwf94.payflow.support;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -9,6 +7,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.UUID;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /** A small HTTP client for API tests, over a real socket. */
 public final class Api {
@@ -20,7 +20,7 @@ public final class Api {
     }
 
     public String errorCode() {
-      return json == null ? null : json.path("error").path("code").asText(null);
+      return json == null ? null : json.path("error").path("code").asString(null);
     }
   }
 

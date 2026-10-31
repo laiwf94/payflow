@@ -1,6 +1,5 @@
 package io.github.laiwf94.payflow.idempotency;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.security.SecurityConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -8,6 +7,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.ObjectMapper;
 
 /** Idempotency keys on the merchant API, after authentication and the body limit. */
 @Configuration(proxyBeanMethods = false)

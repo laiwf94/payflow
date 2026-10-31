@@ -1,8 +1,5 @@
 package io.github.laiwf94.payflow.idempotency;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import io.github.laiwf94.payflow.api.ApiErrors;
 import io.github.laiwf94.payflow.api.RequestIds;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
@@ -28,6 +25,10 @@ import org.springframework.http.MediaType;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingResponseWrapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.SerializationFeature;
 
 /**
  * Stripe-style idempotency for every POST on the merchant API.
@@ -63,7 +64,8 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
     this.store = store;
     this.tx = tx;
     this.json = json;
-    this.canonical = json.copy().configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true);
+    this.canonical =
+        json.rebuild().configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true).build();
     this.meters = meters;
   }
 
@@ -221,7 +223,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
         JsonNode tree = json.readTree(body);
         Object asObject = canonical.treeToValue(tree, Object.class);
         normal = canonical.writeValueAsBytes(asObject);
-      } catch (IOException e) {
+      } catch (JacksonException e) {
         normal = body;
       }
     }

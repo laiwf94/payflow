@@ -28,7 +28,7 @@ final class HttpInventoryService implements InventoryService {
         (status, body) ->
             status >= 300
                 ? HttpDependency.rejected(body, "reservation_failed")
-                : new CallResult.Success<>(body.path("id").asText(reservationId)));
+                : new CallResult.Success<>(body.path("id").asString(reservationId)));
   }
 
   @Override

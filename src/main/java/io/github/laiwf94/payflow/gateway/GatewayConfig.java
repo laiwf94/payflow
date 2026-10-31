@@ -1,18 +1,18 @@
 package io.github.laiwf94.payflow.gateway;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.sim.SimulatorKey;
 import java.net.URI;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.boot.web.context.WebServerInitializedEvent;
+import org.springframework.boot.web.server.context.WebServerInitializedEvent;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
 
 /** HTTP clients for the payment provider, inventory and carrier. */
 @Configuration(proxyBeanMethods = false)
@@ -116,7 +116,8 @@ public class GatewayConfig {
     }
     // Providers add response fields over time; reading them strictly would turn a harmless
     // addition into an outage.
-    ObjectMapper tolerant = json.copy().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    ObjectMapper tolerant =
+        json.rebuild().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
     return new HttpDependency(
         name, base, key, ep.connectTimeout(), ep.readTimeout(), builder, tolerant);
   }

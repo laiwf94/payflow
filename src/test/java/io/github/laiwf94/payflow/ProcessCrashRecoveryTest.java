@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 
 /**
@@ -73,7 +73,7 @@ class ProcessCrashRecoveryTest {
     log = Path.of("build", "crash-test-" + UUID.randomUUID() + ".log");
     startApp();
     Api api = new Api(appPort, TestKeys.ACME);
-    String id = api.post("/v1/orders", Api.orderBody()).json().get("id").asText();
+    String id = api.post("/v1/orders", Api.orderBody()).json().get("id").asString();
 
     // First kill: inventory is reserved and the authorization call is waiting on the provider.
     await().atMost(Duration.ofSeconds(20)).until(() -> "INVENTORY_RESERVED".equals(state(id)));

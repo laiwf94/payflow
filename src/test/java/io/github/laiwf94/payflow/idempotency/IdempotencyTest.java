@@ -131,7 +131,7 @@ class IdempotencyTest {
     for (String key : new String[] {"", "has space", "x".repeat(256), "tab\tkey"}) {
       Api.Response r = api.post("/v1/orders", Api.orderBody(), "Idempotency-Key", key);
       assertThat(r.status()).as(key).isEqualTo(400);
-      assertThat(r.json().at("/error/message").asText()).contains("Idempotency-Key");
+      assertThat(r.json().at("/error/message").asString()).contains("Idempotency-Key");
     }
     assertThat(api.post("/v1/orders", Api.orderBody(), "Idempotency-Key", "x".repeat(255)).status())
         .isEqualTo(201);
@@ -172,7 +172,7 @@ class IdempotencyTest {
           conflicts++;
         } else {
           assertThat(r.status()).isEqualTo(201);
-          ids.add(r.json().get("id").asText());
+          ids.add(r.json().get("id").asString());
         }
       }
       assertThat(ids).hasSize(1);

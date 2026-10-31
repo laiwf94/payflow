@@ -1,9 +1,6 @@
 package io.github.laiwf94.payflow.timeline;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.outbox.OutboxRelay;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
@@ -12,6 +9,9 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Consumes order events into the timeline. Delivery is at least once; {@link TimelineProjection}
@@ -28,7 +28,7 @@ class TimelineConsumer {
 
   TimelineConsumer(TimelineProjection projection, ObjectMapper json) {
     this.projection = projection;
-    this.json = json.copy().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+    this.json = json.rebuild().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
   }
 
   @KafkaListener(
@@ -59,7 +59,7 @@ class TimelineConsumer {
     OrderEvent e;
     try {
       e = json.readValue(value, OrderEvent.class);
-    } catch (IOException ex) {
+    } catch (JacksonException ex) {
       throw new MalformedEventException("not an order event");
     }
     if (e == null || !e.complete()) {

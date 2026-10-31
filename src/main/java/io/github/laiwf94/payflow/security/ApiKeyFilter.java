@@ -1,6 +1,5 @@
 package io.github.laiwf94.payflow.security;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.api.ApiErrors;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -11,6 +10,7 @@ import java.util.Optional;
 import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.filter.OncePerRequestFilter;
+import tools.jackson.databind.ObjectMapper;
 
 /** Requires {@code Authorization: Bearer <key>} on {@code /v1/*} and records the merchant. */
 public final class ApiKeyFilter extends OncePerRequestFilter {

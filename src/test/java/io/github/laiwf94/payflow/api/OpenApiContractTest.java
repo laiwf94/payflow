@@ -155,7 +155,7 @@ class OpenApiContractTest {
   }
 
   private String createdOrderId() {
-    return api.post("/v1/orders", Api.orderBody()).json().get("id").asText();
+    return api.post("/v1/orders", Api.orderBody()).json().get("id").asString();
   }
 
   /** Validates the response against the spec and notes which documented response it was. */
@@ -222,7 +222,7 @@ class OpenApiContractTest {
   @Test
   void theValidatorCatchesWhatItShould() {
     Object order = Map.of("$ref", "#/components/schemas/Error");
-    var json = new com.fasterxml.jackson.databind.ObjectMapper();
+    var json = new tools.jackson.databind.ObjectMapper();
     assertThat(
             validator.validate(
                 json.valueToTree(Map.of("error", Map.of("code", "x", "message", "y"))), order))

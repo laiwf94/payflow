@@ -4,7 +4,7 @@ The part of a checkout that turns "the customer pays for this order" into calls 
 provider, an inventory system and a carrier, and keeps all of them consistent when any one of
 them fails, times out or the service itself is killed halfway through.
 
-Java 21, Spring Boot, PostgreSQL and Kafka. Each order runs as an orchestrated saga
+Java 25, Spring Boot 4, PostgreSQL and Kafka. Each order runs as an orchestrated saga
 ([Garcia-Molina and Salem, *Sagas*](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf)),
 its events leave through a transactional outbox, and every POST takes a Stripe-style
 idempotency key.

@@ -1,11 +1,2 @@
-# Spring Framework 6.2 (the line Spring Boot 3.5 uses) has no open-source release with these
-# fixes; they are fixed in 7.0.9. Neither applies here: payflow renders no Server-Sent Event
-# fragments and has no XsltView. Revisit when moving to Spring Boot 4.
-
-[[IgnoredVulns]]
-id = "GHSA-j9f9-w8pj-32f8"
-reason = "SSE fragment rendering (CVE-2026-47890); no SSE or view fragments are used"
-
-[[IgnoredVulns]]
-id = "GHSA-pc63-qcmh-9cmg"
-reason = "XsltView path limitation (CVE-2026-47884); no XsltView is used"
+# Known vulnerabilities osv-scanner may ignore, each with an [[IgnoredVulns]] entry giving the id
+# and why it cannot apply to payflow. None today: keep it that way by upgrading instead.

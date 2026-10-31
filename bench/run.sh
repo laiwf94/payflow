@@ -6,7 +6,7 @@
 #   RATES="500" DURATION=60s ./bench/run.sh
 #
 # Saga latency is measured in Postgres: completed_at (updated_at of the COMPLETED row) minus
-# created_at, for orders created during the run. Needs docker, k6, jq and a JDK 21.
+# created_at, for orders created during the run. Needs docker, k6, jq and a JDK 25.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -1,10 +1,10 @@
 package io.github.laiwf94.payflow.gateway;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import io.github.laiwf94.payflow.order.ShippingAddress;
 import java.util.Map;
 import java.util.Optional;
 import org.springframework.http.HttpMethod;
+import tools.jackson.databind.JsonNode;
 
 /** {@link ShippingService} over the carrier's HTTP API. */
 final class HttpShippingService implements ShippingService {

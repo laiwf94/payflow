@@ -1,11 +1,11 @@
 package io.github.laiwf94.payflow.security;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import tools.jackson.databind.ObjectMapper;
 
 /** API key authentication for the merchant API. */
 @Configuration(proxyBeanMethods = false)

@@ -1,7 +1,5 @@
 package io.github.laiwf94.payflow.outbox;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
 import java.time.Instant;
@@ -15,6 +13,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Writes order events into the outbox. It refuses to run outside a transaction: an event written on
@@ -83,7 +83,7 @@ public class OutboxWriter {
   private String write(Object value) {
     try {
       return json.writeValueAsString(value);
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new IllegalStateException("can't serialise event", e);
     }
   }

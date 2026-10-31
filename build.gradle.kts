@@ -4,7 +4,7 @@ import org.springframework.boot.gradle.plugin.SpringBootPlugin
 plugins {
     java
     jacoco
-    id("org.springframework.boot") version "3.5.16"
+    id("org.springframework.boot") version "4.1.1"
     id("com.diffplug.spotless") version "8.9.0"
     id("net.ltgt.errorprone") version "5.1.1"
 }
@@ -14,7 +14,7 @@ version = "0.1.0"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 
@@ -28,43 +28,42 @@ dependencyLocking {
 
 dependencies {
     implementation(platform(SpringBootPlugin.BOM_COORDINATES))
-    implementation("org.springframework.boot:spring-boot-starter-web")
+    implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-restclient")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    implementation("org.springframework.boot:spring-boot-starter-kafka")
+    implementation("org.springframework.boot:spring-boot-starter-flyway")
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")
-    implementation("org.springframework.kafka:spring-kafka")
-    implementation("org.flywaydb:flyway-core")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
 
-    // Security patches newer than the ones Spring Boot 3.5.16 manages. Each is a patch release of
+    // Security patches newer than the ones Spring Boot 4.1.1 manages. Each is a patch release of
     // the line Boot already uses; osv-scanner in CI fails if one of these falls behind again.
     constraints {
         listOf(
-            "com.fasterxml.jackson.core:jackson-core:2.21.7",
-            "com.fasterxml.jackson.core:jackson-databind:2.21.7",
-            "org.apache.tomcat.embed:tomcat-embed-core:10.1.61",
-            "org.apache.tomcat.embed:tomcat-embed-el:10.1.61",
-            "org.apache.tomcat.embed:tomcat-embed-websocket:10.1.61",
+            "tools.jackson.core:jackson-core:3.1.7",
+            "tools.jackson.core:jackson-databind:3.1.7",
+            "org.apache.tomcat.embed:tomcat-embed-core:11.0.27",
+            "org.apache.tomcat.embed:tomcat-embed-el:11.0.27",
+            "org.apache.tomcat.embed:tomcat-embed-websocket:11.0.27",
             "org.postgresql:postgresql:42.7.14",
             "at.yawk.lz4:lz4-java:1.11.4",
-            "org.apache.logging.log4j:log4j-api:2.25.5",
-            "org.apache.logging.log4j:log4j-to-slf4j:2.25.5",
         ).forEach { implementation(it) }
-        testImplementation("org.apache.commons:commons-compress:1.28.0")
     }
 
     errorprone("com.google.errorprone:error_prone_core:2.50.0")
 
     testImplementation(platform(SpringBootPlugin.BOM_COORDINATES))
-    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testImplementation("org.springframework.boot:spring-boot-micrometer-metrics-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.awaitility:awaitility")
-    testImplementation("org.testcontainers:junit-jupiter")
-    testImplementation("org.testcontainers:postgresql")
-    testImplementation("org.testcontainers:redpanda")
-    testImplementation("net.jqwik:jqwik:1.10.1")
+    testImplementation("org.testcontainers:testcontainers-junit-jupiter")
+    testImplementation("org.testcontainers:testcontainers-postgresql")
+    testImplementation("org.testcontainers:testcontainers-redpanda")
+    testImplementation("net.jqwik:jqwik:1.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

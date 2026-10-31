@@ -3,8 +3,6 @@ package io.github.laiwf94.payflow.outbox;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderState;
@@ -44,6 +42,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /** The outbox against real Postgres and Redpanda. */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)

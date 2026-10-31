@@ -3,8 +3,6 @@ package io.github.laiwf94.payflow.observability;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.sim.SimulatorKey;
 import io.github.laiwf94.payflow.support.Api;
 import io.github.laiwf94.payflow.support.TestKeys;
@@ -16,7 +14,7 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -24,6 +22,8 @@ import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.core.env.Environment;
 import org.springframework.test.annotation.DirtiesContext;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /** Logs, metrics, health and what must never appear in logs, on the running application. */
 @SpringBootTest(
@@ -36,7 +36,7 @@ import org.springframework.test.annotation.DirtiesContext;
     })
 @DirtiesContext
 // Spring Boot turns metric exporters off in tests unless asked.
-@AutoConfigureObservability
+@AutoConfigureMetrics
 @ExtendWith(OutputCaptureExtension.class)
 class ObservabilityTest {
 
@@ -68,7 +68,7 @@ class ObservabilityTest {
         api.post("/v1/orders", Api.orderBody(), "X-Request-Id", "trace-0001")
             .json()
             .get("id")
-            .asText();
+            .asString();
     await()
         .atMost(Duration.ofSeconds(30))
         .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() == 5);
@@ -79,25 +79,25 @@ class ObservabilityTest {
                 logLines(output).stream()
                     .anyMatch(
                         l ->
-                            l.path("logger_name").asText().endsWith("TimelineConsumer")
-                                && l.path("message").asText().contains("order.completed")));
+                            l.path("logger_name").asString("").endsWith("TimelineConsumer")
+                                && l.path("message").asString("").contains("order.completed")));
 
     List<JsonNode> traced =
         logLines(output).stream()
-            .filter(l -> "trace-0001".equals(l.path("correlation_id").asText()))
+            .filter(l -> "trace-0001".equals(l.path("correlation_id").asString("")))
             .toList();
     Set<String> loggers =
         traced.stream()
-            .map(l -> l.path("logger_name").asText())
+            .map(l -> l.path("logger_name").asString(""))
             .map(n -> n.substring(n.lastIndexOf('.') + 1))
             .collect(Collectors.toSet());
     assertThat(loggers).contains("OrderService", "SagaWorker", "TimelineConsumer");
     assertThat(traced)
-        .filteredOn(l -> l.path("logger_name").asText().endsWith("SagaWorker"))
-        .allMatch(l -> id.equals(l.path("order_id").asText()));
+        .filteredOn(l -> l.path("logger_name").asString("").endsWith("SagaWorker"))
+        .allMatch(l -> id.equals(l.path("order_id").asString("")));
     assertThat(traced)
-        .filteredOn(l -> l.path("logger_name").asText().endsWith("OrderService"))
-        .allMatch(l -> "acme".equals(l.path("merchant_id").asText()));
+        .filteredOn(l -> l.path("logger_name").asString("").endsWith("OrderService"))
+        .allMatch(l -> "acme".equals(l.path("merchant_id").asString("")));
 
     String all = output.getAll();
     assertThat(all).doesNotContain(TestKeys.ACME);
@@ -124,7 +124,7 @@ class ObservabilityTest {
     assertThat(main.get("/actuator/health").status()).isEqualTo(404);
 
     Api management = new Api(managementPort, null);
-    assertThat(management.get("/actuator/health").json().get("status").asText()).isEqualTo("UP");
+    assertThat(management.get("/actuator/health").json().get("status").asString()).isEqualTo("UP");
     assertThat(management.get("/actuator/health").json().has("components")).isFalse();
     assertThat(management.get("/actuator/prometheus").status()).isEqualTo(200);
     for (String hidden :

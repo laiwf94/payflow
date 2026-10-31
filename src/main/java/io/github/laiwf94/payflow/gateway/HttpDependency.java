@@ -1,8 +1,5 @@
 package io.github.laiwf94.payflow.gateway;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -23,6 +20,9 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.util.UriComponentsBuilder;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * One remote dependency over HTTP, with the outcome rules in one place.
@@ -133,7 +133,7 @@ final class HttpDependency {
     JsonNode node;
     try {
       node = bytes.length == 0 ? json.nullNode() : json.readTree(bytes);
-    } catch (IOException e) {
+    } catch (JacksonException e) {
       return status < 300
           ? new CallResult.Unknown<>(name + " returned an unreadable body")
           : new CallResult.Rejected<>("unreadable_error", name + " returned " + status);
@@ -158,7 +158,7 @@ final class HttpDependency {
   <T> T read(JsonNode node, Class<T> type) {
     try {
       return json.treeToValue(node, type);
-    } catch (IOException e) {
+    } catch (JacksonException e) {
       throw new IllegalStateException(name + " returned an unexpected body", e);
     }
   }
@@ -167,6 +167,6 @@ final class HttpDependency {
   static <T> CallResult<T> rejected(JsonNode body, String fallbackCode) {
     JsonNode err = body.path("error");
     return new CallResult.Rejected<>(
-        err.path("code").asText(fallbackCode), err.path("message").asText(""));
+        err.path("code").asString(fallbackCode), err.path("message").asString(""));
   }
 }

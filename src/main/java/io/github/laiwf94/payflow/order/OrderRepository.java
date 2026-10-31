@@ -1,8 +1,5 @@
 package io.github.laiwf94.payflow.order;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.laiwf94.payflow.money.Money;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -15,6 +12,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Orders in Postgres. Every saga write is a compare-and-set on {@code (id, lease_token, state)}, so
@@ -254,7 +254,7 @@ public class OrderRepository {
   private String write(Object value) {
     try {
       return json.writeValueAsString(value);
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new IllegalStateException("can't serialise order field", e);
     }
   }
@@ -262,7 +262,7 @@ public class OrderRepository {
   private <T> T read(String value, TypeReference<T> type) {
     try {
       return json.readValue(value, type);
-    } catch (JsonProcessingException e) {
+    } catch (JacksonException e) {
       throw new IllegalStateException("stored order field is not valid JSON", e);
     }
   }

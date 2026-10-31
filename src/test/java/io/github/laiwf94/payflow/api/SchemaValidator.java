@@ -1,10 +1,10 @@
 package io.github.laiwf94.payflow.api;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import tools.jackson.databind.JsonNode;
 
 /**
  * Checks JSON against the subset of JSON Schema the OpenAPI document uses: type, required,
@@ -38,12 +38,12 @@ final class SchemaValidator {
       errors.add(path + ": expected " + type + " but was " + v.getNodeType());
       return;
     }
-    if (s.containsKey("enum") && !((List<Object>) s.get("enum")).contains(v.asText())) {
-      errors.add(path + ": " + v.asText() + " is not one of " + s.get("enum"));
+    if (s.containsKey("enum") && !((List<Object>) s.get("enum")).contains(v.asString())) {
+      errors.add(path + ": " + v.asString() + " is not one of " + s.get("enum"));
     }
     if (s.containsKey("pattern")
-        && !Pattern.compile((String) s.get("pattern")).matcher(v.asText()).find()) {
-      errors.add(path + ": " + v.asText() + " doesn't match " + s.get("pattern"));
+        && !Pattern.compile((String) s.get("pattern")).matcher(v.asString()).find()) {
+      errors.add(path + ": " + v.asString() + " doesn't match " + s.get("pattern"));
     }
     if (s.containsKey("minimum") && v.asLong() < ((Number) s.get("minimum")).longValue()) {
       errors.add(path + ": below minimum");
@@ -52,7 +52,7 @@ final class SchemaValidator {
       errors.add(path + ": above maximum");
     }
     if (s.containsKey("maxLength")
-        && v.asText().length() > ((Number) s.get("maxLength")).intValue()) {
+        && v.asString().length() > ((Number) s.get("maxLength")).intValue()) {
       errors.add(path + ": too long");
     }
     if ("object".equals(type)) {
@@ -87,7 +87,7 @@ final class SchemaValidator {
     return switch (type) {
       case "object" -> v.isObject();
       case "array" -> v.isArray();
-      case "string" -> v.isTextual();
+      case "string" -> v.isString();
       case "integer" -> v.isIntegralNumber();
       case "boolean" -> v.isBoolean();
       default -> throw new IllegalArgumentException("unsupported type " + type);

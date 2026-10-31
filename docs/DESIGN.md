@@ -359,7 +359,7 @@ Each one is pinned through the Gradle lockfile, at a release at least two weeks 
 
 | Dependency | Why |
 |---|---|
-| Spring Boot 3.5 (web, JDBC, validation, actuator) | HTTP, configuration, health and metrics are commodity; Boot is what Java teams run. JDBC through `JdbcClient` rather than JPA: every query here is specific (`SKIP LOCKED`, compare-and-set, `ON CONFLICT`) and reads better as SQL than as entity mappings. |
+| Spring Boot 4.1 (web MVC, JDBC, validation, actuator, Jackson 3) | HTTP, configuration, health and metrics are commodity; Boot is what Java teams run. JDBC through `JdbcClient` rather than JPA: every query here is specific (`SKIP LOCKED`, compare-and-set, `ON CONFLICT`) and reads better as SQL than as entity mappings. |
 | Spring for Apache Kafka | Listener containers, retries and the dead-letter recoverer are a lot of careful code to own. |
 | PostgreSQL driver, Flyway | The database and versioned migrations. |
 | Micrometer Prometheus registry | Exposition format for the metrics. |
@@ -373,12 +373,13 @@ saga's persisted state, not to a call stack), an OpenAPI generator (the document
 hand and tested against the routes), and a JSON Schema library (the contract test validates the
 subset the document uses in about a hundred lines).
 
-Spring Boot 3.5.16 manages a few libraries with known vulnerabilities fixed in later patch
-releases (Jackson, Tomcat, the Postgres driver, lz4-java, log4j-api, commons-compress); the build
-pins the patched versions. Two Spring Framework 6.2 advisories have no open-source fix on that
-line (they are fixed in 7.0): Server-Sent Event fragment rendering and `XsltView`. payflow uses
-neither, and `osv-scanner.toml` records why they are ignored. Moving to Spring Boot 4 removes
-both.
+Spring Boot 4.1.1 manages a few libraries with known vulnerabilities fixed in later patch
+releases (Jackson, Tomcat, the Postgres driver, lz4-java); the build pins the patched versions,
+each on the line Boot already uses. The osv-scanner ignore list is empty: the two Spring
+Framework 6.2 advisories it used to carry are fixed in Framework 7.0.9, which Boot 4.1.1 brings.
+JSON goes through Jackson 3, whose defaults are stricter than Jackson 2's; `application.yml`
+still states every strict setting the API relies on (unknown fields, floats as integers, scalar
+coercion, null primitives) rather than trusting the defaults of either version.
 
 ## Growing past one database
 

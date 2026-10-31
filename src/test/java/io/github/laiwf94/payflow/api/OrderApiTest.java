@@ -50,13 +50,13 @@ class OrderApiTest {
   private String create(String body) {
     Api.Response r = api.post("/v1/orders", body);
     assertThat(r.status()).as(r.body()).isEqualTo(201);
-    return r.json().get("id").asText();
+    return r.json().get("id").asString();
   }
 
   private Api.Response awaitState(String id, String state) {
     await()
         .atMost(Duration.ofSeconds(20))
-        .until(() -> api.get("/v1/orders/" + id).json().get("state").asText().equals(state));
+        .until(() -> api.get("/v1/orders/" + id).json().get("state").asString().equals(state));
     return api.get("/v1/orders/" + id);
   }
 
@@ -64,24 +64,24 @@ class OrderApiTest {
   void createRunsTheSagaToCompletion() {
     Api.Response r = api.post("/v1/orders", Api.orderBody(), "X-Request-Id", "req-create-1");
     assertThat(r.status()).isEqualTo(201);
-    String id = r.json().get("id").asText();
+    String id = r.json().get("id").asString();
     assertThat(r.header("Location")).isEqualTo("/v1/orders/" + id);
-    assertThat(r.json().get("state").asText()).isEqualTo("PENDING");
+    assertThat(r.json().get("state").asString()).isEqualTo("PENDING");
     assertThat(r.json().get("amount").asLong()).isEqualTo(2500);
-    assertThat(r.json().get("currency").asText()).isEqualTo("EUR");
+    assertThat(r.json().get("currency").asString()).isEqualTo("EUR");
     assertThat(r.json().get("items").get(0).get("unit_amount").asLong()).isEqualTo(1000);
-    assertThat(r.json().get("shipping_address").get("postal_code").asText()).isEqualTo("12345");
+    assertThat(r.json().get("shipping_address").get("postal_code").asString()).isEqualTo("12345");
 
     Api.Response done = awaitState(id, "COMPLETED");
     assertThat(done.json().at("/payment/captured_amount").asLong()).isEqualTo(2500);
-    assertThat(done.json().at("/shipment/tracking_number").asText()).startsWith("TRK");
+    assertThat(done.json().at("/shipment/tracking_number").asString()).startsWith("TRK");
     assertThat(done.json().has("failure")).isFalse();
 
     await()
         .atMost(Duration.ofSeconds(20))
         .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() == 5);
     assertThat(api.get("/v1/orders/" + id + "/events").json().get("data"))
-        .extracting(n -> n.get("event_type").asText())
+        .extracting(n -> n.get("event_type").asString())
         .containsExactly(
             "order.created",
             "order.inventory_reserved",
@@ -94,8 +94,8 @@ class OrderApiTest {
   void declinedOrderShowsWhy() {
     String id = create(Api.orderBody("pm_card_declined", "12345"));
     Api.Response failed = awaitState(id, "FAILED");
-    assertThat(failed.json().at("/failure/code").asText()).isEqualTo("payment_declined");
-    assertThat(failed.json().at("/failure/message").asText())
+    assertThat(failed.json().at("/failure/code").asString()).isEqualTo("payment_declined");
+    assertThat(failed.json().at("/failure/message").asString())
         .isEqualTo("card declined: card_declined");
   }
 
@@ -207,7 +207,7 @@ class OrderApiTest {
     assertThat(r.status()).as(name + ": " + r.body()).isEqualTo(status);
     if (status == 400) {
       assertThat(r.errorCode()).isEqualTo("invalid_argument");
-      assertThat(r.json().at("/error/request_id").asText()).isNotBlank();
+      assertThat(r.json().at("/error/request_id").asString()).isNotBlank();
     }
   }
 
@@ -219,7 +219,7 @@ class OrderApiTest {
             .replace("\"unit_amount\":500", "\"unit_amount\":50000000");
     Api.Response r = api.post("/v1/orders", body);
     assertThat(r.status()).isEqualTo(400);
-    assertThat(r.json().at("/error/message").asText()).contains("at most 99999999");
+    assertThat(r.json().at("/error/message").asString()).contains("at most 99999999");
   }
 
   @Test
@@ -231,7 +231,7 @@ class OrderApiTest {
     String body = Api.orderBody().replaceFirst("\"items\":\\[[^]]*]", "\"items\":[" + items + "]");
     Api.Response r = api.post("/v1/orders", body);
     assertThat(r.status()).isEqualTo(400);
-    assertThat(r.json().at("/error/message").asText()).startsWith("items:");
+    assertThat(r.json().at("/error/message").asString()).startsWith("items:");
   }
 
   @Test

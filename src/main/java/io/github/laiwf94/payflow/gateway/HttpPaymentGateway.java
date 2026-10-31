@@ -1,11 +1,11 @@
 package io.github.laiwf94.payflow.gateway;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import io.github.laiwf94.payflow.money.Money;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpMethod;
+import tools.jackson.databind.JsonNode;
 
 /** {@link PaymentGateway} over the provider's HTTP API. */
 final class HttpPaymentGateway implements PaymentGateway {
@@ -36,7 +36,8 @@ final class HttpPaymentGateway implements PaymentGateway {
           if (status == 402) {
             JsonNode err = body.path("error");
             return new CallResult.Rejected<>(
-                err.path("decline_code").asText("card_declined"), err.path("message").asText(""));
+                err.path("decline_code").asString("card_declined"),
+                err.path("message").asString(""));
           }
           return payment(status, body);
         });
