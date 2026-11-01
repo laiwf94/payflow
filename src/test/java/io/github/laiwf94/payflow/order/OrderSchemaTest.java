@@ -183,12 +183,71 @@ class OrderSchemaTest {
         .hasMessageContaining("orders_known_state");
   }
 
+  @Test
+  void merchantReferencesAreUniquePerMerchantAndWellFormed() {
+    UUID first = insertPending();
+    setReference(first, "acme", "cart-1");
+    assertThatThrownBy(() -> setReference(insertPending(), "acme", "cart-1"))
+        .isInstanceOf(DataIntegrityViolationException.class)
+        .hasMessageContaining("orders_merchant_reference");
+    UUID other = insertPending();
+    jdbc.sql("UPDATE orders SET merchant_id = 'globex' WHERE id = :id").param("id", other).update();
+    setReference(other, "globex", "cart-1");
+    insertPending();
+    insertPending();
+    for (String bad : List.of("", "has space", "x".repeat(129), "caf\u00e9", "tab\tref")) {
+      assertThatThrownBy(() -> setReference(insertPending(), "acme", bad))
+          .as(bad)
+          .hasMessageContaining("orders_merchant_reference_format");
+    }
+  }
+
+  @Test
+  void theMerchantIndexesAreValidAndTheOldOneIsGone() {
+    Map<String, String> defs = new java.util.TreeMap<>();
+    jdbc.sql(
+            """
+            SELECT c.relname, pg_get_indexdef(i.indexrelid) AS def
+            FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+            WHERE i.indrelid = 'orders'::regclass AND i.indisvalid AND i.indisready
+            """)
+        .query((rs, n) -> defs.put(rs.getString("relname"), rs.getString("def")))
+        .list();
+    assertThat(defs.get("orders_merchant_reference"))
+        .isEqualTo(
+            "CREATE UNIQUE INDEX orders_merchant_reference ON public.orders USING btree"
+                + " (merchant_id, merchant_reference)");
+    assertThat(defs.get("orders_merchant_created_id"))
+        .isEqualTo(
+            "CREATE INDEX orders_merchant_created_id ON public.orders USING btree"
+                + " (merchant_id, created_at, id)");
+    assertThat(defs).doesNotContainKey("orders_merchant_created");
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT convalidated FROM pg_constraint
+                    WHERE conname = 'orders_merchant_reference_format'
+                    """)
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+  }
+
+  private void setReference(UUID id, String merchant, String reference) {
+    jdbc.sql("UPDATE orders SET merchant_reference = :ref WHERE id = :id AND merchant_id = :m")
+        .param("ref", reference)
+        .param("id", id)
+        .param("m", merchant)
+        .update();
+  }
+
   private UUID insertPending() {
     UUID id = UUID.randomUUID();
     repo.insert(
         new Order(
             id,
             "acme",
+            null,
             OrderState.PENDING,
             io.github.laiwf94.payflow.money.Money.of(2500, "EUR"),
             Orders.pending("acme", Instant.now()).items(),

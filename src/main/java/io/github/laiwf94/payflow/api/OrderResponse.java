@@ -10,6 +10,7 @@ import java.util.UUID;
 /** An order as the API returns it. Saga bookkeeping (leases, attempts) stays internal. */
 public record OrderResponse(
     UUID id,
+    String merchantReference,
     String state,
     long amount,
     String currency,
@@ -32,6 +33,7 @@ public record OrderResponse(
   public static OrderResponse of(Order o) {
     return new OrderResponse(
         o.id(),
+        o.merchantReference(),
         o.state().name(),
         o.amount().minorUnits(),
         o.amount().currencyCode(),

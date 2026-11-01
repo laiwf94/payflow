@@ -9,6 +9,7 @@ import java.util.UUID;
 public record Order(
     UUID id,
     String merchantId,
+    String merchantReference,
     OrderState state,
     Money amount,
     List<LineItem> items,
@@ -35,7 +36,7 @@ public record Order(
     items = List.copyOf(items);
   }
 
-  /** A new order in {@code PENDING}, due immediately. */
+  /** A new order in {@code PENDING} without a merchant reference, due immediately. */
   public static Order create(
       UUID id,
       String merchantId,
@@ -45,9 +46,28 @@ public record Order(
       String paymentMethod,
       String correlationId,
       Instant now) {
+    return create(
+        id, merchantId, null, amount, items, shippingAddress, paymentMethod, correlationId, now);
+  }
+
+  /**
+   * A new order in {@code PENDING}, due immediately. {@code merchantReference} is the merchant's
+   * own id for it, unique per merchant, or null.
+   */
+  public static Order create(
+      UUID id,
+      String merchantId,
+      String merchantReference,
+      Money amount,
+      List<LineItem> items,
+      ShippingAddress shippingAddress,
+      String paymentMethod,
+      String correlationId,
+      Instant now) {
     return new Order(
         id,
         merchantId,
+        merchantReference,
         OrderState.PENDING,
         amount,
         items,

@@ -45,6 +45,9 @@ public class OutboxWriter {
     payload.put("event_type", type);
     payload.put("order_id", order.id());
     payload.put("merchant_id", order.merchantId());
+    if (order.merchantReference() != null) {
+      payload.put("merchant_reference", order.merchantReference());
+    }
     payload.put("seq", order.version());
     payload.put("state", order.state());
     if (previous != null) {

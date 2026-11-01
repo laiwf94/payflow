@@ -114,6 +114,7 @@ class OutboxRelayTest {
     return new Order(
         o.id(),
         o.merchantId(),
+        o.merchantReference(),
         o.state(),
         o.amount(),
         o.items(),

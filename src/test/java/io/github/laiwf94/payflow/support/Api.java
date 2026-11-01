@@ -90,6 +90,12 @@ public final class Api {
     return orderBody("pm_card_ok", "12345");
   }
 
+  /** {@link #orderBody()} with a {@code merchant_reference}, JSON-escaped. */
+  public static String orderBody(String merchantReference) {
+    String escaped = merchantReference.replace("\\", "\\\\").replace("\"", "\\\"");
+    return "{\"merchant_reference\":\"" + escaped + "\"," + orderBody().strip().substring(1);
+  }
+
   public static String orderBody(String paymentMethod, String postalCode) {
     return """
         {"items":[{"sku":"sku-1","quantity":2,"unit_amount":1000},

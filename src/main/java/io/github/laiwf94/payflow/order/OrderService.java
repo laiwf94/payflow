@@ -47,6 +47,15 @@ public class OrderService {
     }
   }
 
+  /** The merchant already has an order with this {@code merchant_reference}. */
+  public static final class ReferenceInUse extends RuntimeException {
+    private static final long serialVersionUID = 1L;
+
+    ReferenceInUse(String message) {
+      super(message);
+    }
+  }
+
   private final OrderRepository repo;
   private final OrderTransitions transitions;
   private final SagaWorker worker;
@@ -65,12 +74,14 @@ public class OrderService {
    *
    * @throws InvalidMoneyException when the total overflows the per-charge cap
    * @throws IllegalArgumentException when the country isn't an ISO 3166 code
+   * @throws ReferenceInUse when {@code merchantReference} names another of the merchant's orders
    */
   // A refused request writes nothing, and the caller (the idempotency filter) still has to commit
   // the stored error response in the same transaction, so refusals must not mark it rollback-only.
-  @Transactional(noRollbackFor = IllegalArgumentException.class)
+  @Transactional(noRollbackFor = {IllegalArgumentException.class, ReferenceInUse.class})
   public Order create(
       String merchantId,
+      String merchantReference,
       List<LineItem> items,
       String currency,
       ShippingAddress address,
@@ -88,13 +99,19 @@ public class OrderService {
         Order.create(
             UUID.randomUUID(),
             merchantId,
+            merchantReference,
             total,
             items,
             address,
             paymentMethod,
             correlationId,
             clock.instant());
-    transitions.create(order);
+    if (!transitions.create(order)) {
+      throw new ReferenceInUse(
+          repo.findByReference(merchantId, merchantReference)
+              .map(o -> "merchant_reference is already used by order " + o.id())
+              .orElse("merchant_reference is already used by another order"));
+    }
     wakeWorkerAfterCommit();
     log.info("order {} created for {} {}", order.id(), total.minorUnits(), currency);
     return order;

@@ -78,6 +78,12 @@ class ApiExceptionHandler {
     return error(409, e.code(), e.getMessage(), req);
   }
 
+  @ExceptionHandler(OrderService.ReferenceInUse.class)
+  ResponseEntity<Map<String, Object>> referenceInUse(
+      OrderService.ReferenceInUse e, HttpServletRequest req) {
+    return error(409, "order_reference_in_use", e.getMessage(), req);
+  }
+
   @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
   ResponseEntity<Map<String, Object>> method(
       HttpRequestMethodNotSupportedException e, HttpServletRequest req) {

@@ -20,6 +20,7 @@ An order row is both the business record and the saga's durable state:
 | Columns | Meaning |
 |---|---|
 | `id`, `merchant_id`, `items`, `shipping_address`, `payment_method` | What was ordered. Items and address are `jsonb`; nothing queries inside them. |
+| `merchant_reference` | The merchant's own id for the order (a cart or order number), optional and unique per merchant. |
 | `amount_minor`, `currency` | Total in minor units and an ISO 4217 code, computed by the server from the lines. |
 | `state`, `previous_state` | Position in the state machine; the previous state exists for the CHECK constraint below. |
 | `reservation_id`, `payment_id`, `shipment_id`, `tracking_number` | What the dependencies returned. |
@@ -36,6 +37,40 @@ with no minor unit (XAU, XTS, XXX) are refused.
 
 The other tables are `outbox` (events waiting for Kafka), `inbox` and `order_timeline` (the
 consumer's deduplication and its projection), and `idempotency_keys`.
+
+### Merchant references
+
+A merchant can tag an order with `merchant_reference`, 1-128 printable ASCII characters without
+spaces, enforced by Bean Validation and again by the `orders_merchant_reference_format` CHECK. A
+unique index on `(merchant_id, merchant_reference)` makes it a lookup key and a second guard
+against duplicate orders, one that works across idempotency keys and outlives their 24 hours. NULLs
+are distinct, so orders without a reference never collide.
+
+A second order with a taken reference is `409 order_reference_in_use`, and the message names the
+order that holds it. The insert is `INSERT ... ON CONFLICT (merchant_id, merchant_reference) DO
+NOTHING` rather than a caught unique violation: a violation would abort the transaction the
+idempotency filter shares with the request, and the filter has to commit the 409 in it so that a
+retry with the same key replays the 409 instead of running again. Two concurrent creates with one
+reference serialize on the index: the second waits for the first to commit and then conflicts, or
+inserts if the first rolled back. The `order.created` event carries the reference when there is
+one.
+
+Orders also have an index on `(merchant_id, created_at, id)`, the order a merchant's listing walks
+with a keyset cursor; `id` breaks ties between orders created in the same microsecond. It
+replaces V1's `(merchant_id, created_at DESC)`, since a B-tree scans either way.
+
+### Migrations on a live table
+
+The migrations that added these are written to run while orders are being taken. The column is
+added with its CHECK marked `NOT VALID`, so `ADD COLUMN` holds its exclusive lock only for a
+catalog change, and the next migration validates it under `SHARE UPDATE EXCLUSIVE`, which
+doesn't block reads or writes. Both indexes are built `CONCURRENTLY`, each in a migration of its
+own that Flyway runs outside a transaction. That needs `spring.flyway.postgresql.transactional-lock:
+false`: Flyway's default lock is an advisory lock held in an open transaction, and a concurrent
+index build waits for every open transaction, Flyway's included, so it would wait forever. The
+session-level lock still keeps two starting instances from migrating at once. A concurrent build
+that fails leaves an `INVALID` index; drop it with `DROP INDEX CONCURRENTLY` and start the service
+again, and Flyway retries the migration.
 
 ## States, and the database that enforces them
 
@@ -286,6 +321,7 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | Quantity per line | 1-1,000 | `CreateOrderRequest` |
 | Unit amount and order total | 1-99,999,999 minor units | `Money.MAX_MINOR_UNITS` |
 | Name, address lines / city / postal code / SKU | 200 / 100 / 20 / 64 characters | `CreateOrderRequest` |
+| `merchant_reference` | 1-128 printable ASCII, no spaces; unique per merchant | `CreateOrderRequest`, `orders_merchant_reference_format` |
 | `Idempotency-Key` | 1-255 printable ASCII, no spaces | `IdempotencyFilter` |
 | Idempotency lock timeout / retention | 60 s / 24 h | `payflow.idempotency.*` |
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |
@@ -324,7 +360,7 @@ checks every endpoint.
 ### Input
 
 Bean Validation on every field, and the same rules again in the database for the ones
-that matter (state, amount, currency format, merchant format). JSON is read strictly: unknown
+that matter (state, amount, currency format, merchant format, merchant reference format). JSON is read strictly: unknown
 fields, strings where numbers belong (`"2"`), decimals where integers belong and numbers that
 overflow are all 400s. The total is computed on the server. Free text may contain markup, which
 is stored and returned as data inside JSON and never rendered; control characters are refused.

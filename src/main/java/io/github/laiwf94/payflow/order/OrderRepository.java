@@ -36,30 +36,43 @@ public class OrderRepository {
     this.json = json;
   }
 
-  public void insert(Order o) {
-    jdbc.sql(
-            """
-            INSERT INTO orders (id, merchant_id, state, amount_minor, currency, items,
-                shipping_address, payment_method, step_started_at, next_attempt_at,
-                correlation_id, created_at, updated_at)
-            VALUES (:id, :merchant, :state, :amount, :currency, CAST(:items AS jsonb),
-                CAST(:address AS jsonb), :method, :stepStartedAt, :nextAttemptAt,
-                :correlationId, :createdAt, :updatedAt)
-            """)
-        .param("id", o.id())
-        .param("merchant", o.merchantId())
-        .param("state", o.state().name())
-        .param("amount", o.amount().minorUnits())
-        .param("currency", o.amount().currencyCode())
-        .param("items", write(o.items()))
-        .param("address", write(o.shippingAddress()))
-        .param("method", o.paymentMethod())
-        .param("stepStartedAt", ts(o.stepStartedAt()))
-        .param("nextAttemptAt", ts(o.nextAttemptAt()))
-        .param("correlationId", o.correlationId())
-        .param("createdAt", ts(o.createdAt()))
-        .param("updatedAt", ts(o.updatedAt()))
-        .update();
+  /**
+   * Stores a new order. Returns false, writing nothing, when the merchant already has an order with
+   * the same {@code merchant_reference}.
+   *
+   * <p>{@code ON CONFLICT DO NOTHING} rather than catching the unique violation: an error would
+   * abort the surrounding transaction, and the idempotency filter must still commit the 409 in that
+   * same transaction so a retry with the same key replays it. A concurrent insert of the same
+   * reference waits for the first transaction and then conflicts, or inserts if that one rolled
+   * back.
+   */
+  public boolean insert(Order o) {
+    return jdbc.sql(
+                """
+                INSERT INTO orders (id, merchant_id, merchant_reference, state, amount_minor,
+                    currency, items, shipping_address, payment_method, step_started_at,
+                    next_attempt_at, correlation_id, created_at, updated_at)
+                VALUES (:id, :merchant, :reference, :state, :amount, :currency,
+                    CAST(:items AS jsonb), CAST(:address AS jsonb), :method, :stepStartedAt,
+                    :nextAttemptAt, :correlationId, :createdAt, :updatedAt)
+                ON CONFLICT (merchant_id, merchant_reference) DO NOTHING
+                """)
+            .param("id", o.id())
+            .param("merchant", o.merchantId())
+            .param("reference", o.merchantReference())
+            .param("state", o.state().name())
+            .param("amount", o.amount().minorUnits())
+            .param("currency", o.amount().currencyCode())
+            .param("items", write(o.items()))
+            .param("address", write(o.shippingAddress()))
+            .param("method", o.paymentMethod())
+            .param("stepStartedAt", ts(o.stepStartedAt()))
+            .param("nextAttemptAt", ts(o.nextAttemptAt()))
+            .param("correlationId", o.correlationId())
+            .param("createdAt", ts(o.createdAt()))
+            .param("updatedAt", ts(o.updatedAt()))
+            .update()
+        == 1;
   }
 
   public Optional<Order> findById(UUID id) {
@@ -74,6 +87,16 @@ public class OrderRepository {
     return jdbc.sql("SELECT * FROM orders WHERE id = :id AND merchant_id = :merchant")
         .param("id", id)
         .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /** The merchant's order with this {@code merchant_reference}, if there is one. */
+  public Optional<Order> findByReference(String merchantId, String reference) {
+    return jdbc.sql(
+            "SELECT * FROM orders WHERE merchant_id = :merchant AND merchant_reference = :reference")
+        .param("merchant", merchantId)
+        .param("reference", reference)
         .query((rs, n) -> map(rs))
         .optional();
   }
@@ -219,6 +242,7 @@ public class OrderRepository {
     return new Order(
         rs.getObject("id", UUID.class),
         rs.getString("merchant_id"),
+        rs.getString("merchant_reference"),
         OrderState.valueOf(rs.getString("state")),
         Money.of(rs.getLong("amount_minor"), rs.getString("currency")),
         read(rs.getString("items"), ITEMS),

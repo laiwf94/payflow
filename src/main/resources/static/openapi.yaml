@@ -48,7 +48,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthenticated'
         '409':
-          $ref: '#/components/responses/KeyInUse'
+          $ref: '#/components/responses/CreateConflict'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
@@ -206,6 +206,16 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    CreateConflict:
+      description: |
+        Either the merchant already has an order with this `merchant_reference`
+        (`order_reference_in_use`; the message names that order, and retrying with the same
+        Idempotency-Key replays this answer), or a request with this Idempotency-Key is still
+        running (`idempotency_key_in_use`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     KeyReused:
       description: The Idempotency-Key was used for a different request (`idempotency_key_reused`).
       content:
@@ -246,6 +256,13 @@ components:
           type: string
           pattern: '^pm_[a-z0-9_]{1,64}$'
           description: A payment method token. The simulator declines pm_card_declined, pm_card_insufficient_funds and pm_card_expired.
+        merchant_reference:
+          type: string
+          pattern: '^[!-~]{1,128}$'
+          description: |
+            The merchant's own id for the order, such as a cart or order number: 1-128 printable
+            ASCII characters without spaces. Optional, and unique per merchant; a second order with
+            the same reference is refused with 409 `order_reference_in_use`.
     LineItem:
       type: object
       additionalProperties: false
@@ -295,6 +312,9 @@ components:
         id:
           type: string
           format: uuid
+        merchant_reference:
+          type: string
+          description: Present when the order was created with one.
         state:
           type: string
           enum:

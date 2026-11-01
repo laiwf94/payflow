@@ -106,6 +106,11 @@ class OpenApiContractTest {
                     Api.orderBody().getBytes(java.nio.charset.StandardCharsets.UTF_8)))
         .update();
     record("POST /v1/orders", api.post("/v1/orders", Api.orderBody(), "Idempotency-Key", "busy"));
+    String reference = "contract-" + java.util.UUID.randomUUID();
+    record("POST /v1/orders", api.post("/v1/orders", Api.orderBody(reference)));
+    Api.Response taken = api.post("/v1/orders", Api.orderBody(reference));
+    assertThat(taken.errorCode()).isEqualTo("order_reference_in_use");
+    record("POST /v1/orders", taken);
     record(
         "POST /v1/orders",
         api.post("/v1/orders", Api.orderBody().replace("Alice", "x".repeat(70_000))));

@@ -15,6 +15,11 @@ spring:
       connection-timeout: 5000
   flyway:
     locations: classpath:db/migration
+    # Flyway's default lock is an advisory lock held in an open transaction, and CREATE INDEX
+    # CONCURRENTLY waits for every open transaction, so it would wait for Flyway forever. A
+    # session-level lock still keeps two starting instances from migrating at once.
+    postgresql:
+      transactional-lock: false
   jackson:
     property-naming-strategy: SNAKE_CASE
     default-property-inclusion: non_null

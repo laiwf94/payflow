@@ -24,12 +24,17 @@ public class OrderTransitions {
     this.outbox = outbox;
   }
 
-  /** Stores a new order and its {@code order.created} event. */
+  /**
+   * Stores a new order and its {@code order.created} event. Returns false, writing nothing, when
+   * the merchant already has an order with the same reference.
+   */
   @Transactional
-  public Order create(Order order) {
-    repo.insert(order);
+  public boolean create(Order order) {
+    if (!repo.insert(order)) {
+      return false;
+    }
     outbox.write("order.created", order, null, order.createdAt());
-    return order;
+    return true;
   }
 
   /**

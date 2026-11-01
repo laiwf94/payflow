@@ -42,6 +42,7 @@ class OrderController {
     Order o =
         orders.create(
             merchant(http),
+            req.merchantReference(),
             req.items().stream()
                 .map(i -> new LineItem(i.sku(), i.quantity(), i.unitAmount()))
                 .toList(),
