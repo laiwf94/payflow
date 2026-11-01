@@ -1,0 +1,167 @@
+name: release
+
+# Pushing a tag vX.Y.Z (or vX.Y.Z-rc.N) builds, tests and publishes that version: the jar, a
+# CycloneDX SBOM and their checksums on a GitHub release, and a multi-arch image on ghcr.io.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! $TAG =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::tag $TAG is not vX.Y.Z or vX.Y.Z-pre"; exit 1
+          fi
+          version=${BASH_REMATCH[1]}
+          # Only commits that are on main get released.
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$TAG is not on main"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ $version == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Validate the Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+      # The whole gate again, on the tagged commit, with the release version baked in.
+      - name: Check and package
+        run: ./gradlew check bootJar -PreleaseVersion=${{ steps.version.outputs.version }}
+      - name: SBOM and checksums
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          mkdir dist
+          cp build/libs/payflow.jar "dist/payflow-$VERSION.jar"
+          python3 scripts/sbom.py --lockfile gradle.lockfile --jar "dist/payflow-$VERSION.jar" \
+            --version "$VERSION" --output "dist/payflow-$VERSION.cdx.json"
+          unzip -p "dist/payflow-$VERSION.jar" META-INF/build-info.properties \
+            | grep -qx "build.version=$VERSION"
+          (cd dist && sha256sum * > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  image:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      # Smoke test the amd64 image on the demo stack before anything is pushed: it must start,
+      # run as nonroot and report the tag's version on /livez.
+      - name: Build for the runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: payflow:local
+          build-args: VERSION=${{ env.VERSION }}
+          cache-to: type=gha,mode=max
+      - name: Smoke test
+        run: |
+          test "$(docker image inspect payflow:local --format '{{.Config.User}}')" = nonroot
+          docker compose up -d --no-build --wait postgres redpanda app
+          for _ in $(seq 1 60); do
+            live=$(curl -fsS http://127.0.0.1:8080/livez || true)
+            [[ -n $live ]] && break
+            sleep 2
+          done
+          echo "$live"
+          test "$(jq -r .components.build.details.version <<< "$live")" = "$VERSION"
+          docker compose logs app | grep -F "payflow $VERSION ready"
+      - name: Compose logs
+        if: failure()
+        run: docker compose logs
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The build stage runs on the runner's own platform (see the Dockerfile), so arm64 needs
+      # no emulation: only the runtime layers differ.
+      - name: Build and push amd64 and arm64
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ env.VERSION }}
+          cache-from: type=gha
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ needs.build.outputs.prerelease == 'false' && format('{0}:latest', env.IMAGE) || '' }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Both platforms are in the manifest
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' \
+            | jq -e '[.manifests[].platform | "\(.os)/\(.architecture)"] | contains(["linux/amd64", "linux/arm64"])'
+
+  release:
+    needs: [build, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      DIGEST: ${{ needs.image.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          cat > notes.md <<NOTES
+          Image: \`$image:$VERSION\` (linux/amd64, linux/arm64)
+          Digest: \`$image@$DIGEST\`
+
+          Assets: the boot jar, a CycloneDX 1.6 SBOM of the libraries in it, and SHA256SUMS.
+          Changes are in [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/CHANGELOG.md).
+          NOTES
+          flags=()
+          [[ $PRERELEASE == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "payflow $VERSION" \
+            --notes-file notes.md --verify-tag "${flags[@]}"

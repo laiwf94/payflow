@@ -348,7 +348,10 @@ appears in any log line.
 ### Operational surface
 
 Actuator runs on a separate management port bound to 127.0.0.1 and
-exposes only health and Prometheus; liveness and readiness are also served on the API port. The
+exposes only health and Prometheus; liveness and readiness are also served on the API port.
+`/livez` carries one detail, the running version (its `build` component, which is always up), so
+a rolling deploy shows which instances run what; the same version is the first line logged once
+the service is ready. The
 fake providers require their own bearer key and can be switched off
 (`PAYFLOW_SIMULATOR_ENABLED=false`); a production deployment would. The container image is
 distroless and runs as `nonroot`.
@@ -365,6 +368,7 @@ Each one is pinned through the Gradle lockfile, at a release at least two weeks 
 | Micrometer Prometheus registry | Exposition format for the metrics. |
 | Testcontainers, jqwik, Awaitility | Real Postgres and Redpanda in tests; property-based testing with shrinking; waiting on asynchronous outcomes without sleeps. |
 | Error Prone, Spotless with google-java-format, JaCoCo | Lint as errors, one formatting, the coverage floor. |
+| Docker Buildx actions (release only) | Multi-arch build, push and the GitHub Actions layer cache. The SBOM is a 180-line script over the lockfile instead of the CycloneDX Gradle plugin, which would add its own unlocked dependency tree to the build. |
 | osv-scanner (CI only) | Known-vulnerability scan of `gradle.lockfile`. Chosen over OWASP dependency-check, which needs an NVD API key and a multi-gigabyte local database, and reads build output rather than the lockfile. |
 
 Left out on purpose: Spring Security (one filter and a constant-time comparison cover API keys),
@@ -380,6 +384,28 @@ Framework 6.2 advisories it used to carry are fixed in Framework 7.0.9, which Bo
 JSON goes through Jackson 3, whose defaults are stricter than Jackson 2's; `application.yml`
 still states every strict setting the API relies on (unknown fields, floats as integers, scalar
 coercion, null primitives) rather than trusting the defaults of either version.
+
+## Releases
+
+A tag `vX.Y.Z` (or `vX.Y.Z-rc.N`, published as a prerelease) on a commit that is on main runs
+`.github/workflows/release.yml`. The version comes only from the tag: Gradle receives it as
+`-PreleaseVersion` and writes it into `META-INF/build-info.properties`, without a build time, so
+the same commit and version give the same jar. The workflow runs `./gradlew check` again on the
+tagged commit, then:
+
+- **SBOM.** `scripts/sbom.py` writes CycloneDX 1.6 from `gradle.lockfile`: the coordinates are the
+  ones locked for `productionRuntimeClasspath`, and the jar is read to keep only what is packaged
+  (platform BOMs are locked but not shipped) and to record each library's SHA-256. A jar in
+  `BOOT-INF/lib` that the lockfile does not explain fails the build; CI runs the same check on
+  every push. A lockfile is flat, so the SBOM says the application contains each library without
+  inventing which library pulled in which.
+- **Image.** The Dockerfile builds the jar on the runner's own platform and only the runtime
+  stage, which copies files and runs nothing, is per architecture, so amd64 and arm64 come from
+  one build with no emulation. The amd64 image is started on the compose stack first and must
+  report the tag's version on `/livez` and in its log before anything is pushed to
+  `ghcr.io/laiwf94/payflow`. `latest` moves only for a final release.
+- **Release.** The jar (`payflow-X.Y.Z.jar`), the SBOM and `SHA256SUMS` are attached to a GitHub
+  release whose notes give the image digest.
 
 ## Growing past one database
 

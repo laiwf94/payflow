@@ -118,6 +118,15 @@ class ObservabilityTest {
   void healthIsPublicButEverythingElseIsOnTheLoopbackManagementPort() {
     Api main = new Api(port, null);
     assertThat(main.get("/livez").status()).isEqualTo(200);
+    JsonNode live = main.get("/livez").json();
+    assertThat(live.get("status").asString()).isEqualTo("UP");
+    assertThat(live.at("/components/build/details/version").asString())
+        .isEqualTo(System.getProperty("payflow.version"))
+        .isNotEqualTo("unknown");
+    // The version is the only detail on the public port.
+    assertThat(live.get("components").propertyNames())
+        .containsExactlyInAnyOrder("build", "livenessState");
+    assertThat(live.at("/components/livenessState").propertyNames()).containsExactly("status");
     assertThat(main.get("/readyz").status()).isEqualTo(200);
     assertThat(main.get("/readyz").body()).isEqualTo("{\"status\":\"UP\"}");
     assertThat(main.get("/actuator/prometheus").status()).isEqualTo(404);

@@ -25,6 +25,13 @@ jobs:
       # the runner's Docker), and the 90% line coverage floor.
       - name: Check
         run: ./gradlew check
+      # The release workflow's SBOM generator, tested on its own and then run on this build's jar,
+      # so a library the lockfile does not explain fails here rather than at release time.
+      - name: SBOM
+        run: |
+          python3 -m unittest discover -s scripts
+          python3 scripts/sbom.py --lockfile gradle.lockfile --jar build/libs/payflow.jar \
+            --version 0.0.0-ci --output build/payflow.cdx.json
       - name: Coverage
         if: always()
         run: |

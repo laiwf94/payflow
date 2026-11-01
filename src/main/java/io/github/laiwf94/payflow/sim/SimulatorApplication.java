@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.sim;
 
+import io.github.laiwf94.payflow.observability.BuildVersion;
 import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
@@ -16,6 +17,7 @@ import org.springframework.core.env.MapPropertySource;
 @EnableAutoConfiguration(
     exclude = {DataSourceAutoConfiguration.class, FlywayAutoConfiguration.class})
 @Import({
+  BuildVersion.class,
   SimulatorConfig.class,
   SimulatorErrors.class,
   PaymentSimulatorController.class,

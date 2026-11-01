@@ -77,6 +77,12 @@ management:
         # their events wait in the outbox. Readiness is the database only.
         readiness:
           include: readinessState,db
+        # The version rides along on /livez (the "build" component, which is always up) so a
+        # rolling deploy shows which instances run what. Nothing else is shown on the public port.
+        liveness:
+          include: livenessState,build
+          show-components: always
+          show-details: always
   metrics:
     tags:
       application: payflow

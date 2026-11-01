@@ -44,9 +44,20 @@ To run it from source, start Postgres and a Kafka-compatible broker, then:
 
 ```console
 $ ./gradlew bootJar
-$ java -jar build/libs/payflow-0.1.0.jar keygen acme      # prints a key and its config entry
-$ PAYFLOW_API_KEYS='acme:<hash>' PAYFLOW_DB_PASSWORD=... java -jar build/libs/payflow-0.1.0.jar
+$ java -jar build/libs/payflow.jar keygen acme      # prints a key and its config entry
+$ PAYFLOW_API_KEYS='acme:<hash>' PAYFLOW_DB_PASSWORD=... java -jar build/libs/payflow.jar
 ```
+
+Released versions come from a `vX.Y.Z` tag, which runs the whole gate again and then publishes
+the jar, a CycloneDX SBOM and checksums on the GitHub release, plus an image for amd64 and arm64:
+
+```console
+$ docker pull ghcr.io/laiwf94/payflow:X.Y.Z
+$ curl -s localhost:8080/livez | jq -r .components.build.details.version
+X.Y.Z
+```
+
+A build from source reports the version in `build.gradle.kts` (a `-SNAPSHOT`).
 
 Configuration is environment variables; the main ones are listed in
 [application.yml](src/main/resources/application.yml) and the limits in

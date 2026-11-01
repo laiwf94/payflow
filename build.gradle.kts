@@ -10,7 +10,8 @@ plugins {
 }
 
 group = "io.github.laiwf94"
-version = "0.1.0"
+// Release builds pass -PreleaseVersion=X.Y.Z, taken from the git tag by .github/workflows/release.yml.
+version = providers.gradleProperty("releaseVersion").getOrElse("0.2.0-SNAPSHOT")
 
 java {
     toolchain {
@@ -70,6 +71,20 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+springBoot {
+    // META-INF/build-info.properties, for the version in /livez and the startup log. No build
+    // time, so the jar is the same for the same source and version.
+    buildInfo {
+        excludes = setOf("time")
+    }
+}
+
+// One name for every version, so scripts, the Dockerfile and the docs need not track it; the
+// release workflow renames the asset to payflow-X.Y.Z.jar.
+tasks.bootJar {
+    archiveFileName = "payflow.jar"
+}
+
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
     options.compilerArgs.addAll(listOf("-parameters", "-Xlint:all,-processing", "-Werror"))
@@ -84,6 +99,8 @@ tasks.test {
     // ProcessCrashRecoveryTest runs the real jar in a child JVM and kills it.
     dependsOn(tasks.bootJar)
     systemProperty("payflow.bootJar", tasks.bootJar.get().archiveFile.get().asFile.absolutePath)
+    // What build-info, /livez and the startup log must report.
+    systemProperty("payflow.version", version.toString())
     maxHeapSize = "1g"
     testLogging {
         events("failed")

@@ -14,6 +14,7 @@ import io.github.laiwf94.payflow.support.TestKeys;
 import java.io.File;
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -147,6 +148,13 @@ class ProcessCrashRecoveryTest {
         .pollInterval(Duration.ofMillis(200))
         .ignoreExceptions()
         .until(() -> health.get("/readyz").status() == 200);
+    // The packaged jar carries the version the build gave it, on /livez and in the log.
+    String version = System.getProperty("payflow.version");
+    assertThat(health.get("/livez").json().at("/components/build/details/version").asString())
+        .isEqualTo(version);
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .until(() -> Files.readString(log).contains("payflow " + version + " ready"));
   }
 
   /** SIGKILL: no shutdown hooks, no graceful stop, leases left behind. */

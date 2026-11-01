@@ -47,7 +47,7 @@ psql() { docker exec payflow-bench-pg psql -U payflow -d payflow -At -c "$1"; }
 PAYFLOW_DB_URL=jdbc:postgresql://127.0.0.1:$PG_PORT/payflow PAYFLOW_DB_PASSWORD=bench \
 PAYFLOW_DB_POOL=${DB_POOL:-40} PAYFLOW_KAFKA_BOOTSTRAP=127.0.0.1:$KAFKA_PORT PAYFLOW_API_KEYS="acme:$HASH" \
 PAYFLOW_PORT=$API_PORT PAYFLOW_MANAGEMENT_PORT=$((API_PORT + 1)) \
-  java -Xmx2g -jar build/libs/payflow-0.1.0.jar \
+  java -Xmx2g -jar build/libs/payflow.jar \
   --logging.level.io.github.laiwf94.payflow=WARN \
   > "$OUT/app.log" 2>&1 &
 APP_PID=$!
