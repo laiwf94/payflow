@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.gateway;
 
+import io.github.laiwf94.payflow.api.ApiConfig;
 import io.github.laiwf94.payflow.sim.SimulatorKey;
 import java.net.URI;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -114,10 +115,13 @@ public class GatewayConfig {
     } else {
       throw new IllegalStateException("payflow.dependencies." + name + ".api-key is required");
     }
-    // Providers add response fields over time; reading them strictly would turn a harmless
-    // addition into an outage.
+    // Providers add response fields over time, and some send ids as numbers; reading them as
+    // strictly as merchant requests would turn a harmless difference into an outage.
     ObjectMapper tolerant =
-        json.rebuild().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
+        ApiConfig.lenientText(json)
+            .rebuild()
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .build();
     return new HttpDependency(
         name, base, key, ep.connectTimeout(), ep.readTimeout(), builder, tolerant);
   }

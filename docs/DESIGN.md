@@ -361,8 +361,10 @@ checks every endpoint.
 
 Bean Validation on every field, and the same rules again in the database for the ones
 that matter (state, amount, currency format, merchant format, merchant reference format). JSON is read strictly: unknown
-fields, strings where numbers belong (`"2"`), decimals where integers belong and numbers that
-overflow are all 400s. The total is computed on the server. Free text may contain markup, which
+fields, strings where numbers belong (`"2"`), numbers or booleans where strings belong (`"sku":
+123`), decimals where integers belong and numbers that overflow are all 400s. Provider responses
+are read by a separate tolerant mapper that ignores unknown fields and accepts a number as a
+string. The total is computed on the server. Free text may contain markup, which
 is stored and returned as data inside JSON and never rendered; control characters are refused.
 Bodies are capped before they are buffered, including chunked ones.
 

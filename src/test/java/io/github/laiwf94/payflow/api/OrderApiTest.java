@@ -191,6 +191,11 @@ class OrderApiTest {
           null payment method      | "pm_card_ok" => null                                | 400
           unknown field            | "currency":"EUR" => "currency":"EUR","total":1      | 400
           bad sku                  | "sku-1" => "sku 1"                                  | 400
+          sku as number            | "sku-1" => 123                                      | 400
+          sku as boolean           | "sku-1" => true                                     | 400
+          currency as number       | "EUR" => 978                                        | 400
+          payment method as float  | "pm_card_ok" => 1.5                                 | 400
+          reference as number      | "currency":"EUR" => "currency":"EUR","merchant_reference":7 | 400
           long name                | Alice Example => <<5000 x>>                         | 400
           empty name               | Alice Example =>                                    | 400
           emoji rtl cjk name       | Alice Example => Ali 😀 مرحبا 你好                     | 201
