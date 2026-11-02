@@ -2,6 +2,8 @@ package io.github.laiwf94.payflow.api;
 
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
+import io.github.laiwf94.payflow.order.OrderPage;
+import io.github.laiwf94.payflow.order.OrderPosition;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.ShippingAddress;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
@@ -29,11 +31,34 @@ class OrderController {
 
   private final OrderService orders;
   private final TimelineProjection timeline;
+  private final OrderCursors cursors;
 
-  OrderController(OrderService orders, TimelineProjection timeline) {
+  OrderController(OrderService orders, TimelineProjection timeline, OrderCursors cursors) {
     this.orders = orders;
     this.timeline = timeline;
+    this.cursors = cursors;
   }
+
+  /**
+   * The merchant's orders, newest first, a page at a time. {@code next_cursor} continues the same
+   * listing; it is signed over the merchant and the filters, so it can't be used with others.
+   */
+  @GetMapping
+  OrderList list(HttpServletRequest http) {
+    String merchant = merchant(http);
+    OrderListRequest req = OrderListRequest.parse(http.getParameterMap());
+    OrderPosition after =
+        req.cursor() == null ? null : cursors.decode(merchant, req.filter(), req.cursor());
+    OrderPage page = orders.list(merchant, req.filter(), after, req.limit());
+    OrderPosition next = page.next();
+    return new OrderList(
+        page.orders().stream().map(OrderResponse::of).toList(),
+        page.hasMore(),
+        next == null ? null : cursors.encode(merchant, req.filter(), next));
+  }
+
+  /** A page of orders. {@code next_cursor} is present exactly when {@code has_more} is true. */
+  record OrderList(List<OrderResponse> data, boolean hasMore, String nextCursor) {}
 
   @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
   ResponseEntity<OrderResponse> create(

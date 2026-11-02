@@ -1,6 +1,7 @@
 package io.github.laiwf94.payflow.api;
 
 import io.github.laiwf94.payflow.security.SecurityConfig;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -41,6 +42,12 @@ public class ApiConfig {
                     .setCoercion(CoercionInputShape.Float, CoercionAction.TryConvert)
                     .setCoercion(CoercionInputShape.Boolean, CoercionAction.TryConvert))
         .build();
+  }
+
+  /** Signs and checks the order listing's cursors; see {@link OrderCursors}. */
+  @Bean
+  OrderCursors orderCursors(@Value("${payflow.cursor-secrets:}") String secrets) {
+    return OrderCursors.of(secrets);
   }
 
   /** Authentication runs first, so an anonymous client can't make us read a large body. */

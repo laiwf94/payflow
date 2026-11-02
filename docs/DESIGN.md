@@ -59,6 +59,43 @@ Orders also have an index on `(merchant_id, created_at, id)`, the order a mercha
 with a keyset cursor; `id` breaks ties between orders created in the same microsecond. It
 replaces V1's `(merchant_id, created_at DESC)`, since a B-tree scans either way.
 
+### Listing orders
+
+`GET /v1/orders` returns the merchant's orders newest first, ordered by `(created_at, id)`.
+Pages are keyset, not OFFSET: the next page is `WHERE (created_at, id) < (:last_created,
+:last_id) ORDER BY created_at DESC, id DESC LIMIT n+1`, and Postgres turns the row comparison into
+an index condition on `(merchant_id, created_at, id)` scanned backwards, so page 500 costs the
+same as page 1 and no sort runs (`OrderRepositoryTest` checks the plan). The extra row says
+whether `has_more`. Because a position is a key and not a count, an order created while a client
+pages can't shift the ones after it: every order that matched when paging began, and still
+matches, comes back exactly once. Orders created later appear if they sort after the cursor and
+not otherwise. `id` breaks ties, so a page that ends inside a run of orders created in the same
+microsecond resumes after its last order, not after the whole run.
+
+Filters are `state` (repeatable or comma-separated), `created_gte`, `created_lt`, `currency` and
+`merchant_reference`, which names at most one order and is how a merchant finds an order by its
+own id. The query string is read as strictly as a body: an unknown or repeated parameter is a 400
+rather than ignored, because `status=FAILED` would otherwise list every order. Bounds are rounded
+up to the microsecond the database stores, which keeps both of them exact.
+
+The cursor is opaque: a version byte, the last order's `created_at` in microseconds and its id,
+then the first 128 bits of an HMAC-SHA256 over the merchant, the canonical form of the filters and
+those bytes, 55 base64url characters in all. Signing it means a client can't fabricate a position,
+reuse another merchant's cursor or change the filters halfway and quietly get pages of a
+different listing; each is `400 invalid_cursor`. Merchant scoping doesn't depend on the
+signature, since the query always includes the merchant, but the signature keeps the format ours
+to change. `limit` (1-100, default 20) isn't signed and may change between pages.
+`PAYFLOW_CURSOR_SECRETS` holds the secrets, comma-separated: the first signs and all verify, so a
+secret rotates by deploying `new,old` and later `new` without breaking listings in progress. Every
+instance needs the same list; unset, each process signs with a random secret and logs a warning,
+which is fine for one instance and breaks cursors across a restart.
+
+`OrderListingProperties` checks this with jqwik against Postgres: two merchants, timestamps drawn
+from a dozen seconds so ties are common, random filters and page sizes, and new orders inserted
+after every page, some before the cursor and some after. Across the pages no order repeats, none
+that existed at the start is missing, every order matches, and the sequence is strictly newest
+first comparing ids as unsigned bytes, as Postgres does.
+
 ### Migrations on a live table
 
 The migrations that added these are written to run while orders are being taken. The column is
@@ -323,6 +360,8 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | Name, address lines / city / postal code / SKU | 200 / 100 / 20 / 64 characters | `CreateOrderRequest` |
 | `merchant_reference` | 1-128 printable ASCII, no spaces; unique per merchant | `CreateOrderRequest`, `orders_merchant_reference_format` |
 | `Idempotency-Key` | 1-255 printable ASCII, no spaces | `IdempotencyFilter` |
+| Orders per listing page | 1-100, default 20 | `OrderListRequest` |
+| Listing cursor secret | at least 32 characters each | `payflow.cursor-secrets`, `OrderCursors` |
 | Idempotency lock timeout / retention | 60 s / 24 h | `payflow.idempotency.*` |
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |
 | API key length | 256 characters | `ApiKeys` |
@@ -367,6 +406,11 @@ are read by a separate tolerant mapper that ignores unknown fields and accepts a
 string. The total is computed on the server. Free text may contain markup, which
 is stored and returned as data inside JSON and never rendered; control characters are refused.
 Bodies are capped before they are buffered, including chunked ones.
+
+Listing cursors are signed with HMAC-SHA256 under `PAYFLOW_CURSOR_SECRETS` and checked in
+constant time against every configured secret without stopping at a match. They carry only a
+timestamp and an order id, so a leaked cursor reveals no more than the merchant could already
+read; a cursor from another merchant or another listing is refused.
 
 ### Outbound credentials
 

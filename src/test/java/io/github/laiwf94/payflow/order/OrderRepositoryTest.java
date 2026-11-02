@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class OrderRepositoryTest {
@@ -29,6 +30,7 @@ class OrderRepositoryTest {
 
   @Autowired JdbcClient jdbc;
   @Autowired OrderRepository repo;
+  @Autowired TransactionTemplate transactions;
 
   private final Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
 
@@ -45,6 +47,76 @@ class OrderRepositoryTest {
     assertThat(repo.findForMerchant("acme", o.id())).contains(o);
     assertThat(repo.findForMerchant("globex", o.id())).isEmpty();
     assertThat(repo.findById(UUID.randomUUID())).isEmpty();
+  }
+
+  @Test
+  void listsNewestFirstAfterAPositionWithFilters() {
+    Order a = Orders.pending("acme", now);
+    Order b = Orders.pending("acme", now.plusSeconds(1));
+    Order c = Orders.pending("acme", now.plusSeconds(2));
+    repo.insert(a);
+    repo.insert(b);
+    repo.insert(c);
+    repo.insert(Orders.pending("globex", now.plusSeconds(3)));
+
+    assertThat(repo.list("acme", OrderFilter.ALL, null, 10))
+        .extracting(Order::id)
+        .containsExactly(c.id(), b.id(), a.id());
+    assertThat(repo.list("acme", OrderFilter.ALL, OrderPosition.of(c), 1))
+        .extracting(Order::id)
+        .containsExactly(b.id());
+    assertThat(
+            repo.list(
+                "acme",
+                new OrderFilter(Set.of(OrderState.PENDING), now, now.plusSeconds(2), "EUR", null),
+                null,
+                10))
+        .extracting(Order::id)
+        .containsExactly(b.id(), a.id());
+    assertThat(
+            repo.list(
+                "acme",
+                new OrderFilter(Set.of(OrderState.FAILED), null, null, null, null),
+                null,
+                10))
+        .isEmpty();
+    assertThatThrownBy(() -> repo.list("acme", OrderFilter.ALL, null, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  /**
+   * The cursor condition must be an index condition, or a deep page reads every newer order first.
+   * Sequential scans are switched off because the planner would rightly prefer one on a tiny table.
+   */
+  @Test
+  void aPageAfterACursorIsAnIndexRangeScan() {
+    for (int i = 0; i < 50; i++) {
+      repo.insert(Orders.pending("acme", now.plusSeconds(i)));
+    }
+    jdbc.sql("ANALYZE orders").update();
+    String plan =
+        transactions.execute(
+            tx -> {
+              jdbc.sql("SET LOCAL enable_seqscan = off").update();
+              jdbc.sql("SET LOCAL enable_bitmapscan = off").update();
+              return String.join(
+                  "\n",
+                  jdbc.sql(
+                          """
+                          EXPLAIN SELECT * FROM orders WHERE merchant_id = :merchant
+                            AND (created_at, id) < (:afterCreated, :afterId)
+                          ORDER BY created_at DESC, id DESC LIMIT 21
+                          """)
+                      .param("merchant", "acme")
+                      .param("afterCreated", OrderRepository.ts(now.plusSeconds(25)))
+                      .param("afterId", UUID.randomUUID())
+                      .query(String.class)
+                      .list());
+            });
+    assertThat(plan)
+        .contains("Index Scan Backward using orders_merchant_created_id")
+        .containsPattern("Index Cond: .*ROW\\(created_at, id\\) <")
+        .doesNotContain("Sort");
   }
 
   @Test

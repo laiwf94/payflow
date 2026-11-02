@@ -55,6 +55,8 @@ services:
       PAYFLOW_KAFKA_BOOTSTRAP: redpanda:9092
       # Demo merchant "acme"; the key is pf_demo_acme_0123456789abcdefghijklmnop.
       PAYFLOW_API_KEYS: acme:da4c799cd4e103221d18a07d2090e355b5aa1d3936add5cbf39afd6449ed320b
+      # Signs listing cursors; shared by every instance so a cursor survives a restart.
+      PAYFLOW_CURSOR_SECRETS: demo_cursor_secret_0123456789abcdef
       PAYFLOW_SIMULATOR_ENABLED: "false"
       PAYFLOW_DEPENDENCIES_PAYMENT_BASE_URL: http://simulator:8090/sim/payments
       PAYFLOW_DEPENDENCIES_PAYMENT_API_KEY: sim_demo_key_0123456789abcdef

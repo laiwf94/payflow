@@ -20,6 +20,76 @@ security:
   - apiKey: []
 paths:
   /v1/orders:
+    get:
+      operationId: listOrders
+      summary: List the merchant's orders, newest first
+      description: |
+        Orders run newest first by creation time, a page at a time. When `has_more` is true,
+        pass `next_cursor` back as `cursor` with the same filters to get the next page; `limit`
+        may change between pages. Orders created while you page don't shift the rest: every
+        order that matched when you started is returned exactly once.
+
+        The cursor is opaque and signed over the merchant and the filters, so it can't be built
+        by hand, used by another merchant or carried to a listing with other filters. Unknown or
+        repeated parameters are refused rather than ignored.
+      parameters:
+        - name: limit
+          in: query
+          description: Orders per page, 1-100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: |
+            Only orders in these states. Repeat the parameter or separate states with commas.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/OrderState'
+        - name: created_gte
+          in: query
+          description: Only orders created at or after this RFC 3339 time.
+          schema:
+            type: string
+            format: date-time
+        - name: created_lt
+          in: query
+          description: Only orders created before this RFC 3339 time.
+          schema:
+            type: string
+            format: date-time
+        - name: currency
+          in: query
+          schema:
+            type: string
+            pattern: '^[A-Z]{3}$'
+        - name: merchant_reference
+          in: query
+          description: The order with this reference, if there is one.
+          schema:
+            type: string
+            pattern: '^[!-~]{1,128}$'
+      responses:
+        '200':
+          description: One page of orders.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderList'
+        '400':
+          $ref: '#/components/responses/ListInvalid'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
     post:
       operationId: createOrder
       summary: Create an order and start its saga
@@ -182,6 +252,14 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ListInvalid:
+      description: |
+        A query parameter is unknown, repeated or invalid (`invalid_argument`), or the cursor is
+        malformed or belongs to another listing (`invalid_cursor`; start again without one).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     Unauthenticated:
       description: Missing or invalid API key (`unauthenticated`).
       content:
@@ -316,11 +394,7 @@ components:
           type: string
           description: Present when the order was created with one.
         state:
-          type: string
-          enum:
-            [PENDING, INVENTORY_RESERVED, PAYMENT_AUTHORIZED, PAYMENT_CAPTURED, COMPLETED,
-             CANCELLING_SHIPMENT, REVERSING_PAYMENT, RELEASING_INVENTORY, FAILED, CANCELLED,
-             REFUNDING, REFUNDED]
+          $ref: '#/components/schemas/OrderState'
         amount:
           type: integer
           description: Total in minor units, computed from the items.
@@ -374,6 +448,26 @@ components:
         updated_at:
           type: string
           format: date-time
+    OrderState:
+      type: string
+      enum:
+        [PENDING, INVENTORY_RESERVED, PAYMENT_AUTHORIZED, PAYMENT_CAPTURED, COMPLETED,
+         CANCELLING_SHIPMENT, REVERSING_PAYMENT, RELEASING_INVENTORY, FAILED, CANCELLED,
+         REFUNDING, REFUNDED]
+    OrderList:
+      type: object
+      additionalProperties: false
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Order'
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          description: Present exactly when `has_more` is true.
     TimelineEntry:
       type: object
       additionalProperties: false

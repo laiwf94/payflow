@@ -62,6 +62,12 @@ class ApiExceptionHandler {
     return error(400, "invalid_argument", e.getMessage(), req);
   }
 
+  @ExceptionHandler(OrderCursors.InvalidCursor.class)
+  ResponseEntity<Map<String, Object>> invalidCursor(
+      OrderCursors.InvalidCursor e, HttpServletRequest req) {
+    return error(400, "invalid_cursor", e.getMessage(), req);
+  }
+
   @ExceptionHandler({OrderService.NotFound.class, OrderController.OrderNotFound.class})
   ResponseEntity<Map<String, Object>> notFound(RuntimeException e, HttpServletRequest req) {
     return error(404, "not_found", "order not found", req);

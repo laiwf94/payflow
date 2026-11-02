@@ -117,6 +117,17 @@ public class OrderService {
     return order;
   }
 
+  /**
+   * Up to {@code limit} of the merchant's orders that match {@code filter}, newest first, after
+   * {@code after} (null for the first page). One extra row is read to learn whether more follow.
+   */
+  public OrderPage list(String merchantId, OrderFilter filter, OrderPosition after, int limit) {
+    List<Order> rows = repo.list(merchantId, filter, after, limit + 1);
+    return rows.size() > limit
+        ? new OrderPage(rows.subList(0, limit), true)
+        : new OrderPage(rows, false);
+  }
+
   public Order get(String merchantId, UUID id) {
     return repo.findForMerchant(merchantId, id).orElseThrow(NotFound::new);
   }

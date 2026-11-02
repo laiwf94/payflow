@@ -121,6 +121,18 @@ class OpenApiContractTest {
         "POST /v1/orders",
         api.post("/v1/orders", Api.orderBody("pm_card_expired", "1"), "Idempotency-Key", "reused"));
 
+    Api.Response firstPage = api.get("/v1/orders?limit=1");
+    record("GET /v1/orders", firstPage);
+    record(
+        "GET /v1/orders",
+        api.get("/v1/orders?limit=1&cursor=" + firstPage.json().get("next_cursor").asString()));
+    record("GET /v1/orders", api.get("/v1/orders?merchant_reference=" + reference));
+    record("GET /v1/orders", api.get("/v1/orders?limit=0"));
+    Api.Response badCursor = api.get("/v1/orders?cursor=forged");
+    assertThat(badCursor.errorCode()).isEqualTo("invalid_cursor");
+    record("GET /v1/orders", badCursor);
+    record("GET /v1/orders", new Api(port, null).get("/v1/orders"));
+
     String missing = "00000000-0000-0000-0000-000000000000";
     record("GET /v1/orders/{id}", api.get("/v1/orders/" + pending));
     record("GET /v1/orders/{id}", api.get("/v1/orders/" + missing));

@@ -58,6 +58,9 @@ server:
   port: ${PAYFLOW_PORT:8080}
 payflow:
   api-keys: ${PAYFLOW_API_KEYS:}
+  # Signs the order listing's cursors. Every instance needs the same value; a comma-separated list
+  # rotates it (the first signs, all verify). Unset means a random per-process secret.
+  cursor-secrets: ${PAYFLOW_CURSOR_SECRETS:}
   simulator:
     enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
     key: ${PAYFLOW_SIMULATOR_KEY:}

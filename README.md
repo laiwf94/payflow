@@ -59,6 +59,9 @@ X.Y.Z
 
 A build from source reports the version in `build.gradle.kts` (a `-SNAPSHOT`).
 
+Behind more than one instance, set `PAYFLOW_CURSOR_SECRETS` (at least 32 characters, the same
+everywhere) so a listing cursor issued by one instance is accepted by the next.
+
 Configuration is environment variables; the main ones are listed in
 [application.yml](src/main/resources/application.yml) and the limits in
 [docs/DESIGN.md](docs/DESIGN.md#limits).
@@ -113,6 +116,7 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 | Endpoint | Purpose |
 |---|---|
 | `POST /v1/orders` | Create an order; the saga starts once it commits. Returns `201` in `PENDING`. An optional `merchant_reference` is unique per merchant. |
+| `GET /v1/orders` | The merchant's orders, newest first, up to 100 a page with a signed `next_cursor`. Filters: `state`, `created_gte`, `created_lt`, `currency`, `merchant_reference`. |
 | `GET /v1/orders/{id}` | The order, with payment, shipment and failure details. |
 | `POST /v1/orders/{id}/cancel` | Cancel before capture. `202`; the saga unwinds and ends `CANCELLED`. |
 | `POST /v1/orders/{id}/refund` | Refund a completed order in full. `202`; ends `REFUNDED`. |
@@ -121,7 +125,7 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 | `GET :8081/actuator/prometheus` | Metrics, on the loopback management port. |
 
 Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` with stable codes:
-`invalid_argument` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
+`invalid_argument` / `invalid_cursor` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
 `not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
 `order_reference_in_use` / `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
 `idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a
@@ -138,13 +142,14 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
+| Listing | jqwik pages through two merchants' orders with random filters and page sizes while orders keep arriving, many tied on `created_at`, and every page boundary goes through a signed cursor: no order is repeated, none that existed when paging began is skipped, and the order is strictly newest first. Over HTTP, two threads insert while 300 orders are paged; a flipped bit, another merchant's cursor or changed filters is a 400. |
 | Contract | The OpenAPI document and Spring's routes must match both ways; every documented response is produced by a real request and checked against its schema. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 242 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 290 tests, 90% line coverage floor (currently 95%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

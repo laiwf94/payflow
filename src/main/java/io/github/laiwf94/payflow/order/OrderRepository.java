@@ -7,7 +7,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -99,6 +101,52 @@ public class OrderRepository {
         .param("reference", reference)
         .query((rs, n) -> map(rs))
         .optional();
+  }
+
+  /**
+   * One page of the merchant's orders that match {@code filter}, newest first by {@code
+   * (created_at, id)}, starting strictly after {@code after} (or at the newest when it is null).
+   *
+   * <p>Keyset rather than OFFSET: the row comparison {@code (created_at, id) < (:c, :i)} is an
+   * index condition on {@code (merchant_id, created_at, id)}, so a deep page costs the same as the
+   * first, and an order inserted or changed while a client pages can't shift the ones after it.
+   * Every order that matched when paging began and still matches is returned exactly once.
+   */
+  public List<Order> list(String merchantId, OrderFilter filter, OrderPosition after, int limit) {
+    if (limit < 1) {
+      throw new IllegalArgumentException("limit must be positive: " + limit);
+    }
+    StringBuilder sql = new StringBuilder("SELECT * FROM orders WHERE merchant_id = :merchant");
+    Map<String, Object> params = new HashMap<>();
+    params.put("merchant", merchantId);
+    if (!filter.states().isEmpty()) {
+      sql.append(" AND state IN (:states)");
+      params.put("states", filter.states().stream().map(Enum::name).sorted().toList());
+    }
+    if (filter.createdFrom() != null) {
+      sql.append(" AND created_at >= :createdFrom");
+      params.put("createdFrom", ts(filter.createdFrom()));
+    }
+    if (filter.createdBefore() != null) {
+      sql.append(" AND created_at < :createdBefore");
+      params.put("createdBefore", ts(filter.createdBefore()));
+    }
+    if (filter.currency() != null) {
+      sql.append(" AND currency = :currency");
+      params.put("currency", filter.currency());
+    }
+    if (filter.merchantReference() != null) {
+      sql.append(" AND merchant_reference = :reference");
+      params.put("reference", filter.merchantReference());
+    }
+    if (after != null) {
+      sql.append(" AND (created_at, id) < (:afterCreated, :afterId)");
+      params.put("afterCreated", ts(after.createdAt()));
+      params.put("afterId", after.id());
+    }
+    sql.append(" ORDER BY created_at DESC, id DESC LIMIT :limit");
+    params.put("limit", limit);
+    return jdbc.sql(sql.toString()).params(params).query((rs, n) -> map(rs)).list();
   }
 
   /**
