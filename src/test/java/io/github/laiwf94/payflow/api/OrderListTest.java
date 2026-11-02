@@ -183,7 +183,9 @@ class OrderListTest {
     assertThat(created.status()).isEqualTo(201);
     String id = created.json().get("id").asString();
     Api.Response r = acme.get("/v1/orders?merchant_reference=api-ref-1");
-    assertThat(r.json().get("data").get(0)).isEqualTo(acme.get("/v1/orders/" + id).json());
+    // The create response, the order and its listing entry agree to the microsecond (#77).
+    assertThat(acme.get("/v1/orders/" + id).json()).isEqualTo(created.json());
+    assertThat(r.json().get("data").get(0)).isEqualTo(created.json());
   }
 
   @Test

@@ -149,7 +149,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 290 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 291 tests, 90% line coverage floor (currently 95%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
