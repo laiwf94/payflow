@@ -186,7 +186,8 @@ class SagaChaosProperties {
             Duration.ofSeconds(5),
             6,
             Duration.ofSeconds(60),
-            Duration.ofSeconds(1));
+            Duration.ofSeconds(1),
+            Duration.ofSeconds(5));
     UnknownOutcomes unknown = new UnknownOutcomes(new SimpleMeterRegistry());
     var pay = DirectGateways.payments(payments);
     var inv = DirectGateways.inventory(inventory);

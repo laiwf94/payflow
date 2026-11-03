@@ -1,6 +1,7 @@
 package io.github.laiwf94.payflow.saga;
 
 import static io.github.laiwf94.payflow.order.OrderState.*;
+import static io.github.laiwf94.payflow.saga.CrashPoints.NONE;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -22,6 +23,8 @@ import java.util.Map;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
 import org.junit.jupiter.api.BeforeEach;
@@ -71,6 +74,11 @@ class SagaWorkerTest {
   }
 
   private SagaProperties props(int maxAttempts, Duration stepTimeout, boolean enabled) {
+    return props(maxAttempts, stepTimeout, enabled, Duration.ofSeconds(5));
+  }
+
+  private SagaProperties props(
+      int maxAttempts, Duration stepTimeout, boolean enabled, Duration shutdownGrace) {
     return new SagaProperties(
         enabled,
         Duration.ofSeconds(30),
@@ -81,7 +89,8 @@ class SagaWorkerTest {
         Duration.ofSeconds(5),
         maxAttempts,
         stepTimeout,
-        Duration.ofSeconds(2));
+        Duration.ofSeconds(2),
+        shutdownGrace);
   }
 
   private SagaWorker worker(SagaProperties p, CrashPoints crash) {
@@ -343,6 +352,151 @@ class SagaWorkerTest {
   }
 
   @Test
+  void stopLetsTheRunningStepFinishThenHandsTheOrderBack() throws Exception {
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch answer = new CountDownLatch(1);
+    script.put(
+        PENDING,
+        (o, r) -> {
+          entered.countDown();
+          awaitUninterruptibly(answer);
+          return new StepOutcome.Advance(INVENTORY_RESERVED, Fields.reservation("r"));
+        });
+    SagaWorker w = worker(props(5, Duration.ofMinutes(2), true, Duration.ofSeconds(20)), NONE);
+    w.start();
+    Order o = insert();
+    w.wakeUp();
+    assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+    long started = System.nanoTime();
+    Thread stopping = Thread.ofPlatform().start(w::stop);
+    await().atMost(Duration.ofSeconds(5)).until(() -> !w.isRunning());
+    answer.countDown();
+    stopping.join(10_000);
+    assertThat(stopping.isAlive()).isFalse();
+    assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(10));
+
+    // The reservation committed, then the order was given back instead of moving on.
+    assertThat(load(o).state()).isEqualTo(INVENTORY_RESERVED);
+    assertThat(leaseOf(o)).isEqualTo("none");
+    assertThat(calls).noneMatch(c -> c.contains(":INVENTORY_RESERVED:"));
+
+    // The next instance claims it on its first poll, with no lease to wait out, and since the
+    // last step committed it is a plain continuation, not a recovery.
+    assertThat(worker().runOnce()).isEqualTo(1);
+    assertThat(load(o).state()).isEqualTo(COMPLETED);
+    assertThat(calls)
+        .containsExactly(
+            o.id() + ":PENDING:false",
+            o.id() + ":INVENTORY_RESERVED:false",
+            o.id() + ":PAYMENT_AUTHORIZED:false",
+            o.id() + ":PAYMENT_CAPTURED:false");
+  }
+
+  @Test
+  void aStepStillRunningAtTheDeadlineIsHandedBackAsACrashWould() throws Exception {
+    CountDownLatch entered = new CountDownLatch(1);
+    AtomicInteger interrupted = new AtomicInteger();
+    script.put(
+        PAYMENT_AUTHORIZED,
+        (o, r) -> {
+          if (!r) {
+            entered.countDown();
+            try {
+              new CountDownLatch(1).await();
+            } catch (InterruptedException e) {
+              // The provider's answer arrives after all, too late to be written.
+              interrupted.incrementAndGet();
+            }
+          }
+          return new StepOutcome.Advance(
+              PAYMENT_CAPTURED, Fields.money(o.amount().minorUnits(), 0));
+        });
+    SagaWorker w = worker(props(5, Duration.ofMinutes(2), true, Duration.ofMillis(300)), NONE);
+    w.start();
+    Order o = insert();
+    w.wakeUp();
+    assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+    long started = System.nanoTime();
+    w.stop();
+    assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(3));
+
+    assertThat(interrupted).hasValue(1);
+    assertThat(load(o).state()).as("the late capture was fenced out").isEqualTo(PAYMENT_AUTHORIZED);
+    assertThat(leaseOf(o)).isEqualTo("abandoned");
+
+    // No waiting for the 30 s lease: the next poll takes it, told the capture may have happened.
+    assertThat(worker().runOnce()).isEqualTo(1);
+    assertThat(load(o).state()).isEqualTo(COMPLETED);
+    assertThat(calls)
+        .containsSubsequence(
+            o.id() + ":PAYMENT_AUTHORIZED:false", o.id() + ":PAYMENT_AUTHORIZED:true");
+  }
+
+  @Test
+  void nothingIsClaimedOnceStopBegins() {
+    SagaWorker w = worker(props(5, Duration.ofMinutes(2), true), NONE);
+    w.start();
+    w.stop();
+    Order o = insert();
+    w.wakeUp();
+    await()
+        .during(Duration.ofMillis(300))
+        .atMost(Duration.ofSeconds(2))
+        .until(() -> leaseOf(o).equals("none") && load(o).state() == PENDING);
+    assertThat(calls).isEmpty();
+  }
+
+  @Test
+  void aClaimMadeWhileStoppingIsHandedBackAndARecoveryStaysARecovery() {
+    Order fresh = insert();
+    Order crashed = insert();
+    jdbc.sql(
+            "UPDATE orders SET lease_token = gen_random_uuid(), lease_until = :past WHERE id = :id")
+        .param("past", clock.instant().minusSeconds(60).atOffset(java.time.ZoneOffset.UTC))
+        .param("id", crashed.id())
+        .update();
+    SagaWorker stopping = worker();
+    stopping.stop();
+    assertThat(stopping.runOnce()).isEqualTo(2);
+    assertThat(calls).isEmpty();
+    assertThat(leaseOf(fresh)).isEqualTo("none");
+    assertThat(leaseOf(crashed)).as("still marked as left by a crash").isEqualTo("abandoned");
+
+    assertThat(worker().runOnce()).isEqualTo(2);
+    assertThat(load(fresh).state()).isEqualTo(COMPLETED);
+    assertThat(load(crashed).state()).isEqualTo(COMPLETED);
+    assertThat(calls).contains(fresh.id() + ":PENDING:false", crashed.id() + ":PENDING:true");
+  }
+
+  /** "none", "abandoned" (expired for every clock) or "held". */
+  private String leaseOf(Order o) {
+    return jdbc.sql(
+            """
+            SELECT CASE WHEN lease_token IS NULL THEN 'none'
+                        WHEN lease_until = '-infinity' THEN 'abandoned' ELSE 'held' END
+            FROM orders WHERE id = :id
+            """)
+        .param("id", o.id())
+        .query(String.class)
+        .single();
+  }
+
+  private static void awaitUninterruptibly(CountDownLatch latch) {
+    boolean interrupted = false;
+    while (true) {
+      try {
+        latch.await();
+        break;
+      } catch (InterruptedException e) {
+        interrupted = true;
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  @Test
   void disabledWorkerDoesNotStartAndTwoStepsForOneStateAreRefused() {
     SagaWorker w = worker();
     w.start();
@@ -398,6 +552,7 @@ class SagaWorkerTest {
                     Duration.ofMillis(1),
                     1,
                     Duration.ofSeconds(1),
+                    Duration.ZERO,
                     Duration.ZERO))
         .hasMessageContaining("lease");
     assertThatThrownBy(
@@ -412,6 +567,7 @@ class SagaWorkerTest {
                     Duration.ofMillis(1),
                     1,
                     Duration.ofSeconds(1),
+                    Duration.ZERO,
                     Duration.ZERO))
         .hasMessageContaining("batch size");
   }

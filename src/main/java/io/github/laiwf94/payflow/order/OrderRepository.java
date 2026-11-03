@@ -286,6 +286,24 @@ public class OrderRepository {
         == 1;
   }
 
+  /**
+   * Hands back a lease whose step may still be running, as if this worker had died: the token is
+   * replaced, so any late write from the old step is fenced out, and the lease is expired for every
+   * clock, so the next poll on any instance claims the order and is told it was {@code recovered}.
+   * Returns false when the lease was no longer ours (the step finished or another worker has it).
+   */
+  public boolean abandon(UUID id, UUID leaseToken) {
+    return jdbc.sql(
+                """
+                UPDATE orders SET lease_token = gen_random_uuid(), lease_until = '-infinity'
+                WHERE id = :id AND lease_token = :token
+                """)
+            .param("id", id)
+            .param("token", leaseToken)
+            .update()
+        == 1;
+  }
+
   private Order map(ResultSet rs) throws SQLException {
     return new Order(
         rs.getObject("id", UUID.class),

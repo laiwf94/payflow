@@ -82,7 +82,9 @@ provider's key handling off, and money still moves exactly once.
 The saga is crash-safe because its state lives in Postgres, not memory. Workers lease orders
 with `FOR UPDATE SKIP LOCKED`, hold no transaction across a network call, and fence every write
 with the lease token. A killed process leaves its lease to expire, and the next worker resumes
-the step knowing it is a resume.
+the step knowing it is a resume. A process stopped with `SIGTERM` doesn't make anyone wait: it
+stops claiming, lets running steps finish for up to 5 s, and hands every lease back, so the next
+instance picks the orders up on its first poll.
 
 The state machine is enforced by the database too. A CHECK constraint refuses illegal
 transitions, and further constraints tie terminal states to money: a completed order is fully
@@ -137,6 +139,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 |---|---|
 | Money and stock under chaos | jqwik generates failure rates for every call to the three providers, whether the payment provider honours idempotency keys, orders with declines, bad addresses, scarce stock, cancels and refunds, and crash points inside the worker. After everything settles, the providers' own ledgers must show: every order terminal, completed orders charged exactly their amount once, failed and cancelled orders holding nothing, no double authorization or capture, stock balanced, and each order's events a legal path. Deliberately broken versions of the saga fail it. |
 | Killing the process | The packaged jar runs as a child process and is killed with `SIGKILL` once while an authorization is in flight and once after the provider captured but before the service heard back. It completes with one authorization, one capture and one shipment. |
+| Stopping the process | The packaged jar is stopped with `SIGTERM` while an authorization is in flight (it finishes and the lease is released) and while a capture outlasts the shutdown grace (the lease is fenced and expired). With a 90 s lease, the next instance resumes on its first poll and completes with one authorization and one capture. In-process tests cover draining, the deadline, and claims made while stopping. |
 | Lost answers | Every money-moving call is applied by the provider and its answer lost, over real HTTP with real read timeouts, with the provider's key handling on and off. |
 | State machine | Every one of the 144 state pairs is tried with raw SQL; the database accepts exactly the 15 the code allows. |
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |

@@ -16,8 +16,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
@@ -35,6 +37,11 @@ import org.springframework.context.SmartLifecycle;
  *
  * <p>If the process dies mid-step the lease simply expires. The next worker to claim the order is
  * told the work was {@code resumed}, so the step checks what already happened before acting.
+ *
+ * <p>A clean stop doesn't make anyone wait for that expiry. The dispatcher stops claiming, each
+ * in-flight order finishes the step it is in and gives its lease back at the next step boundary,
+ * and whatever is still mid-step when {@link SagaProperties#shutdownGrace()} runs out is handed
+ * back the way a crash would leave it, only already expired: see {@link OrderRepository#abandon}.
  */
 public class SagaWorker implements SmartLifecycle {
 
@@ -54,8 +61,16 @@ public class SagaWorker implements SmartLifecycle {
   private final Semaphore permits;
   private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
   private final Object signal = new Object();
+
+  /** Orders being processed right now, by id, with the lease token each holds. */
+  private final Map<UUID, UUID> inFlight = new ConcurrentHashMap<>();
+
   private boolean woken;
   private volatile boolean running;
+
+  /** Set once {@link #stop()} begins: no new step starts, finished steps give their lease back. */
+  private volatile boolean draining;
+
   private Thread dispatcher;
 
   public SagaWorker(
@@ -99,20 +114,44 @@ public class SagaWorker implements SmartLifecycle {
 
   void process(Claim claim) {
     Order order = claim.order();
+    UUID token = claim.leaseToken();
     boolean resumed = claim.recovered() || order.attempt() > 0;
+    boolean pendingRecovery = claim.recovered();
     MDC.put("order_id", order.id().toString());
     MDC.put("correlation_id", order.correlationId());
+    inFlight.put(order.id(), token);
     try {
       if (claim.recovered()) {
-        log.info("resuming order in {} after an expired lease", order.state());
+        log.info("resuming order in {} after a lease that was not released", order.state());
       }
       while (order != null && !order.state().isTerminal()) {
-        order = step(order, claim.leaseToken(), resumed);
+        if (draining) {
+          handBack(order, token, pendingRecovery);
+          return;
+        }
+        order = step(order, token, resumed);
         resumed = false;
+        pendingRecovery = false;
       }
     } finally {
+      inFlight.remove(claim.order().id());
       MDC.remove("order_id");
       MDC.remove("correlation_id");
+    }
+  }
+
+  /**
+   * Gives an order back between steps while stopping. Its last step committed, so a plain release
+   * is exact, with one exception: a claim that recovered an expired lease hasn't run its resumed
+   * step yet, and releasing would hide that the step before the crash may have half happened. That
+   * one is abandoned instead, so the next worker is still told it is resuming.
+   */
+  private void handBack(Order order, UUID token, boolean pendingRecovery) {
+    boolean handed =
+        pendingRecovery ? repo.abandon(order.id(), token) : repo.release(order.id(), token);
+    if (handed) {
+      log.info("handed order in {} back at shutdown", order.state());
+      meters.counter("payflow.saga.handed_back", "how", "between_steps").increment();
     }
   }
 
@@ -249,22 +288,8 @@ public class SagaWorker implements SmartLifecycle {
         int free = Math.min(permits.availablePermits(), props.batchSize());
         List<Claim> claims =
             free == 0 ? List.of() : repo.claimDue(clock.instant(), props.lease(), free);
-        for (Claim c : claims) {
-          permits.acquire();
-          executor.execute(
-              () -> {
-                try {
-                  process(c);
-                } catch (RuntimeException e) {
-                  log.error("order processing failed", e);
-                } finally {
-                  permits.release();
-                  if (permits.availablePermits() == 1) {
-                    wakeUp();
-                  }
-                }
-              });
-        }
+        // A claim that lands after stop() began is handed straight back by process().
+        claims.forEach(this::submit);
         if (claims.size() < free || free == 0) {
           awaitSignal();
         }
@@ -281,6 +306,30 @@ public class SagaWorker implements SmartLifecycle {
           return;
         }
       }
+    }
+  }
+
+  private void submit(Claim c) {
+    // Never blocks: the dispatcher is the only acquirer and claimed no more than were free.
+    permits.acquireUninterruptibly();
+    try {
+      executor.execute(
+          () -> {
+            try {
+              process(c);
+            } catch (RuntimeException e) {
+              log.error("order processing failed", e);
+            } finally {
+              permits.release();
+              if (permits.availablePermits() == 1) {
+                wakeUp();
+              }
+            }
+          });
+    } catch (RejectedExecutionException e) {
+      // stop() gave up waiting for this poll and shut the executor down under it.
+      permits.release();
+      handBack(c.order(), c.leaseToken(), c.recovered());
     }
   }
 
@@ -304,22 +353,67 @@ public class SagaWorker implements SmartLifecycle {
     dispatcher = Thread.ofPlatform().daemon().name("saga-dispatcher").start(this::dispatch);
   }
 
+  /**
+   * Stops claiming, lets in-flight steps finish for up to {@link SagaProperties#shutdownGrace()},
+   * and hands every order back so the next instance picks it up on its first poll rather than after
+   * the lease runs out. Orders between steps are released; orders still mid-step at the deadline
+   * are abandoned (fenced and expired), and their threads interrupted.
+   */
   @Override
   public void stop() {
+    long started = System.nanoTime();
+    long deadline = started + props.shutdownGrace().toNanos();
     running = false;
+    draining = true;
     wakeUp();
+    int abandoned = 0;
     try {
       if (dispatcher != null) {
-        dispatcher.join(5_000);
+        dispatcher.join(Math.max(1, remainingMillis(deadline)));
+        if (dispatcher.isAlive()) {
+          // Stuck in a poll, most likely on an unreachable database: it claims nothing more.
+          dispatcher.interrupt();
+          dispatcher.join(1_000);
+        }
       }
       executor.shutdown();
-      if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
-        // Leases on the unfinished orders expire and another worker resumes them.
-        log.warn("saga steps still running at shutdown");
+      if (!executor.awaitTermination(
+          Math.max(0, remainingMillis(deadline)), TimeUnit.MILLISECONDS)) {
+        for (Map.Entry<UUID, UUID> e : Map.copyOf(inFlight).entrySet()) {
+          if (abandon(e.getKey(), e.getValue())) {
+            abandoned++;
+          }
+        }
+        executor.shutdownNow();
+        if (!executor.awaitTermination(1, TimeUnit.SECONDS)) {
+          log.warn("saga steps still running after their orders were handed back");
+        }
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
+    log.info(
+        "saga worker stopped in {} ms; orders handed back mid-step: {}",
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+        abandoned);
+  }
+
+  private boolean abandon(UUID orderId, UUID token) {
+    try {
+      if (repo.abandon(orderId, token)) {
+        log.warn("order {} still mid-step at shutdown; handed back for the next worker", orderId);
+        meters.counter("payflow.saga.handed_back", "how", "mid_step").increment();
+        return true;
+      }
+    } catch (RuntimeException e) {
+      // The lease expires on its own; this only costs the next worker the wait.
+      log.error("could not hand back order {} at shutdown", orderId, e);
+    }
+    return false;
+  }
+
+  private static long remainingMillis(long deadlineNanos) {
+    return TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
   }
 
   @Override

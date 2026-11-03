@@ -165,6 +165,29 @@ class OrderRepositoryTest {
   }
 
   @Test
+  void anAbandonedLeaseIsFencedAndRecoveredAtOnce() {
+    Order o = Orders.pending("acme", now);
+    repo.insert(o);
+    Claim c = repo.claimDue(now, LEASE, 1).get(0);
+    assertThat(repo.abandon(o.id(), UUID.randomUUID())).as("not our lease").isFalse();
+    assertThat(repo.abandon(o.id(), c.leaseToken())).isTrue();
+    assertThat(repo.abandon(o.id(), c.leaseToken())).as("token was replaced").isFalse();
+    StateChange change =
+        StateChange.to(OrderState.INVENTORY_RESERVED)
+            .stepStartedAt(now)
+            .nextAttemptAt(now)
+            .reservationId("r")
+            .build();
+    assertThat(repo.update(o.id(), c.leaseToken(), OrderState.PENDING, change, now))
+        .as("a late write from the abandoned step")
+        .isEmpty();
+    // Claimable at once, not after the lease runs out, and marked as a recovery.
+    Claim next = repo.claimDue(now, LEASE, 1).get(0);
+    assertThat(next.recovered()).isTrue();
+    assertThat(next.order().state()).isEqualTo(OrderState.PENDING);
+  }
+
+  @Test
   void releasedLeasesAreNotRecoveries() {
     Order o = Orders.pending("acme", now);
     repo.insert(o);

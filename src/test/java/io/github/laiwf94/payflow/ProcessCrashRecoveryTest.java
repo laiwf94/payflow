@@ -36,8 +36,9 @@ import org.springframework.context.ConfigurableApplicationContext;
 /**
  * Runs the packaged jar as a child process and kills it with SIGKILL twice: once while the payment
  * authorization is in flight, once after the provider has captured but before the service heard
- * back. The simulators run in this JVM, so the provider's ledger survives the kills, exactly as a
- * real provider's would.
+ * back. A second test stops it with SIGTERM at the same two points and checks that a clean stop
+ * hands every lease back, so the next instance doesn't wait for one to expire. The simulators run
+ * in this JVM, so the provider's ledger survives the kills, exactly as a real provider's would.
  */
 class ProcessCrashRecoveryTest {
 
@@ -72,7 +73,7 @@ class ProcessCrashRecoveryTest {
 
     appPort = freePort();
     log = Path.of("build", "crash-test-" + UUID.randomUUID() + ".log");
-    startApp();
+    startApp(SHORT_LEASE, DEFAULT_GRACE);
     Api api = new Api(appPort, TestKeys.ACME);
     String id = api.post("/v1/orders", Api.orderBody()).json().get("id").asString();
 
@@ -80,7 +81,7 @@ class ProcessCrashRecoveryTest {
     await().atMost(Duration.ofSeconds(20)).until(() -> "INVENTORY_RESERVED".equals(state(id)));
     killApp();
 
-    startApp();
+    startApp(SHORT_LEASE, DEFAULT_GRACE);
     // After the lease expires the new process resumes, finds the authorization the dead one made,
     // and moves on to capture, which the provider applies and then sits on.
     await()
@@ -92,7 +93,7 @@ class ProcessCrashRecoveryTest {
 
     faults.set("payment.capture", FaultPlan.NONE);
     faults.set("payment.authorize", FaultPlan.NONE);
-    startApp();
+    startApp(SHORT_LEASE, DEFAULT_GRACE);
     await().atMost(Duration.ofSeconds(30)).until(() -> "COMPLETED".equals(state(id)));
 
     assertThat(payments.ledgerFor(id))
@@ -107,7 +108,78 @@ class ProcessCrashRecoveryTest {
         .isEqualTo(2500);
   }
 
-  private void startApp() throws IOException {
+  @Test
+  void sigtermHandsEveryLeaseBackAndTheNextInstanceResumesOnItsFirstPoll() throws Exception {
+    Faults faults = simulators.getBean(Faults.class);
+    PaymentProviderSimulator payments = simulators.getBean(PaymentProviderSimulator.class);
+    faults.reset(new SplittableRandom(2));
+    faults.set("payment.authorize", new FaultPlan(0, 0, 0, Duration.ofSeconds(2), List.of()));
+    faults.set("payment.capture", new FaultPlan(0, 0, 0, Duration.ofSeconds(30), List.of()));
+
+    // A lease far longer than the test waits: any resume within it is a lease handed back, not
+    // one that ran out.
+    Duration lease = Duration.ofSeconds(90);
+    appPort = freePort();
+    log = Path.of("build", "sigterm-test-" + UUID.randomUUID() + ".log");
+    startApp(lease, Duration.ofSeconds(10));
+    Api api = new Api(appPort, TestKeys.ACME);
+    String id = api.post("/v1/orders", Api.orderBody()).json().get("id").asString();
+
+    // First stop: the authorization is in flight. It is let finish, committed, and the order is
+    // given back before capture starts.
+    await().atMost(Duration.ofSeconds(20)).until(() -> "INVENTORY_RESERVED".equals(state(id)));
+    Duration stopped = terminateApp();
+    assertThat(stopped).isLessThan(Duration.ofSeconds(10));
+    assertThat(state(id)).isEqualTo("PAYMENT_AUTHORIZED");
+    assertThat(lease(id)).isEqualTo("none");
+    assertThat(payments.ledgerFor(id))
+        .extracting(PaymentProviderSimulator.LedgerEntry::operation)
+        .containsExactly("authorize");
+    assertThat(Files.readString(log))
+        .contains("handed order in PAYMENT_AUTHORIZED back at shutdown");
+
+    // Second stop: the provider applies the capture and sits on the answer for longer than the
+    // one-second grace. The order is handed back as a crash would leave it, already expired.
+    startApp(lease, Duration.ofSeconds(1));
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .until(
+            () -> payments.ledgerFor(id).stream().anyMatch(e -> e.operation().equals("capture")));
+    stopped = terminateApp();
+    assertThat(stopped).isLessThan(Duration.ofSeconds(8));
+    assertThat(state(id)).isEqualTo("PAYMENT_AUTHORIZED");
+    assertThat(lease(id)).isEqualTo("abandoned");
+    assertThat(Files.readString(log))
+        .contains("still mid-step at shutdown; handed back for the next worker");
+
+    // The next instance takes it on its first poll, knows it is resuming, finds the capture the
+    // provider made, and finishes without charging again.
+    faults.set("payment.capture", FaultPlan.NONE);
+    faults.set("payment.authorize", FaultPlan.NONE);
+    startApp(lease, Duration.ofSeconds(10));
+    long ready = System.nanoTime();
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .pollInterval(Duration.ofMillis(50))
+        .until(() -> "COMPLETED".equals(state(id)));
+    assertThat(Duration.ofNanos(System.nanoTime() - ready)).isLessThan(lease);
+    assertThat(payments.ledgerFor(id))
+        .extracting(PaymentProviderSimulator.LedgerEntry::operation)
+        .containsExactly("authorize", "capture");
+    assertThat(simulators.getBean(ShippingSimulator.class).shipment(id)).isPresent();
+    assertThat(Files.readString(log)).contains("resuming order in PAYMENT_AUTHORIZED");
+    assertThat(api.get("/v1/orders/" + id).json().at("/payment/captured_amount").asLong())
+        .isEqualTo(2500);
+    // Consumers that stopped cleanly leave the group at once, so the timeline catches up quickly.
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() == 5);
+  }
+
+  private static final Duration SHORT_LEASE = Duration.ofSeconds(3);
+  private static final Duration DEFAULT_GRACE = Duration.ofSeconds(5);
+
+  private void startApp(Duration lease, Duration shutdownGrace) throws IOException {
     int simPort = ((WebServerApplicationContext) simulators).getWebServer().getPort();
     String sim = "http://127.0.0.1:" + simPort + "/sim";
     List<String> cmd = new ArrayList<>();
@@ -131,7 +203,8 @@ class ProcessCrashRecoveryTest {
       cmd.add("--payflow.dependencies." + p[0] + ".api-key=" + SIM_KEY);
       cmd.add("--payflow.dependencies." + p[0] + ".read-timeout=60s");
     }
-    cmd.add("--payflow.saga.lease=3s");
+    cmd.add("--payflow.saga.lease=" + lease.toMillis() + "ms");
+    cmd.add("--payflow.saga.shutdown-grace=" + shutdownGrace.toMillis() + "ms");
     cmd.add("--payflow.saga.unknown-outcome-delay=100ms");
     cmd.add(
         "--payflow.api-keys=acme:"
@@ -164,13 +237,37 @@ class ProcessCrashRecoveryTest {
     assertThat(app.exitValue()).isEqualTo(137);
   }
 
+  /** SIGTERM: shutdown hooks run and the saga worker stops cleanly. Returns how long it took. */
+  private Duration terminateApp() throws InterruptedException {
+    long started = System.nanoTime();
+    app.destroy();
+    assertThat(app.waitFor(30, TimeUnit.SECONDS)).isTrue();
+    assertThat(app.exitValue()).isEqualTo(143);
+    return Duration.ofNanos(System.nanoTime() - started);
+  }
+
+  /** "none", "abandoned" (handed back mid-step, expired for every clock) or "held". */
+  private static String lease(String id) throws SQLException {
+    return query(
+        """
+        SELECT CASE WHEN lease_token IS NULL THEN 'none'
+                    WHEN lease_until = '-infinity' THEN 'abandoned' ELSE 'held' END
+        FROM orders WHERE id = ?
+        """,
+        id);
+  }
+
   private static String state(String id) throws SQLException {
+    return query("SELECT state FROM orders WHERE id = ?", id);
+  }
+
+  private static String query(String sql, String id) throws SQLException {
     try (Connection c =
             DriverManager.getConnection(
                 Containers.POSTGRES.getJdbcUrl(),
                 Containers.POSTGRES.getUsername(),
                 Containers.POSTGRES.getPassword());
-        PreparedStatement ps = c.prepareStatement("SELECT state FROM orders WHERE id = ?")) {
+        PreparedStatement ps = c.prepareStatement(sql)) {
       ps.setObject(1, UUID.fromString(id));
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getString(1) : null;

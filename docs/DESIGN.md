@@ -204,6 +204,32 @@ what already happened before doing anything (see
 [When nobody knows what happened](#when-nobody-knows-what-happened)). The lease must be longer
 than the slowest single step, which is bounded by the dependency timeouts.
 
+### Stopping cleanly
+
+A deploy shouldn't cost every in-flight order a lease's wait, so `SIGTERM` stops the worker
+before anything else in the process (it is the last `SmartLifecycle` to start and the first to
+stop, so the web server and the in-process simulators are still up while it drains). The
+dispatcher stops claiming. Each in-flight order finishes the step it is in, commits it, and gives
+its lease back at the next step boundary instead of starting another step. Its row is then
+unleased and due now, so the next instance claims it on its first poll and carries on as if the
+same worker had continued.
+
+Some steps outlast `payflow.saga.shutdown-grace` (5 s by default, inside `docker stop`'s 10 s).
+When it runs out, each order still mid-step is handed back as a crash would leave it, with one
+difference: the lease is already expired. The worker replaces the lease token, so any late
+write from the abandoned step is fenced out, and sets `lease_until` to `-infinity`, which every
+instance's clock has passed. The next claim sees a lease that was not released, so the step runs
+with `resumed = true` and looks before acting. The worker then interrupts the abandoned threads.
+A recovered claim that is handed back before its resumed step ran is abandoned the same way
+rather than released, so the next worker is still told it is resuming.
+
+`ProcessCrashRecoveryTest` stops the packaged jar with `SIGTERM` twice, with a 90 s lease so
+that any quick resume must be a lease handed back. The first time, an authorization is in
+flight: it finishes and the order is released before capture. The second time, the provider has
+applied a capture and holds the answer past a 1 s grace: the order is abandoned. The next
+instance resumes it on its first poll, finds the capture and completes it, with one
+authorization and one capture on the provider's ledger.
+
 ### Cancel and refund
 
 A cancel sets a flag, accepted only before capture, and pulls the order's
@@ -340,6 +366,7 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | Card declined, out of stock, address refused | Step fails | Compensation from that step; order ends `FAILED` with the reason |
 | Compensation keeps failing | Order stays in the compensating state | Retries forever, capped at 30 s apart; error log after 10 attempts |
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
+| payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
@@ -367,6 +394,7 @@ same key takes it over; its work had rolled back with it, so starting over is sa
 | API key length | 256 characters | `ApiKeys` |
 | Merchant id | 1-64 of `a-z 0-9 _ -` | `ApiKeys`, `orders_merchant_format` |
 | Saga lease | 30 s | `payflow.saga.lease` |
+| Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |
 | Backoff | 200 ms base, 30 s cap, full jitter | `payflow.saga.backoff-*` |
 | Forward step limit | 8 attempts or 2 min | `payflow.saga.max-attempts`, `step-timeout` |

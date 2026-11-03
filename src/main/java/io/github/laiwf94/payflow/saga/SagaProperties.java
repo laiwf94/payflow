@@ -18,6 +18,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param maxAttempts attempts a forward step gets before the order is compensated
  * @param stepTimeout time a forward step gets, retries included, before the order is compensated
  * @param unknownOutcomeDelay minimum wait before asking a dependency what an unanswered call did
+ * @param shutdownGrace how long a stopping worker waits for in-flight steps before handing their
+ *     orders back unfinished; keep it inside the platform's stop timeout (10 s for {@code docker
+ *     stop}, 30 s for Kubernetes)
  */
 @ConfigurationProperties("payflow.saga")
 public record SagaProperties(
@@ -30,7 +33,8 @@ public record SagaProperties(
     @DefaultValue("30s") Duration backoffCap,
     @DefaultValue("8") int maxAttempts,
     @DefaultValue("2m") Duration stepTimeout,
-    @DefaultValue("2s") Duration unknownOutcomeDelay) {
+    @DefaultValue("2s") Duration unknownOutcomeDelay,
+    @DefaultValue("5s") Duration shutdownGrace) {
 
   public SagaProperties {
     if (batchSize < 1 || batchSize > 1000 || maxInFlight < 1 || maxInFlight > 10_000) {
@@ -41,6 +45,9 @@ public record SagaProperties(
     }
     if (lease.compareTo(Duration.ofSeconds(1)) < 0) {
       throw new IllegalArgumentException("lease must be at least 1 s");
+    }
+    if (shutdownGrace.isNegative() || shutdownGrace.compareTo(Duration.ofMinutes(5)) > 0) {
+      throw new IllegalArgumentException("shutdown grace must be 0-5 min");
     }
   }
 }
