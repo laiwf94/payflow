@@ -131,7 +131,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 `not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
 `order_reference_in_use` / `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
 `idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a
-404, the same as a missing one.
+404, the same as a missing one. openapi.yaml lists the codes each response can carry.
 
 ## Test suite
 
@@ -146,7 +146,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
 | Listing | jqwik pages through two merchants' orders with random filters and page sizes while orders keep arriving, many tied on `created_at`, and every page boundary goes through a signed cursor: no order is repeated, none that existed when paging began is skipped, and the order is strictly newest first. Over HTTP, two threads insert while 300 orders are paged; a flipped bit, another merchant's cursor or changed filters is a 400. |
-| Contract | The OpenAPI document and Spring's routes must match both ways; every documented response is produced by a real request and checked against its schema. |
+| Contract | The OpenAPI document and Spring's routes must match both ways. Every documented response and every error code it lists is produced by a real request and checked against its schema and headers, nothing undocumented comes back, and the spec's codes are exactly the ones the code can send. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.

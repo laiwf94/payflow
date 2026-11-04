@@ -10,15 +10,15 @@ import tools.jackson.databind.ObjectMapper;
 
 /**
  * The one error shape every endpoint returns: {@code {"error":{"code","message","request_id"}}}.
- * Codes are stable and documented; messages are for humans and may change.
+ * Codes are the stable {@link ApiError} list; messages are for humans and may change.
  */
 public final class ApiErrors {
 
   private ApiErrors() {}
 
-  public static Map<String, Object> body(String code, String message, String requestId) {
+  public static Map<String, Object> body(ApiError error, String message, String requestId) {
     Map<String, Object> err = new LinkedHashMap<>();
-    err.put("code", code);
+    err.put("code", error.code());
     err.put("message", message);
     err.put("request_id", requestId);
     return Map.of("error", err);
@@ -29,12 +29,11 @@ public final class ApiErrors {
       HttpServletRequest req,
       HttpServletResponse res,
       ObjectMapper json,
-      int status,
-      String code,
+      ApiError error,
       String message)
       throws IOException {
-    res.setStatus(status);
+    res.setStatus(error.status());
     res.setContentType(MediaType.APPLICATION_JSON_VALUE);
-    json.writeValue(res.getOutputStream(), body(code, message, RequestIds.of(req)));
+    json.writeValue(res.getOutputStream(), body(error, message, RequestIds.of(req)));
   }
 }

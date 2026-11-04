@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.security;
 
+import io.github.laiwf94.payflow.api.ApiError;
 import io.github.laiwf94.payflow.api.ApiErrors;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -36,7 +37,7 @@ public final class ApiKeyFilter extends OncePerRequestFilter {
             : Optional.empty();
     if (merchant.isEmpty()) {
       res.setHeader(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
-      ApiErrors.write(req, res, json, 401, "unauthenticated", "missing or invalid API key");
+      ApiErrors.write(req, res, json, ApiError.UNAUTHENTICATED, "missing or invalid API key");
       return;
     }
     req.setAttribute(MERCHANT_ATTRIBUTE, merchant.get());

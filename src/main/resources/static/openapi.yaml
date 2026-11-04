@@ -10,10 +10,24 @@ info:
     Every POST needs an `Idempotency-Key`. Retrying with the same key and body returns the first
     response, errors included.
 
-    Any endpoint can also answer 500 (`internal`) or, when the database is unreachable, 503
-    (`unavailable`), with the same error body. Both are safe to retry with the same key.
+    Every error has the same body, `{"error":{"code","message","request_id"}}`. Codes are
+    stable, and each response below lists the ones it can carry in `x-error-codes`; messages
+    are for people and may change. Besides those, any request can be answered with one of
+    these, listed in the top-level `x-error-codes`:
+
+    | Status | Code | When |
+    |---|---|---|
+    | 404 | `not_found` | No such endpoint. |
+    | 405 | `method_not_allowed` | The endpoint exists, but not with this method. |
+    | 406 | `not_acceptable` | The `Accept` header rules out `application/json`. |
+    | 500 | `internal` | An unexpected failure. Safe to retry with the same key. |
+    | 503 | `unavailable` | The database is unreachable. Safe to retry with the same key. |
+
+    Every response carries `X-Request-Id`: the caller's own if it sent a plain one, otherwise a
+    fresh one. It is also the `request_id` of an error and follows the order into its events.
   license:
     name: MIT
+x-error-codes: [not_found, method_not_allowed, not_acceptable, internal, unavailable]
 servers:
   - url: http://localhost:8080
 security:
@@ -33,6 +47,7 @@ paths:
         by hand, used by another merchant or carried to a listing with other filters. Unknown or
         repeated parameters are refused rather than ignored.
       parameters:
+        - $ref: '#/components/parameters/RequestId'
         - name: limit
           in: query
           description: Orders per page, 1-100.
@@ -82,6 +97,9 @@ paths:
       responses:
         '200':
           description: One page of orders.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
@@ -107,8 +125,15 @@ paths:
           description: Created. The order starts in PENDING; poll it or read its events.
           headers:
             Location:
+              required: true
+              description: The order's path.
               schema:
                 type: string
+                pattern: '^/v1/orders/[0-9a-f-]{36}$'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/json:
               schema:
@@ -131,9 +156,13 @@ paths:
       summary: Get an order
       parameters:
         - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/RequestId'
       responses:
         '200':
           description: The order.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
@@ -152,9 +181,15 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrderId'
         - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
       responses:
         '202':
           description: Cancel requested.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/json:
               schema:
@@ -166,7 +201,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/WrongState'
+          $ref: '#/components/responses/CancelConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/KeyReused'
   /v1/orders/{id}/refund:
     post:
       operationId: refundOrder
@@ -174,9 +213,15 @@ paths:
       parameters:
         - $ref: '#/components/parameters/OrderId'
         - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
       responses:
         '202':
           description: Refund started; the order moves to REFUNDING and then REFUNDED.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
           content:
             application/json:
               schema:
@@ -188,7 +233,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/WrongState'
+          $ref: '#/components/responses/RefundConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/KeyReused'
   /v1/orders/{id}/events:
     get:
       operationId: getOrderEvents
@@ -196,9 +245,13 @@ paths:
       description: Built by an event consumer, so it can trail the order by a moment.
       parameters:
         - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/RequestId'
       responses:
         '200':
           description: Events in order.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
           content:
             application/json:
               schema:
@@ -245,9 +298,30 @@ components:
       schema:
         type: string
         pattern: '^[A-Za-z0-9._-]{1,64}$'
+  headers:
+    RequestId:
+      required: true
+      description: The request's correlation id; see `X-Request-Id` above.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+    IdempotentReplayed:
+      description: |
+        Present, and `true`, when this is the stored answer to an earlier request with the same
+        Idempotency-Key rather than a new one. The body is that first answer as it was, so an
+        error's `request_id` is the first request's; `X-Request-Id` is this request's.
+      schema:
+        type: string
+        enum: ['true']
   responses:
     InvalidArgument:
       description: The request is malformed or a field is invalid (`invalid_argument`).
+      x-error-codes: [invalid_argument]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
@@ -256,30 +330,66 @@ components:
       description: |
         A query parameter is unknown, repeated or invalid (`invalid_argument`), or the cursor is
         malformed or belongs to another listing (`invalid_cursor`; start again without one).
+      x-error-codes: [invalid_argument, invalid_cursor]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     Unauthenticated:
       description: Missing or invalid API key (`unauthenticated`).
+      x-error-codes: [unauthenticated]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        WWW-Authenticate:
+          required: true
+          schema:
+            type: string
+            enum: [Bearer]
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     NotFound:
       description: No such order for this merchant (`not_found`).
+      x-error-codes: [not_found]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-    WrongState:
-      description: The order's state doesn't allow this (`order_not_cancellable`, `order_not_refundable`).
+    CancelConflict:
+      description: |
+        The order has been captured, or has already ended, so it can't be cancelled
+        (`order_not_cancellable`; refund it once it completes), or a request with this
+        Idempotency-Key is still running (`idempotency_key_in_use`).
+      x-error-codes: [order_not_cancellable, idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-    KeyInUse:
-      description: A request with this Idempotency-Key is still running (`idempotency_key_in_use`).
+    RefundConflict:
+      description: |
+        Only a COMPLETED order can be refunded (`order_not_refundable`), or a request with this
+        Idempotency-Key is still running (`idempotency_key_in_use`).
+      x-error-codes: [order_not_refundable, idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
@@ -290,24 +400,44 @@ components:
         (`order_reference_in_use`; the message names that order, and retrying with the same
         Idempotency-Key replays this answer), or a request with this Idempotency-Key is still
         running (`idempotency_key_in_use`).
+      x-error-codes: [order_reference_in_use, idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     KeyReused:
       description: The Idempotency-Key was used for a different request (`idempotency_key_reused`).
+      x-error-codes: [idempotency_key_reused]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     PayloadTooLarge:
       description: The body is over 64 KiB (`payload_too_large`).
+      x-error-codes: [payload_too_large]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
     UnsupportedMediaType:
       description: The body isn't JSON (`unsupported_media_type`).
+      x-error-codes: [unsupported_media_type]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
       content:
         application/json:
           schema:
@@ -496,6 +626,12 @@ components:
           properties:
             code:
               type: string
+              description: Stable; see the top-level description and each response's `x-error-codes`.
+              enum:
+                [invalid_argument, invalid_cursor, unauthenticated, not_found, method_not_allowed,
+                 not_acceptable, order_not_cancellable, order_not_refundable,
+                 order_reference_in_use, idempotency_key_in_use, payload_too_large,
+                 unsupported_media_type, idempotency_key_reused, internal, unavailable]
             message:
               type: string
             request_id:

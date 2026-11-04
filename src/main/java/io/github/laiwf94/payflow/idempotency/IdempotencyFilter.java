@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.idempotency;
 
+import io.github.laiwf94.payflow.api.ApiError;
 import io.github.laiwf94.payflow.api.ApiErrors;
 import io.github.laiwf94.payflow.api.RequestIds;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
@@ -84,8 +85,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
           req,
           res,
           json,
-          400,
-          "invalid_argument",
+          ApiError.INVALID_ARGUMENT,
           "Idempotency-Key header is required: 1-255 printable characters without spaces");
       return;
     }
@@ -93,7 +93,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
     try {
       body = req.getInputStream().readAllBytes();
     } catch (IOException e) {
-      ApiErrors.write(req, res, json, 413, "payload_too_large", e.getMessage());
+      ApiErrors.write(req, res, json, ApiError.PAYLOAD_TOO_LARGE, e.getMessage());
       return;
     }
     String merchant = (String) req.getAttribute(ApiKeyFilter.MERCHANT_ATTRIBUTE);
@@ -104,7 +104,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
     } catch (DataAccessException e) {
       log.error("can't reach the database to claim an idempotency key", e);
       ApiErrors.write(
-          req, res, json, 503, "unavailable", "temporarily unavailable; retry with the same key");
+          req, res, json, ApiError.UNAVAILABLE, "temporarily unavailable; retry with the same key");
       return;
     }
     switch (claim) {
@@ -114,8 +114,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
             req,
             res,
             json,
-            422,
-            "idempotency_key_reused",
+            ApiError.IDEMPOTENCY_KEY_REUSED,
             "this Idempotency-Key was used for a different request");
       }
       case IdempotencyStore.Claim.InProgress p -> {
@@ -124,8 +123,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
             req,
             res,
             json,
-            409,
-            "idempotency_key_in_use",
+            ApiError.IDEMPOTENCY_KEY_IN_USE,
             "a request with this Idempotency-Key is still running; retry later");
       }
       case IdempotencyStore.Claim.Replay r -> {
@@ -203,8 +201,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
             req,
             res,
             json,
-            409,
-            "idempotency_key_in_use",
+            ApiError.IDEMPOTENCY_KEY_IN_USE,
             "a request with this Idempotency-Key took over; retry later");
         return;
       }

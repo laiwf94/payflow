@@ -357,6 +357,27 @@ differs from Stripe, which replays 500s, and is safe here because the rollback g
 happened. A claim whose request died holds a lock for 60 s, after which another request with the
 same key takes it over; its work had rolled back with it, so starting over is safe.
 
+A replay is the first answer byte for byte, so a replayed error carries the first request's
+`request_id` in its body; the `X-Request-Id` header is always the current request's.
+
+## Errors
+
+Every error, from a filter or from a controller, is
+`{"error":{"code","message","request_id"}}`, and the code comes from one enum, `ApiError`, which
+pairs each code with its status. A filter or handler can't invent a code: it has to name one of
+fifteen. The exception handler sets the content type rather than negotiating it, so even a 406
+for an `Accept` that rules out JSON gets the JSON body.
+
+openapi.yaml lists, on every error response, the codes it can carry (`x-error-codes`), and the
+five that can happen on any request (unknown path, wrong method, unacceptable `Accept`, internal
+error, database unreachable) once at the top. `OpenApiContractTest` holds the two to each other
+in both directions: the codes in the spec are exactly `ApiError`'s, each under the status
+`ApiError` gives it; every (operation, status, code) the spec documents is produced by a real
+request; and every response a request produces is documented, with a body that validates and the
+headers the spec promises (`X-Request-Id` everywhere, `Location` on a 201, `WWW-Authenticate` on
+a 401, `Idempotent-Replayed` only where a stored answer can be replayed). Adding a code or a
+response without the other fails the build.
+
 ## What fails, and what happens next
 
 | Failure | Effect | Recovery |

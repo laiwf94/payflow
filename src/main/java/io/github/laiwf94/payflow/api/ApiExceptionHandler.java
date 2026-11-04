@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
@@ -39,7 +40,7 @@ class ApiExceptionHandler {
             .min(Comparator.comparing(FieldError::getField))
             .map(f -> snake(f.getField()) + ": " + f.getDefaultMessage())
             .orElse("invalid request");
-    return error(400, "invalid_argument", message, req);
+    return error(ApiError.INVALID_ARGUMENT, message, req);
   }
 
   @ExceptionHandler(HttpMessageNotReadableException.class)
@@ -47,71 +48,70 @@ class ApiExceptionHandler {
       HttpMessageNotReadableException e, HttpServletRequest req) {
     for (Throwable t = e; t != null; t = t.getCause()) {
       if (t instanceof BodyLimitFilter.PayloadTooLarge) {
-        return error(413, "payload_too_large", t.getMessage(), req);
+        return error(ApiError.PAYLOAD_TOO_LARGE, t.getMessage(), req);
       }
     }
     return error(
-        400,
-        "invalid_argument",
+        ApiError.INVALID_ARGUMENT,
         "body must be a JSON object with the documented fields and types",
         req);
   }
 
   @ExceptionHandler({InvalidMoneyException.class, IllegalArgumentException.class})
   ResponseEntity<Map<String, Object>> badValue(RuntimeException e, HttpServletRequest req) {
-    return error(400, "invalid_argument", e.getMessage(), req);
+    return error(ApiError.INVALID_ARGUMENT, e.getMessage(), req);
   }
 
   @ExceptionHandler(OrderCursors.InvalidCursor.class)
   ResponseEntity<Map<String, Object>> invalidCursor(
       OrderCursors.InvalidCursor e, HttpServletRequest req) {
-    return error(400, "invalid_cursor", e.getMessage(), req);
+    return error(ApiError.INVALID_CURSOR, e.getMessage(), req);
   }
 
   @ExceptionHandler({OrderService.NotFound.class, OrderController.OrderNotFound.class})
   ResponseEntity<Map<String, Object>> notFound(RuntimeException e, HttpServletRequest req) {
-    return error(404, "not_found", "order not found", req);
+    return error(ApiError.NOT_FOUND, "order not found", req);
   }
 
   @ExceptionHandler(NoResourceFoundException.class)
   ResponseEntity<Map<String, Object>> noRoute(NoResourceFoundException e, HttpServletRequest req) {
-    return error(404, "not_found", "no such endpoint", req);
+    return error(ApiError.NOT_FOUND, "no such endpoint", req);
   }
 
   @ExceptionHandler(OrderService.WrongState.class)
   ResponseEntity<Map<String, Object>> wrongState(
       OrderService.WrongState e, HttpServletRequest req) {
-    return error(409, e.code(), e.getMessage(), req);
+    return error(ApiError.ofCode(e.code()), e.getMessage(), req);
   }
 
   @ExceptionHandler(OrderService.ReferenceInUse.class)
   ResponseEntity<Map<String, Object>> referenceInUse(
       OrderService.ReferenceInUse e, HttpServletRequest req) {
-    return error(409, "order_reference_in_use", e.getMessage(), req);
+    return error(ApiError.ORDER_REFERENCE_IN_USE, e.getMessage(), req);
   }
 
   @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
   ResponseEntity<Map<String, Object>> method(
       HttpRequestMethodNotSupportedException e, HttpServletRequest req) {
-    return error(405, "method_not_allowed", "method not allowed here", req);
+    return error(ApiError.METHOD_NOT_ALLOWED, "method not allowed here", req);
   }
 
   @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
   ResponseEntity<Map<String, Object>> mediaType(
       HttpMediaTypeNotSupportedException e, HttpServletRequest req) {
-    return error(415, "unsupported_media_type", "send Content-Type: application/json", req);
+    return error(ApiError.UNSUPPORTED_MEDIA_TYPE, "send Content-Type: application/json", req);
   }
 
   @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
   ResponseEntity<Map<String, Object>> notAcceptable(
       HttpMediaTypeNotAcceptableException e, HttpServletRequest req) {
-    return error(406, "not_acceptable", "responses are application/json", req);
+    return error(ApiError.NOT_ACCEPTABLE, "responses are application/json", req);
   }
 
   @ExceptionHandler(Exception.class)
   ResponseEntity<Map<String, Object>> unexpected(Exception e, HttpServletRequest req) {
     log.error("unhandled error on {} {}", req.getMethod(), req.getRequestURI(), e);
-    return error(500, "internal", "internal error", req);
+    return error(ApiError.INTERNAL, "internal error", req);
   }
 
   static String snake(String field) {
@@ -119,7 +119,11 @@ class ApiExceptionHandler {
   }
 
   private static ResponseEntity<Map<String, Object>> error(
-      int status, String code, String message, HttpServletRequest req) {
-    return ResponseEntity.status(status).body(ApiErrors.body(code, message, RequestIds.of(req)));
+      ApiError error, String message, HttpServletRequest req) {
+    // The content type is set, not negotiated: an error is JSON even when the Accept header
+    // asked for something else, which is exactly the case a 406 reports.
+    return ResponseEntity.status(error.status())
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(ApiErrors.body(error, message, RequestIds.of(req)));
   }
 }

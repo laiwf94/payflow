@@ -40,7 +40,8 @@ public final class BodyLimitFilter extends OncePerRequestFilter {
       HttpServletRequest req, HttpServletResponse res, FilterChain chain)
       throws ServletException, IOException {
     if (req.getContentLengthLong() > MAX_BODY_BYTES) {
-      ApiErrors.write(req, res, json, 413, "payload_too_large", new PayloadTooLarge().getMessage());
+      ApiErrors.write(
+          req, res, json, ApiError.PAYLOAD_TOO_LARGE, new PayloadTooLarge().getMessage());
       return;
     }
     chain.doFilter(new Limited(req), res);
