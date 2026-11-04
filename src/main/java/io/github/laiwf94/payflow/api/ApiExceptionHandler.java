@@ -8,6 +8,10 @@ import java.util.Map;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.RecoverableDataAccessException;
+import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -106,6 +110,22 @@ class ApiExceptionHandler {
   ResponseEntity<Map<String, Object>> notAcceptable(
       HttpMediaTypeNotAcceptableException e, HttpServletRequest req) {
     return error(ApiError.NOT_ACCEPTABLE, "responses are application/json", req);
+  }
+
+  /**
+   * The database can't be reached: refused, the pool timed out, or the connection dropped. Nothing
+   * was committed (a POST's transaction rolls back on any 5xx), so the client should retry.
+   */
+  @ExceptionHandler({
+    DataAccessResourceFailureException.class,
+    TransientDataAccessResourceException.class,
+    RecoverableDataAccessException.class
+  })
+  ResponseEntity<Map<String, Object>> databaseUnreachable(
+      DataAccessException e, HttpServletRequest req) {
+    log.warn(
+        "database unreachable on {} {}: {}", req.getMethod(), req.getRequestURI(), e.getMessage());
+    return error(ApiError.UNAVAILABLE, "temporarily unavailable; retry", req);
   }
 
   @ExceptionHandler(Exception.class)

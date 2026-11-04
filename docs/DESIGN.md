@@ -392,7 +392,7 @@ response without the other fails the build.
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
 | Malformed event on the topic | Moved to the dead-letter topic | Consumer continues |
-| Postgres down | POSTs get 503 `unavailable` before doing anything; workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
+| Postgres down | API requests get 503 `unavailable` (a POST before doing anything, or rolled back if the connection drops mid-request); workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
 | Client retries a POST | Replay of the first response | Idempotency key |
 | Wrong credentials for a provider | Retried as transient, error logged | Fix configuration; orders resume |
 
