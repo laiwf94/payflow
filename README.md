@@ -40,6 +40,22 @@ service while an authorization is in flight. If ports 8080, 8081 or 8090 are tak
 `PAYFLOW_HOST_PORT`, `PAYFLOW_HOST_MANAGEMENT_PORT` and `PAYFLOW_HOST_SIMULATOR_PORT` for both
 commands.
 
+A second instance and a rolling restart:
+
+```console
+$ docker compose --profile pair up -d --build
+$ ./examples/rolling-restart.py
+```
+
+This creates 10,000 orders for two merchants (`acme` and `globex`) across both instances, then
+pages each merchant's listing 25 at a time, sending every cursor to the other instance, while
+more orders keep arriving and each instance in turn is stopped with `SIGTERM` and started again.
+It fails unless every merchant's listing has each of its orders exactly once, none of the other
+merchant's, newest first, and unless every order completes with one authorization, one capture,
+one reservation and one shipment on the fake providers' ledgers. A request that finds its
+instance stopping goes to the other one with the same idempotency key. Python 3.10+, standard
+library only; `ORDERS`, `PAGE_LIMIT` and `PAGE_DELAY` change the size and pace.
+
 To run it from source, start Postgres and a Kafka-compatible broker, then:
 
 ```console
@@ -57,7 +73,10 @@ $ curl -s localhost:8080/livez | jq -r .components.build.details.version
 X.Y.Z
 ```
 
-A build from source reports the version in `build.gradle.kts` (a `-SNAPSHOT`).
+A build from source reports the version in `build.gradle.kts` (a `-SNAPSHOT`). To run the demo
+or the rolling restart against a published image instead of a local build, set
+`PAYFLOW_IMAGE=ghcr.io/laiwf94/payflow:X.Y.Z` and start the stack with `--no-build`. What changed
+in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 Behind more than one instance, set `PAYFLOW_CURSOR_SECRETS` (at least 32 characters, the same
 everywhere) so a listing cursor issued by one instance is accepted by the next.
@@ -146,13 +165,14 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
 | Listing | jqwik pages through two merchants' orders with random filters and page sizes while orders keep arriving, many tied on `created_at`, and every page boundary goes through a signed cursor: no order is repeated, none that existed when paging began is skipped, and the order is strictly newest first. Over HTTP, two threads insert while 300 orders are paged; a flipped bit, another merchant's cursor or changed filters is a 400. |
+| Rolling restart | Outside the gate, against the compose stack: `examples/rolling-restart.py` pages 10,000 orders of two merchants across two instances while each is stopped with `SIGTERM` and started again under load, and checks every listing and every provider ledger. |
 | Contract | The OpenAPI document and Spring's routes must match both ways. Every documented response and every error code it lists is produced by a real request and checked against its schema and headers, nothing undocumented comes back, and the spec's codes are exactly the ones the code can send. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 291 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 305 tests, 90% line coverage floor (currently 95%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
@@ -198,6 +218,7 @@ src/main/java/io/github/laiwf94/payflow/
   sim         the fake providers and their control API
 src/main/resources/db/migration   Flyway migrations
 examples/demo.sh                  failure scenarios against docker compose
+examples/rolling-restart.py       10,000 orders paged across two instances while both restart
 bench/                            k6 script and benchmark runner
 ```
 

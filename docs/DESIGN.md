@@ -230,6 +230,19 @@ applied a capture and holds the answer past a 1 s grace: the order is abandoned.
 instance resumes it on its first poll, finds the capture and completes it, with one
 authorization and one capture on the provider's ledger.
 
+`examples/rolling-restart.py` does the same to a pair of instances under load, outside the gate
+because it takes about three minutes. On the compose stack it creates 10,000 orders for two
+merchants, then restarts each instance in turn with `docker compose stop` while about 80 orders
+a second keep arriving, the fake provider adds 250 ms to every authorization and capture so
+steps are always running, and both merchants' listings are paged 25 at a time with each cursor
+redeemed on the other instance. A request that finds its instance stopping is retried on the
+other with the same idempotency key. On the 0.2.0-rc.1 image (5 Nov 2026, a cloud Linux VM,
+everything in Docker) each worker drained in about 240 ms and the process exited 2.3-2.5 s
+after `SIGTERM`. All 11,572 orders completed with exactly one authorization, one capture, one
+reservation and one shipment each, and both listings had every one of their orders once, newest
+first. The same run with a different cursor secret on the second instance fails on page 2 with
+`invalid_cursor`, which is the reason `PAYFLOW_CURSOR_SECRETS` must be shared.
+
 ### Cancel and refund
 
 A cancel sets a flag, accepted only before capture, and pulls the order's
@@ -537,6 +550,10 @@ tagged commit, then:
   `ghcr.io/laiwf94/payflow`. `latest` moves only for a final release.
 - **Release.** The jar (`payflow-X.Y.Z.jar`), the SBOM and `SHA256SUMS` are attached to a GitHub
   release whose notes give the image digest.
+
+CHANGELOG.md lists what changed, under "Unreleased" until a tag names the version, and the
+release notes link to it. `PAYFLOW_IMAGE` points the compose stack at a published image, so
+`examples/demo.sh` and `examples/rolling-restart.py` run unchanged against a release.
 
 ## Growing past one database
 

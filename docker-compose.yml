@@ -32,7 +32,9 @@ services:
 
   simulator:
     build: .
-    image: payflow:local
+    # PAYFLOW_IMAGE runs a published image instead, e.g. ghcr.io/laiwf94/payflow:0.2.0 with
+    # `docker compose up -d --no-build`.
+    image: ${PAYFLOW_IMAGE:-payflow:local}
     command: ["simulator"]
     environment:
       PAYFLOW_PORT: "8090"
@@ -40,8 +42,8 @@ services:
     ports:
       - "127.0.0.1:${PAYFLOW_HOST_SIMULATOR_PORT:-8090}:8090"
 
-  app:
-    image: payflow:local
+  app: &app
+    image: ${PAYFLOW_IMAGE:-payflow:local}
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,8 +55,9 @@ services:
       PAYFLOW_DB_URL: jdbc:postgresql://postgres:5432/payflow
       PAYFLOW_DB_PASSWORD: payflow-demo
       PAYFLOW_KAFKA_BOOTSTRAP: redpanda:9092
-      # Demo merchant "acme"; the key is pf_demo_acme_0123456789abcdefghijklmnop.
-      PAYFLOW_API_KEYS: acme:da4c799cd4e103221d18a07d2090e355b5aa1d3936add5cbf39afd6449ed320b
+      # Demo merchants "acme" (key pf_demo_acme_0123456789abcdefghijklmnop) and "globex"
+      # (key pf_demo_globex_0123456789abcdefghijklmn).
+      PAYFLOW_API_KEYS: acme:da4c799cd4e103221d18a07d2090e355b5aa1d3936add5cbf39afd6449ed320b,globex:79562157538ee17c9b30a09d1b9d192397b3a89d32eb79f8c395309cd3735c50
       # Signs listing cursors; shared by every instance so a cursor survives a restart.
       PAYFLOW_CURSOR_SECRETS: demo_cursor_secret_0123456789abcdef
       PAYFLOW_SIMULATOR_ENABLED: "false"
@@ -71,3 +74,12 @@ services:
     ports:
       - "127.0.0.1:${PAYFLOW_HOST_PORT:-8080}:8080"
       - "127.0.0.1:${PAYFLOW_HOST_MANAGEMENT_PORT:-8081}:8081"
+
+  # A second instance on the same database and broker, for examples/rolling-restart.sh:
+  #   docker compose --profile pair up -d --build
+  app2:
+    <<: *app
+    profiles: [pair]
+    ports:
+      - "127.0.0.1:${PAYFLOW_HOST_PORT_2:-8180}:8080"
+      - "127.0.0.1:${PAYFLOW_HOST_MANAGEMENT_PORT_2:-8181}:8081"
