@@ -33,6 +33,11 @@ notes on GitHub link here.
   to `payflow.saga.shutdown-grace` (5 s), and hands every lease back, so the next instance
   resumes on its first poll instead of waiting out the lease. New counter
   `payflow.saga.handed_back`.
+- Groundwork for partial refunds (#24): a `refunds` table with one row per refund, and a new order
+  state, `PARTIALLY_REFUNDED`, between `COMPLETED` and `REFUNDED`. The database refuses, at
+  commit and under concurrency, any refunds of an order that add up to more than it captured or
+  return more of a line than it bought. No endpoint writes refunds yet; clients that switch over
+  every order state should add the new one.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

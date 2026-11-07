@@ -34,6 +34,9 @@ class OrderStateTest {
           List.of(RELEASING_INVENTORY, FAILED),
           List.of(RELEASING_INVENTORY, CANCELLED),
           List.of(COMPLETED, REFUNDING),
+          List.of(COMPLETED, PARTIALLY_REFUNDED),
+          List.of(COMPLETED, REFUNDED),
+          List.of(PARTIALLY_REFUNDED, REFUNDED),
           List.of(REFUNDING, REFUNDED));
 
   @Test
@@ -52,9 +55,10 @@ class OrderStateTest {
     assertThat(FAILED.next()).isEmpty();
     assertThat(CANCELLED.next()).isEmpty();
     assertThat(REFUNDED.next()).isEmpty();
-    assertThat(COMPLETED.next()).containsExactly(REFUNDING);
+    assertThat(COMPLETED.next()).containsExactlyInAnyOrder(REFUNDING, PARTIALLY_REFUNDED, REFUNDED);
+    assertThat(PARTIALLY_REFUNDED.next()).containsExactly(REFUNDED);
     assertThat(EnumSet.allOf(OrderState.class).stream().filter(OrderState::isTerminal))
-        .containsExactlyInAnyOrder(COMPLETED, FAILED, CANCELLED, REFUNDED);
+        .containsExactlyInAnyOrder(COMPLETED, FAILED, CANCELLED, PARTIALLY_REFUNDED, REFUNDED);
   }
 
   @Test
@@ -94,7 +98,7 @@ class OrderStateTest {
     OrderState s = PENDING;
     int steps = 0;
     for (int choice : choices) {
-      if (s.isTerminal() && s != COMPLETED) {
+      if (s.isTerminal() && s != COMPLETED && s != PARTIALLY_REFUNDED) {
         break;
       }
       List<OrderState> options = List.copyOf(s.next());

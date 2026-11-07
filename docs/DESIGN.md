@@ -35,8 +35,9 @@ the eight-digit ceiling card processors commonly accept for one charge, and ever
 uses `Math.addExact` / `multiplyExact`, so an overflow is a 400 and not a negative total. Codes
 with no minor unit (XAU, XTS, XXX) are refused.
 
-The other tables are `outbox` (events waiting for Kafka), `inbox` and `order_timeline` (the
-consumer's deduplication and its projection), and `idempotency_keys`.
+The other tables are `refunds` (one row per refund, below), `outbox` (events waiting for Kafka),
+`inbox` and `order_timeline` (the consumer's deduplication and its projection), and
+`idempotency_keys`.
 
 ### Merchant references
 
@@ -107,7 +108,10 @@ false`: Flyway's default lock is an advisory lock held in an open transaction, a
 index build waits for every open transaction, Flyway's included, so it would wait forever. The
 session-level lock still keeps two starting instances from migrating at once. A concurrent build
 that fails leaves an `INVALID` index; drop it with `DROP INDEX CONCURRENTLY` and start the service
-again, and Flyway retries the migration.
+again, and Flyway retries the migration. Changing a CHECK follows the same two steps: V10 drops
+each old state constraint and adds its replacement `NOT VALID` in one short exclusive lock, and
+V11 validates them all. The replacements only widen the old rules for existing states, so
+validation can't fail on a row the old ones accepted.
 
 ## States, and the database that enforces them
 
@@ -119,6 +123,8 @@ PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPL
 RELEASING_INVENTORY <---------------+
    |
    +--> FAILED | CANCELLED
+
+COMPLETED -> PARTIALLY_REFUNDED -> REFUNDED, and COMPLETED -> REFUNDED
 ```
 
 Forward states record what has been done; compensating states record what is being undone. The
@@ -129,12 +135,44 @@ set, so it can't be forged.) There is a trap here: `(NULL, 'COMPLETED') IN (...)
 NULL CHECK passes, so the constraint is a `CASE` that requires `PENDING` when there is no
 previous state.
 
-More constraints tie states to money. A `COMPLETED` or `REFUNDING` order has
-`captured_minor = amount_minor`; `REFUNDED` has refunded everything; `FAILED` and `CANCELLED` have
+More constraints tie states to money. A `COMPLETED`, `REFUNDING` or `PARTIALLY_REFUNDED` order
+has `captured_minor = amount_minor`; `PARTIALLY_REFUNDED` has refunded more than nothing and less
+than everything; `REFUNDED` has refunded everything; `FAILED` and `CANCELLED` have
 `refunded_minor = captured_minor`. If the code ever tries to fail an order that still holds the
 customer's money, the database refuses the write; one of the mutants used to check the chaos
-test was caught by exactly this constraint. `OrderSchemaTest` drives every one of the 144 state
-pairs through raw SQL and checks the database accepts exactly the 15 legal ones.
+test was caught by exactly this constraint. `OrderSchemaTest` drives every one of the 169 state
+pairs through raw SQL and checks the database accepts exactly the 18 legal ones.
+
+`PARTIALLY_REFUNDED` and `REFUNDED` are the order's summary of its refunds, which are rows of
+their own. `REFUNDING` belongs to the full-refund step that runs today; it goes once refunds run
+per refund row, and until then an order that has refund rows can't enter it.
+
+### Refunds
+
+Each refund is a row in `refunds`: the order, `amount_minor`, optionally the `lines` it returns
+(`[{"sku": ..., "quantity": ...}]`, checked for shape by `refunds_lines_format`), a `state` of
+`PENDING`, `SUCCEEDED` or `FAILED`, and the provider's refund id, which a `SUCCEEDED` refund must
+have. A refund's order, amount and lines never change, and its state only leaves `PENDING`; a
+trigger refuses anything else (`refunds_immutable`, `refunds_legal_transition`).
+
+The rule that matters is that refunds never return more than was taken. A `PENDING` refund
+already counts, since it is money promised back. A deferred constraint trigger checks, when the
+transaction commits, that the order's refunds that haven't failed add up to at most
+`captured_minor` (`refunds_within_captured`), return no more of any sku than the order bought
+(`refunds_within_lines`), and belong to an order that is `COMPLETED`, `PARTIALLY_REFUNDED` or
+`REFUNDED` (`refunds_order_completed`). The same check runs when the order side changes: a
+capture that shrinks, or an order with refunds leaving those states. Deferring it lets one
+transaction write the refund and the order in either order.
+
+A sum checked in a trigger is only safe under concurrency if two transactions can't both sum
+before either commits. The trigger therefore locks the order row first, `FOR NO KEY UPDATE`: two
+refunds of one order queue there, and in `READ COMMITTED` each statement after the lock takes a
+fresh snapshot, so the second sees the first's committed refund. (`FOR UPDATE` would deadlock:
+each refund's foreign key already holds `FOR KEY SHARE` on the order, which `FOR UPDATE` waits
+on.) `SERIALIZABLE` is safe by itself. `REPEATABLE READ` is refused (`refunds_isolation`), because
+its snapshot is taken before the lock and would miss the other refund. `RefundSchemaTest` races
+six refunds of 6.00 against a 25.00 capture, all inserted before any commits, and exactly four
+commit, in every one of ten rounds.
 
 Every write the saga makes is a compare-and-set on `(id, lease_token, state)`, so a worker that
 lost its lease, or that is looking at an old copy of the row, changes nothing.
@@ -427,6 +465,7 @@ response without the other fails the build.
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |
 | API key length | 256 characters | `ApiKeys` |
 | Merchant id | 1-64 of `a-z 0-9 _ -` | `ApiKeys`, `orders_merchant_format` |
+| Refunds of an order | add up to at most the capture, and at most each line's quantity | `refunds_within_order` trigger |
 | Saga lease | 30 s | `payflow.saga.lease` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |

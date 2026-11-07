@@ -107,7 +107,8 @@ instance picks the orders up on its first poll.
 
 The state machine is enforced by the database too. A CHECK constraint refuses illegal
 transitions, and further constraints tie terminal states to money: a completed order is fully
-captured, and a failed one kept nothing.
+captured, and a failed one kept nothing. Refunds are rows of their own, and a trigger checked at
+commit refuses any set of them that would return more than was captured, even when they race.
 
 Events leave through a transactional outbox
 ([Richardson](https://microservices.io/patterns/data/transactional-outbox.html)): each state
@@ -160,7 +161,8 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Killing the process | The packaged jar runs as a child process and is killed with `SIGKILL` once while an authorization is in flight and once after the provider captured but before the service heard back. It completes with one authorization, one capture and one shipment. |
 | Stopping the process | The packaged jar is stopped with `SIGTERM` while an authorization is in flight (it finishes and the lease is released) and while a capture outlasts the shutdown grace (the lease is fenced and expired). With a 90 s lease, the next instance resumes on its first poll and completes with one authorization and one capture. In-process tests cover draining, the deadline, and claims made while stopping. |
 | Lost answers | Every money-moving call is applied by the provider and its answer lost, over real HTTP with real read timeouts, with the provider's key handling on and off. |
-| State machine | Every one of the 144 state pairs is tried with raw SQL; the database accepts exactly the 15 the code allows. |
+| State machine | Every one of the 169 state pairs is tried with raw SQL; the database accepts exactly the 18 the code allows. |
+| Refund bounds | Raw SQL refunds race each other in `READ COMMITTED` and `SERIALIZABLE`; the database never lets them add up to more than the capture, or return more of a line than was bought. |
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
@@ -172,7 +174,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 305 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 318 tests, 90% line coverage floor (currently 95%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

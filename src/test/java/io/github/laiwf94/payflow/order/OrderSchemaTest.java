@@ -58,7 +58,7 @@ class OrderSchemaTest {
         }
       }
     }
-    assertThat(accepted).isEqualTo(15);
+    assertThat(accepted).isEqualTo(18);
   }
 
   @Test
@@ -102,6 +102,46 @@ class OrderSchemaTest {
                     .param("id", id)
                     .update())
         .hasMessageContaining("orders_completed_fully_captured");
+  }
+
+  @Test
+  void partiallyRefundedOrdersAreFullyCapturedAndRefundedInPartOnly() {
+    UUID id = insertPending();
+    for (OrderState s :
+        List.of(
+            OrderState.INVENTORY_RESERVED,
+            OrderState.PAYMENT_AUTHORIZED,
+            OrderState.PAYMENT_CAPTURED,
+            OrderState.COMPLETED)) {
+      move(id, s);
+    }
+    for (String money :
+        List.of(
+            "refunded_minor = 0",
+            "refunded_minor = captured_minor",
+            "captured_minor = amount_minor - 1, refunded_minor = 1")) {
+      assertThatThrownBy(
+              () ->
+                  jdbc.sql(
+                          "UPDATE orders SET state = 'PARTIALLY_REFUNDED', "
+                              + money
+                              + " WHERE id = :id")
+                      .param("id", id)
+                      .update())
+          .as(money)
+          .isInstanceOf(DataIntegrityViolationException.class)
+          .hasMessageMatching(
+              "(?s).*(orders_partially_refunded_in_part|orders_completed_fully_captured).*");
+    }
+    move(id, OrderState.PARTIALLY_REFUNDED);
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET next_attempt_at = now() WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_terminal_unscheduled");
+    move(id, OrderState.REFUNDED);
+    assertThat(state(id)).isEqualTo("REFUNDED");
   }
 
   @Test
@@ -222,15 +262,30 @@ class OrderSchemaTest {
             "CREATE INDEX orders_merchant_created_id ON public.orders USING btree"
                 + " (merchant_id, created_at, id)");
     assertThat(defs).doesNotContainKey("orders_merchant_created");
+  }
+
+  @Test
+  void everyOrdersConstraintIsValidated() {
     assertThat(
             jdbc.sql(
                     """
-                    SELECT convalidated FROM pg_constraint
-                    WHERE conname = 'orders_merchant_reference_format'
+                    SELECT conname FROM pg_constraint
+                    WHERE conrelid = 'orders'::regclass AND NOT convalidated
                     """)
-                .query(Boolean.class)
+                .query(String.class)
+                .list())
+        .isEmpty();
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT count(*) FROM pg_constraint
+                    WHERE conrelid = 'orders'::regclass AND contype = 'c'
+                      AND conname IN ('orders_merchant_reference_format',
+                        'orders_partially_refunded_in_part', 'orders_legal_transition')
+                    """)
+                .query(Integer.class)
                 .single())
-        .isTrue();
+        .isEqualTo(3);
   }
 
   private void setReference(UUID id, String merchant, String reference) {
@@ -275,19 +330,29 @@ class OrderSchemaTest {
   /** Moves the row with whatever money columns the target state requires. */
   private void move(UUID id, OrderState to) {
     boolean captured =
-        to == OrderState.COMPLETED || to == OrderState.REFUNDING || to == OrderState.REFUNDED;
+        to == OrderState.COMPLETED
+            || to == OrderState.REFUNDING
+            || to == OrderState.PARTIALLY_REFUNDED
+            || to == OrderState.REFUNDED;
     jdbc.sql(
             """
             UPDATE orders SET state = :state,
               next_attempt_at = CASE WHEN :terminal THEN NULL ELSE now() END,
               captured_minor = CASE WHEN :captured THEN amount_minor ELSE 0 END,
-              refunded_minor = CASE WHEN :refunded THEN amount_minor ELSE 0 END
+              refunded_minor = CASE :refunded WHEN 'all' THEN amount_minor
+                WHEN 'part' THEN amount_minor / 2 ELSE 0 END
             WHERE id = :id
             """)
         .param("state", to.name())
         .param("terminal", to.isTerminal())
         .param("captured", captured)
-        .param("refunded", to == OrderState.REFUNDED)
+        .param(
+            "refunded",
+            switch (to) {
+              case REFUNDED -> "all";
+              case PARTIALLY_REFUNDED -> "part";
+              default -> "none";
+            })
         .param("id", id)
         .update();
   }

@@ -9,7 +9,8 @@ import java.util.Set;
 /**
  * Where an order is in its saga. Forward states record what has been done; compensating states
  * record what is being undone. The same table is enforced by a CHECK constraint in the database
- * (see {@code V1__orders.sql}), and {@code OrderSchemaTest} keeps the two in step.
+ * (see {@code V1__orders.sql}, as amended by {@code V10}), and {@code OrderSchemaTest} keeps the
+ * two in step.
  *
  * <pre>
  * PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED -> REFUNDING -> REFUNDED
@@ -19,7 +20,13 @@ import java.util.Set;
  * RELEASING_INVENTORY <------------+
  *    |
  *    +--> FAILED | CANCELLED
+ *
+ * COMPLETED -> PARTIALLY_REFUNDED -> REFUNDED, and COMPLETED -> REFUNDED
  * </pre>
+ *
+ * <p>{@code PARTIALLY_REFUNDED} and the direct {@code COMPLETED -> REFUNDED} are the order-level
+ * view of refunds recorded one row each in the {@code refunds} table. {@code REFUNDING} belongs to
+ * the older full-refund step and goes once refunds run per refund row.
  */
 public enum OrderState {
   PENDING,
@@ -33,6 +40,7 @@ public enum OrderState {
   FAILED,
   CANCELLED,
   REFUNDING,
+  PARTIALLY_REFUNDED,
   REFUNDED;
 
   private static final Map<OrderState, Set<OrderState>> NEXT = new EnumMap<>(OrderState.class);
@@ -45,7 +53,8 @@ public enum OrderState {
     allow(CANCELLING_SHIPMENT, REVERSING_PAYMENT);
     allow(REVERSING_PAYMENT, RELEASING_INVENTORY);
     allow(RELEASING_INVENTORY, FAILED, CANCELLED);
-    allow(COMPLETED, REFUNDING);
+    allow(COMPLETED, REFUNDING, PARTIALLY_REFUNDED, REFUNDED);
+    allow(PARTIALLY_REFUNDED, REFUNDED);
     allow(REFUNDING, REFUNDED);
     for (OrderState s : values()) {
       NEXT.putIfAbsent(s, Collections.unmodifiableSet(EnumSet.noneOf(OrderState.class)));
@@ -65,11 +74,15 @@ public enum OrderState {
   }
 
   /**
-   * True when the saga has nothing left to do. {@code COMPLETED} is terminal for the saga even
-   * though a refund can later move it on.
+   * True when the saga has nothing left to do. {@code COMPLETED} and {@code PARTIALLY_REFUNDED} are
+   * terminal for the saga even though a refund can later move them on.
    */
   public boolean isTerminal() {
-    return this == COMPLETED || this == FAILED || this == CANCELLED || this == REFUNDED;
+    return this == COMPLETED
+        || this == FAILED
+        || this == CANCELLED
+        || this == PARTIALLY_REFUNDED
+        || this == REFUNDED;
   }
 
   /** True for steps that undo work. They retry until they succeed instead of giving up. */

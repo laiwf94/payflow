@@ -583,7 +583,10 @@ components:
       enum:
         [PENDING, INVENTORY_RESERVED, PAYMENT_AUTHORIZED, PAYMENT_CAPTURED, COMPLETED,
          CANCELLING_SHIPMENT, REVERSING_PAYMENT, RELEASING_INVENTORY, FAILED, CANCELLED,
-         REFUNDING, REFUNDED]
+         REFUNDING, PARTIALLY_REFUNDED, REFUNDED]
+      description: >-
+        `PARTIALLY_REFUNDED` is a completed order some but not all of whose capture has been
+        refunded; like `COMPLETED` it changes only when another refund is made.
     OrderList:
       type: object
       additionalProperties: false
