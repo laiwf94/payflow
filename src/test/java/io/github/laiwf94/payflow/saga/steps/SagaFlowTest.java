@@ -2,15 +2,22 @@ package io.github.laiwf94.payflow.saga.steps;
 
 import static io.github.laiwf94.payflow.order.OrderState.*;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderRepository;
+import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.RefundRepository;
+import io.github.laiwf94.payflow.refund.RefundService;
+import io.github.laiwf94.payflow.refund.RefundState;
+import io.github.laiwf94.payflow.refund.RefundTransitions;
+import io.github.laiwf94.payflow.refund.RefundWorker;
 import io.github.laiwf94.payflow.saga.Backoff;
 import io.github.laiwf94.payflow.saga.CrashPoints;
 import io.github.laiwf94.payflow.saga.SagaProperties;
@@ -52,10 +59,15 @@ class SagaFlowTest {
   @Autowired PaymentProviderSimulator payments;
   @Autowired InventorySimulator inventory;
   @Autowired ShippingSimulator shipping;
+  @Autowired RefundService refundService;
+  @Autowired RefundRepository refunds;
+  @Autowired RefundTransitions refundTransitions;
+  @Autowired RefundStep refundStep;
 
   private final MutableClock clock = new MutableClock(Instant.now());
   private final Map<String, Consumer<String>> hooks = new HashMap<>();
   private SagaWorker worker;
+  private RefundWorker refundWorker;
 
   @BeforeEach
   void setUp() {
@@ -76,6 +88,17 @@ class SagaFlowTest {
             repo,
             transitions,
             steps,
+            props,
+            clock,
+            new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
+            crash,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    refundWorker =
+        new RefundWorker(
+            refunds,
+            repo,
+            refundTransitions,
+            refundStep,
             props,
             clock,
             new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
@@ -102,15 +125,20 @@ class SagaFlowTest {
     return insert("pm_card_ok", Orders.ADDRESS);
   }
 
-  /** Runs the worker, moving the clock past any backoff, until the order stops changing. */
+  /**
+   * Runs both workers, moving the clock past any backoff, until the order's saga is done and none
+   * of its refunds is pending.
+   */
   private Order drive(Order o) {
     for (int i = 0; i < 50; i++) {
       Order now = repo.findById(o.id()).orElseThrow();
-      if (now.state().isTerminal()) {
+      if (now.state().isTerminal()
+          && refunds.listForOrder(o.id()).stream().allMatch(r -> r.state().isTerminal())) {
         return now;
       }
       clock.advance(Duration.ofSeconds(5));
       worker.runOnce();
+      refundWorker.runOnce();
     }
     return repo.findById(o.id()).orElseThrow();
   }
@@ -229,16 +257,29 @@ class SagaFlowTest {
   void refundAfterCompletion() {
     Order o = insert();
     worker.runOnce();
-    assertThat(transitions.requestRefund("globex", o.id(), clock.instant())).isEmpty();
-    assertThat(transitions.requestRefund("acme", o.id(), clock.instant()))
-        .get()
-        .extracting(Order::state)
-        .isEqualTo(REFUNDING);
-    assertThat(transitions.requestRefund("acme", o.id(), clock.instant())).isEmpty();
+    assertThatThrownBy(() -> refundService.refundRemaining("globex", o.id()))
+        .isInstanceOf(OrderService.NotFound.class);
+    assertThat(refundService.refundRemaining("acme", o.id()).state()).isEqualTo(COMPLETED);
+    // Asked again while the first is pending: nothing is left to promise, so nothing new starts.
+    assertThat(refundService.refundRemaining("acme", o.id()).state()).isEqualTo(COMPLETED);
+    assertThat(refunds.listForOrder(o.id()))
+        .singleElement()
+        .satisfies(r -> assertThat(r.amountMinor()).isEqualTo(2500));
     Order done = drive(o);
     assertThat(done.state()).isEqualTo(REFUNDED);
     assertThat(done.refundedMinor()).isEqualTo(2500);
     assertThat(operations(o)).containsExactly("authorize", "capture", "refund");
+    assertThat(refunds.listForOrder(o.id()))
+        .singleElement()
+        .satisfies(
+            r -> {
+              assertThat(r.state()).isEqualTo(RefundState.SUCCEEDED);
+              assertThat(r.providerRefundId())
+                  .isEqualTo(payments.refundsFor(done.paymentId()).get(0).id());
+            });
+    assertThatThrownBy(() -> refundService.refundRemaining("acme", o.id()))
+        .isInstanceOf(OrderService.WrongState.class)
+        .hasMessageContaining("refunded");
     assertThat(inventory.heldFor("sku-1")).as("goods were shipped").isEqualTo(2);
   }
 

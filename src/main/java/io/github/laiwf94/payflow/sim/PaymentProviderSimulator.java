@@ -6,11 +6,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * A card payment provider in the shape of the common two-step APIs: authorize holds the money,
  * capture takes it, void drops the hold, refund returns captured money. Every mutating call accepts
  * an idempotency key; a retry with the same key and parameters returns the first result.
+ *
+ * <p>A refund is an object of its own, as at the common providers: it has an id, the amount and the
+ * caller's reference, and the payment's refunds can be listed. That list is how a caller finds out
+ * whether a refund whose answer it lost was made, which the payment's refunded total alone can't
+ * tell once a payment has more than one refund.
  *
  * <p>{@link SimulatorSettings#honorIdempotencyKeys()} can switch key handling off, which models a
  * provider (or a proxy in between) that doesn't deduplicate. The orchestrator must still never
@@ -42,6 +49,9 @@ public final class PaymentProviderSimulator {
       long refunded,
       String declineCode) {}
 
+  /** One refund of a captured payment. {@code reference} is the caller's id for it. */
+  public record Refund(String id, String paymentId, String reference, long amount) {}
+
   /** One applied operation, kept so tests and the demo can audit exactly what was charged. */
   public record LedgerEntry(String operation, String paymentId, String reference, long amount) {}
 
@@ -50,9 +60,11 @@ public final class PaymentProviderSimulator {
   private final Faults faults;
   private final SimulatorSettings settings;
   private final Map<String, Payment> payments = new LinkedHashMap<>();
+  private final Map<String, Refund> refunds = new LinkedHashMap<>();
   private final Map<String, Stored> idempotency = new HashMap<>();
   private final List<LedgerEntry> ledger = new ArrayList<>();
   private long nextId = 1;
+  private long nextRefundId = 1;
 
   public PaymentProviderSimulator(Faults faults, SimulatorSettings settings) {
     this.faults = faults;
@@ -140,13 +152,19 @@ public final class PaymentProviderSimulator {
                 }));
   }
 
-  public Simulated<Payment> refund(String idempotencyKey, String paymentId, long amount) {
+  /**
+   * Returns {@code amount} of a captured payment to the customer. {@code reference} is the caller's
+   * id for the refund, kept on it so a later {@link #findRefunds} can match it.
+   */
+  public Simulated<Refund> refund(
+      String idempotencyKey, String paymentId, long amount, String reference) {
+    requireText(reference, "reference");
     return faults.run(
         "payment.refund",
         () ->
             idempotent(
                 idempotencyKey,
-                "refund|" + paymentId + "|" + amount,
+                "refund|" + paymentId + "|" + amount + "|" + reference,
                 () -> {
                   Payment p = find(paymentId);
                   requireStatus(p, Status.CAPTURED);
@@ -154,10 +172,31 @@ public final class PaymentProviderSimulator {
                     throw new SimulatorException(
                         400, "invalid_amount", "refund exceeds the captured amount left");
                   }
-                  Payment r = with(p, Status.CAPTURED, p.captured(), p.refunded() + amount);
+                  with(p, Status.CAPTURED, p.captured(), p.refunded() + amount);
+                  Refund r =
+                      new Refund(
+                          "re_" + String.format("%08d", nextRefundId++), p.id(), reference, amount);
+                  refunds.put(r.id(), r);
                   ledger.add(new LedgerEntry("refund", p.id(), p.reference(), amount));
                   return r;
-                }));
+                },
+                r -> r));
+  }
+
+  /** Every refund of a payment, oldest first. */
+  public Simulated<List<Refund>> findRefunds(String paymentId) {
+    return faults.run(
+        "payment.lookup",
+        () -> {
+          synchronized (this) {
+            find(paymentId);
+            return refundsFor(paymentId);
+          }
+        });
+  }
+
+  public synchronized List<Refund> refundsFor(String paymentId) {
+    return refunds.values().stream().filter(r -> r.paymentId().equals(paymentId)).toList();
   }
 
   /** Every payment ever created for a reference, oldest first. */
@@ -183,13 +222,23 @@ public final class PaymentProviderSimulator {
 
   public synchronized void reset() {
     payments.clear();
+    refunds.clear();
     idempotency.clear();
     ledger.clear();
     nextId = 1;
+    nextRefundId = 1;
   }
 
-  private synchronized Payment idempotent(
-      String key, String fingerprint, java.util.function.Supplier<Payment> effect) {
+  private Payment idempotent(String key, String fingerprint, Supplier<Payment> effect) {
+    return idempotent(key, fingerprint, effect, this::current);
+  }
+
+  /**
+   * Runs {@code effect} once per key. A replay returns {@code replay} of the first result, or
+   * throws the first error again.
+   */
+  private synchronized <T> T idempotent(
+      String key, String fingerprint, Supplier<T> effect, UnaryOperator<T> replay) {
     if (key == null || !settings.honorIdempotencyKeys()) {
       return effect.get();
     }
@@ -202,12 +251,14 @@ public final class PaymentProviderSimulator {
       if (stored.result() instanceof SimulatorException e) {
         throw e;
       }
-      return current((Payment) stored.result());
+      @SuppressWarnings("unchecked")
+      T first = (T) stored.result();
+      return replay.apply(first);
     }
     try {
-      Payment p = effect.get();
-      idempotency.put(key, new Stored(fingerprint, p));
-      return p;
+      T result = effect.get();
+      idempotency.put(key, new Stored(fingerprint, result));
+      return result;
     } catch (SimulatorException e) {
       idempotency.put(key, new Stored(fingerprint, e));
       throw e;

@@ -113,10 +113,20 @@ each old state constraint and adds its replacement `NOT VALID` in one short excl
 V11 validates them all. The replacements only widen the old rules for existing states, so
 validation can't fail on a row the old ones accepted.
 
+Removing something takes the other half, a contract migration, and only once no code writes it.
+V14 drops `REFUNDING` from the state constraints. An order still in `REFUNDING` was being refunded
+by a 0.1.x instance's step, which this release no longer has, and moving it in SQL could refund it
+twice. So V14 replaces the constraints first, under the exclusive lock that the `ALTER` takes, then
+refuses to commit if any order is still `REFUNDING`. Flyway rolls the migration back and the new
+instance doesn't start. The old instances finish those refunds in seconds, and the next start
+goes through. `RefundingMigrationTest` runs exactly that on a database of its own. Orders the old
+step finished keep `previous_state = REFUNDING`, so the pair `(REFUNDING, REFUNDED)` stays legal
+for them, and V15 validates.
+
 ## States, and the database that enforces them
 
 ```text
-PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED -> REFUNDING -> REFUNDED
+PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED
    |              |    \                 |                     |
    |              |     +----> REVERSING_PAYMENT <---- CANCELLING_SHIPMENT
    v              v                 |
@@ -135,17 +145,18 @@ set, so it can't be forged.) There is a trap here: `(NULL, 'COMPLETED') IN (...)
 NULL CHECK passes, so the constraint is a `CASE` that requires `PENDING` when there is no
 previous state.
 
-More constraints tie states to money. A `COMPLETED`, `REFUNDING` or `PARTIALLY_REFUNDED` order
+More constraints tie states to money. A `COMPLETED` or `PARTIALLY_REFUNDED` order
 has `captured_minor = amount_minor`; `PARTIALLY_REFUNDED` has refunded more than nothing and less
 than everything; `REFUNDED` has refunded everything; `FAILED` and `CANCELLED` have
 `refunded_minor = captured_minor`. If the code ever tries to fail an order that still holds the
 customer's money, the database refuses the write; one of the mutants used to check the chaos
-test was caught by exactly this constraint. `OrderSchemaTest` drives every one of the 169 state
-pairs through raw SQL and checks the database accepts exactly the 18 legal ones.
+test was caught by exactly this constraint. `OrderSchemaTest` drives every one of the 144 state
+pairs through raw SQL and checks the database accepts exactly the 16 legal ones.
 
 `PARTIALLY_REFUNDED` and `REFUNDED` are the order's summary of its refunds, which are rows of
-their own. `REFUNDING` belongs to the full-refund step that runs today; it goes once refunds run
-per refund row, and until then an order that has refund rows can't enter it.
+their own. The order changes only when a refund succeeds. A refund still in progress is a
+`PENDING` row, not an order state, so refunds of one order run side by side and never hold up,
+or wait for, anything else the order does.
 
 ### Refunds
 
@@ -176,6 +187,52 @@ commit, in every one of ten rounds.
 
 Every write the saga makes is a compare-and-set on `(id, lease_token, state)`, so a worker that
 lost its lease, or that is looking at an old copy of the row, changes nothing.
+
+### Running refunds
+
+A refund row carries its own schedule and lease (`next_attempt_at`, `attempt`, `lease_token`,
+`lease_until`), and the database holds that bookkeeping to the state. A `PENDING` refund is
+always scheduled, so none can be forgotten (`refunds_pending_scheduled`). A settled one is never
+scheduled or leased (`refunds_settled_unleased`), and a `FAILED` one records why
+(`refunds_failed_explained`). The money check above runs on inserts and state changes only, not
+on every lease the worker takes.
+
+`RefundService` creates refunds. It locks the order row with the same `FOR NO KEY UPDATE` the
+trigger takes, sums the refunds that haven't failed, and refuses an amount larger than what is
+left, so two requests can't both be given the last of the capture. The trigger checks the result
+again at commit. A full refund (`POST /v1/orders/{id}/refund`) is one refund of whatever is left.
+If pending refunds already cover all of it, nothing new is created and the order comes back as it
+is.
+
+`RefundWorker` runs them. It works the way the saga worker does, with the same settings: a
+dispatcher leases due refunds with `SKIP LOCKED` (a partial index on `next_attempt_at` keeps the
+poll cheap when there are none), each runs on a virtual thread, and no transaction is open while
+the provider is asked. A refund is a single step, so each claim ends in exactly one fenced write:
+
+- **succeeded:** the refund row, the order's `refunded_minor`, its state and the order's event
+  commit together, the order moving to `PARTIALLY_REFUNDED` or `REFUNDED`;
+- **refused by the provider:** the row is `FAILED` with the provider's reason, and its share of
+  the capture is free again;
+- **otherwise:** the row is scheduled for another try with the saga's backoff, at least 2 s after
+  an unknown outcome.
+
+Refunds are retried until the provider answers, as compensations are, with an error log from the
+tenth attempt. The order's increment is atomic (`refunded_minor = refunded_minor + amount`), so
+refunds of one order that settle at the same moment add up rather than overwrite each other.
+
+`RefundStep` looks before it acts. The provider keeps each refund as an object with the caller's
+reference, here the refund row's id, and lists a payment's refunds. Every attempt first asks for
+that list. A refund whose answer was lost, or whose worker died mid-call, is found there and
+recorded instead of being made again. This holds even at a provider that ignores idempotency
+keys, which a payment's refunded total alone couldn't do once it has two partial refunds. The
+idempotency key, one per refund row (`Keys.refund`), covers the gap between the lookup and the
+call at a provider that does honour keys. `RefundWorkerTest` kills a worker after the provider
+refunded with keys ignored, and the next claim records the refund without a second one.
+
+On `SIGTERM` the refund worker stops claiming and gives in-flight refunds the same grace as the
+saga. It stops alongside the saga worker, not after it, so together they still fit inside
+`docker stop`'s 10 s. A refund still waiting for the provider at the deadline is abandoned: fenced
+and expired, so the next instance claims it at once as a recovery.
 
 ## Running the saga
 
@@ -287,8 +344,9 @@ A cancel sets a flag, accepted only before capture, and pulls the order's
 next attempt forward. The worker checks the flag before each forward step and diverts to that
 step's compensation; the order ends `CANCELLED` unless something else had already failed. A
 cancel that lands while a capture is in flight takes effect after it: the capture completes, the
-next decision sees the flag, and the money is refunded. A refund moves a `COMPLETED` order to
-`REFUNDING` and the worker refunds whatever the provider still holds.
+next decision sees the flag, and the money is refunded. A refund of a completed order is a
+refund row (see [Running refunds](#running-refunds)); the order stays `COMPLETED` until the
+provider has returned the money.
 
 ### Compensations look before they act
 
@@ -437,6 +495,8 @@ response without the other fails the build.
 | Provider applies a call and the answer is lost | Step retries after at least 2 s | Lookup by reference finds the result; no second charge |
 | Card declined, out of stock, address refused | Step fails | Compensation from that step; order ends `FAILED` with the reason |
 | Compensation keeps failing | Order stays in the compensating state | Retries forever, capped at 30 s apart; error log after 10 attempts |
+| Provider refuses a refund | Refund ends `FAILED` with the reason; the order is unchanged | Its share of the capture is free for another refund; error log |
+| Refund answer lost, or payflow killed mid-refund | Refund stays `PENDING` | The next attempt finds the provider's refund by the row's id; no second refund |
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
 | payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
@@ -465,7 +525,8 @@ response without the other fails the build.
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |
 | API key length | 256 characters | `ApiKeys` |
 | Merchant id | 1-64 of `a-z 0-9 _ -` | `ApiKeys`, `orders_merchant_format` |
-| Refunds of an order | add up to at most the capture, and at most each line's quantity | `refunds_within_order` trigger |
+| Refunds of an order | add up to at most the capture, and at most each line's quantity | `refunds_within_order` trigger, `RefundService` |
+| Refunds claimed per poll and in flight | 64 | `payflow.saga.batch-size` |
 | Saga lease | 30 s | `payflow.saga.lease` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |

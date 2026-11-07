@@ -27,7 +27,7 @@ public class OrderService {
   public static final class NotFound extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
-    NotFound() {
+    public NotFound() {
       super("order not found");
     }
   }
@@ -37,7 +37,7 @@ public class OrderService {
     private static final long serialVersionUID = 1L;
     private final String code;
 
-    WrongState(String code, String message) {
+    public WrongState(String code, String message) {
       super(message);
       this.code = code;
     }
@@ -149,25 +149,6 @@ public class OrderService {
             + current.state().name().toLowerCase(Locale.ROOT)
             + "; only orders not yet"
             + " captured can be cancelled, use refund after completion");
-  }
-
-  @Transactional(noRollbackFor = {NotFound.class, WrongState.class})
-  public Order refund(String merchantId, UUID id) {
-    Optional<Order> o = transitions.requestRefund(merchantId, id, clock.instant());
-    if (o.isPresent()) {
-      wakeWorkerAfterCommit();
-      return o.get();
-    }
-    Order current = get(merchantId, id);
-    if (current.state() == OrderState.REFUNDING) {
-      return current;
-    }
-    throw new WrongState(
-        "order_not_refundable",
-        "order is "
-            + current.state().name().toLowerCase(Locale.ROOT)
-            + "; only completed orders"
-            + " can be refunded");
   }
 
   private void wakeWorkerAfterCommit() {

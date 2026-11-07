@@ -124,6 +124,9 @@ class OrderApiTest {
     assertThat(cancel.status()).isEqualTo(409);
     Api.Response r = api.post("/v1/orders/" + id + "/refund", null);
     assertThat(r.status()).isIn(202);
+    assertThat(r.json().get("state").asString())
+        .as("the order moves when the refund succeeds, not when it is asked for")
+        .isEqualTo("COMPLETED");
     Api.Response refunded = awaitState(id, "REFUNDED");
     assertThat(refunded.json().at("/payment/refunded_amount").asLong()).isEqualTo(2500);
     Api.Response again = api.post("/v1/orders/" + id + "/refund", null);

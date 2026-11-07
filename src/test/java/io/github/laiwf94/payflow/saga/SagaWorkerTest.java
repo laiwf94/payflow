@@ -533,7 +533,7 @@ class SagaWorkerTest {
   void productionWiringRefusesToStartWithAStateNobodyHandles() {
     assertThatThrownBy(() -> SagaConfig.requireEveryStep(List.of()))
         .hasMessageContaining("PENDING")
-        .hasMessageContaining("REFUNDING");
+        .hasMessageContaining("RELEASING_INVENTORY");
   }
 
   @Test

@@ -17,7 +17,15 @@ public interface PaymentGateway {
 
   CallResult<PaymentInfo> voidAuthorization(String idempotencyKey, String paymentId);
 
-  CallResult<PaymentInfo> refund(String idempotencyKey, String paymentId, long amount);
+  /**
+   * Returns {@code amount} of a captured payment. {@code reference} is the caller's id for the
+   * refund, which {@link #findRefunds} reports back.
+   */
+  CallResult<RefundInfo> refund(
+      String idempotencyKey, String paymentId, long amount, String reference);
+
+  /** Every refund the provider holds for a payment. */
+  CallResult<List<RefundInfo>> findRefunds(String paymentId);
 
   /** Every payment the provider holds for {@code reference}, including declined ones. */
   CallResult<List<PaymentInfo>> findByReference(String reference);

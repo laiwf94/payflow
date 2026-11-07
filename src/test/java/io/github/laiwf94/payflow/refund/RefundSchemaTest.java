@@ -173,17 +173,6 @@ class RefundSchemaTest {
 
     UUID order = completedOrder();
     insert(order, 1000, null, "SUCCEEDED");
-    // The full-refund step's path is closed to an order that already has refunds.
-    assertThatThrownBy(
-            () ->
-                jdbc.sql(
-                        """
-                        UPDATE orders SET state = 'REFUNDING', next_attempt_at = now()
-                        WHERE id = :id
-                        """)
-                    .param("id", order)
-                    .update())
-        .hasMessageContaining("refunds_order_completed");
     jdbc.sql(
             """
             UPDATE orders SET state = 'PARTIALLY_REFUNDED', refunded_minor = 1000 WHERE id = :id
@@ -257,6 +246,65 @@ class RefundSchemaTest {
     UUID learning = insert(order, 100, null, "PENDING");
     setState(learning, "PENDING", "re_3");
     setState(learning, "SUCCEEDED", "re_3");
+  }
+
+  @Test
+  void pendingRefundsAreScheduledAndOnlyPendingOnesLeased() {
+    UUID order = completedOrder();
+    UUID id = insert(order, 100, null, "PENDING");
+    for (String change :
+        List.of(
+            "next_attempt_at = NULL",
+            "attempt = -1",
+            "lease_token = gen_random_uuid()",
+            "lease_until = now()")) {
+      assertThatThrownBy(
+              () ->
+                  jdbc.sql("UPDATE refunds SET " + change + " WHERE id = :id")
+                      .param("id", id)
+                      .update())
+          .as(change)
+          .hasMessageMatching(
+              "(?s).*(refunds_pending_scheduled|refunds_attempt_nonnegative|refunds_lease_pair).*");
+    }
+    jdbc.sql(
+            "UPDATE refunds SET lease_token = gen_random_uuid(), lease_until = now() WHERE id = :id")
+        .param("id", id)
+        .update();
+    // Settling keeps neither a schedule nor a lease, and a failure says why.
+    for (String settle :
+        List.of(
+            "state = 'FAILED', next_attempt_at = NULL, lease_token = NULL, lease_until = NULL",
+            "state = 'SUCCEEDED', provider_refund_id = 're_1', lease_token = NULL,"
+                + " lease_until = NULL",
+            "state = 'SUCCEEDED', provider_refund_id = 're_1', next_attempt_at = NULL")) {
+      assertThatThrownBy(
+              () ->
+                  jdbc.sql("UPDATE refunds SET " + settle + " WHERE id = :id")
+                      .param("id", id)
+                      .update())
+          .as(settle)
+          .hasMessageMatching(
+              "(?s).*(refunds_failed_explained|refunds_pending_scheduled|refunds_settled_unleased).*");
+    }
+    jdbc.sql(
+            """
+            UPDATE refunds SET state = 'FAILED', failure_code = 'provider_refused',
+              next_attempt_at = NULL, lease_token = NULL, lease_until = NULL
+            WHERE id = :id
+            """)
+        .param("id", id)
+        .update();
+    assertThat(active(order)).isZero();
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT count(*) FROM pg_constraint
+                    WHERE conrelid = 'refunds'::regclass AND NOT convalidated
+                    """)
+                .query(Integer.class)
+                .single())
+        .isZero();
   }
 
   @Test
@@ -366,9 +414,11 @@ class RefundSchemaTest {
     jdbc.sql(
             """
             INSERT INTO refunds (id, order_id, amount_minor, lines, state, provider_refund_id,
-              created_at, updated_at)
+              failure_code, next_attempt_at, created_at, updated_at)
             VALUES (:id, :order, :amount, CAST(:lines AS jsonb), :state,
-              CASE WHEN :state = 'SUCCEEDED' THEN 're_' || :id ELSE NULL END, now(), now())
+              CASE WHEN :state = 'SUCCEEDED' THEN 're_' || :id ELSE NULL END,
+              CASE WHEN :state = 'FAILED' THEN 'test' ELSE NULL END,
+              CASE WHEN :state = 'PENDING' THEN now() ELSE NULL END, now(), now())
             """)
         .param("id", id)
         .param("order", order)
@@ -382,7 +432,10 @@ class RefundSchemaTest {
   private void setState(UUID refund, String state, String providerRefundId) {
     jdbc.sql(
             """
-            UPDATE refunds SET state = :state, provider_refund_id = :provider, updated_at = now()
+            UPDATE refunds SET state = :state, provider_refund_id = :provider,
+              failure_code = CASE WHEN :state = 'FAILED' THEN 'test' ELSE failure_code END,
+              next_attempt_at = CASE WHEN :state = 'PENDING' THEN next_attempt_at ELSE NULL END,
+              updated_at = now()
             WHERE id = :id
             """)
         .param("state", state)

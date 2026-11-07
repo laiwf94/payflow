@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.laiwf94.payflow.sim.PaymentProviderSimulator.Payment;
+import io.github.laiwf94.payflow.sim.PaymentProviderSimulator.Refund;
 import java.time.Duration;
 import java.util.List;
 import java.util.SplittableRandom;
@@ -16,8 +17,8 @@ class PaymentProviderSimulatorTest {
   private final SimulatorSettings settings = new SimulatorSettings(Duration.ofSeconds(1));
   private final PaymentProviderSimulator sim = new PaymentProviderSimulator(faults, settings);
 
-  private Payment answered(Simulated<Payment> s) {
-    return ((Simulated.Answered<Payment>) s).value();
+  private static <T> T answered(Simulated<T> s) {
+    return ((Simulated.Answered<T>) s).value();
   }
 
   @Test
@@ -27,14 +28,27 @@ class PaymentProviderSimulatorTest {
     Payment c = answered(sim.capture("k2", p.id(), 2500));
     assertThat(c.status()).isEqualTo(CAPTURED);
     assertThat(c.captured()).isEqualTo(2500);
-    Payment r = answered(sim.refund("k3", p.id(), 1000));
-    assertThat(r.refunded()).isEqualTo(1000);
-    assertThatThrownBy(() -> answered(sim.refund("k4", p.id(), 1501)))
+    Refund r = answered(sim.refund("k3", p.id(), 1000, "first"));
+    assertThat(r).isEqualTo(new Refund("re_00000001", p.id(), "first", 1000));
+    assertThat(sim.paymentsFor("order-1").get(0).refunded()).isEqualTo(1000);
+    assertThat(answered(sim.refund("k3", p.id(), 1000, "first")))
+        .as("a replay is the same refund")
+        .isEqualTo(r);
+    assertThatThrownBy(() -> answered(sim.refund("k3", p.id(), 1000, "other")))
+        .hasMessageContaining("different parameters");
+    assertThatThrownBy(() -> answered(sim.refund("k4", p.id(), 1501, "too-much")))
         .isInstanceOf(SimulatorException.class)
         .hasMessageContaining("exceeds");
     assertThat(sim.ledgerFor("order-1"))
         .extracting(PaymentProviderSimulator.LedgerEntry::operation)
         .containsExactly("authorize", "capture", "refund");
+    Refund second = answered(sim.refund("k5", p.id(), 1500, "second"));
+    assertThat(answered(sim.findRefunds(p.id()))).containsExactly(r, second);
+    assertThat(answered(sim.findRefunds(p.id())))
+        .extracting(Refund::reference)
+        .containsExactly("first", "second");
+    assertThatThrownBy(() -> sim.findRefunds("pay_missing")).hasMessageContaining("no such");
+    assertThatThrownBy(() -> sim.refund("k6", p.id(), 1, " ")).hasMessageContaining("reference");
   }
 
   @Test
@@ -89,7 +103,7 @@ class PaymentProviderSimulatorTest {
     assertThatThrownBy(() -> sim.capture("cap", p.id(), 500))
         .hasMessageContaining("authorized amount");
     Payment captured = answered(sim.capture("cap2", p.id(), 100));
-    answered(sim.refund("ref", p.id(), 100));
+    answered(sim.refund("ref", p.id(), 100, "r"));
     assertThat(answered(sim.capture("cap2", p.id(), 100)).refunded())
         .as("replay reflects later refund")
         .isEqualTo(100);

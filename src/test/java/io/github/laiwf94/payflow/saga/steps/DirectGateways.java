@@ -5,6 +5,7 @@ import io.github.laiwf94.payflow.gateway.InventoryService;
 import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
+import io.github.laiwf94.payflow.gateway.RefundInfo;
 import io.github.laiwf94.payflow.gateway.ShipmentInfo;
 import io.github.laiwf94.payflow.gateway.ShippingService;
 import io.github.laiwf94.payflow.money.Money;
@@ -56,6 +57,10 @@ final class DirectGateways {
         p.declineCode());
   }
 
+  static RefundInfo info(PaymentProviderSimulator.Refund r) {
+    return new RefundInfo(r.id(), r.paymentId(), r.reference(), r.amount());
+  }
+
   static ShipmentInfo info(ShippingSimulator.Shipment s) {
     return new ShipmentInfo(s.id(), s.reference(), s.trackingNumber(), s.status().name());
   }
@@ -86,9 +91,18 @@ final class DirectGateways {
       }
 
       @Override
-      public CallResult<PaymentInfo> refund(String key, String paymentId, long amount) {
+      public CallResult<RefundInfo> refund(
+          String key, String paymentId, long amount, String reference) {
         return call(
-            () -> sim.refund(key, paymentId, amount), p -> new CallResult.Success<>(info(p)));
+            () -> sim.refund(key, paymentId, amount, reference),
+            r -> new CallResult.Success<>(info(r)));
+      }
+
+      @Override
+      public CallResult<List<RefundInfo>> findRefunds(String paymentId) {
+        return call(
+            () -> sim.findRefunds(paymentId),
+            l -> new CallResult.Success<>(l.stream().map(DirectGateways::info).toList()));
       }
 
       @Override

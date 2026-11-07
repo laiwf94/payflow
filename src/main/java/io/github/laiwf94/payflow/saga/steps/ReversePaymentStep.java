@@ -4,6 +4,7 @@ import io.github.laiwf94.payflow.gateway.CallResult;
 import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
+import io.github.laiwf94.payflow.gateway.RefundInfo;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.saga.SagaProperties;
@@ -45,28 +46,35 @@ class ReversePaymentStep implements SagaStep {
     long captured = 0;
     long refunded = 0;
     for (PaymentInfo p : s.value()) {
-      CallResult<PaymentInfo> r = null;
+      long nowCaptured = p.captured();
+      long nowRefunded = p.refunded();
       if (p.status() == PaymentStatus.AUTHORIZED) {
-        r = payments.voidAuthorization(Keys.voidPayment(p.id()), p.id());
-      } else if (p.status() == PaymentStatus.CAPTURED && p.netCaptured() > 0) {
-        r = payments.refund(Keys.reverse(p.id()), p.id(), p.netCaptured());
-      }
-      PaymentInfo now = p;
-      if (r != null) {
-        if (!(r instanceof CallResult.Success<PaymentInfo> ok)) {
-          if (r instanceof CallResult.Unknown<PaymentInfo>) {
-            unknown.seen("reverse");
-          }
-          return r instanceof CallResult.Unknown<PaymentInfo>
-              ? new StepOutcome.Retry("reversal outcome unknown", props.unknownOutcomeDelay())
-              : new StepOutcome.Retry("reversal failed: " + r);
+        CallResult<PaymentInfo> v = payments.voidAuthorization(Keys.voidPayment(p.id()), p.id());
+        if (!(v instanceof CallResult.Success<PaymentInfo> ok)) {
+          return notDone(v);
         }
-        now = ok.value();
+        nowCaptured = ok.value().captured();
+        nowRefunded = ok.value().refunded();
+      } else if (p.status() == PaymentStatus.CAPTURED && p.netCaptured() > 0) {
+        String key = Keys.reverse(p.id());
+        CallResult<RefundInfo> r = payments.refund(key, p.id(), p.netCaptured(), key);
+        if (!(r instanceof CallResult.Success<RefundInfo> ok)) {
+          return notDone(r);
+        }
+        nowRefunded += ok.value().amount();
       }
-      captured += now.captured();
-      refunded += now.refunded();
+      captured += nowCaptured;
+      refunded += nowRefunded;
     }
     return new StepOutcome.Advance(
         OrderState.RELEASING_INVENTORY, StepOutcome.Fields.money(captured, refunded));
+  }
+
+  private StepOutcome notDone(CallResult<?> r) {
+    if (r instanceof CallResult.Unknown<?>) {
+      unknown.seen("reverse");
+      return new StepOutcome.Retry("reversal outcome unknown", props.unknownOutcomeDelay());
+    }
+    return new StepOutcome.Retry("reversal failed: " + r);
   }
 }

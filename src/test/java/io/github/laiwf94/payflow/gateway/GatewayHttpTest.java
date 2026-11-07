@@ -55,8 +55,20 @@ class GatewayHttpTest {
     assertThat(auth.currency()).isEqualTo("EUR");
     PaymentInfo cap = success(payments.capture("c-1", auth.id(), 2500));
     assertThat(cap.status()).isEqualTo(PaymentStatus.CAPTURED);
-    PaymentInfo ref = success(payments.refund("r-1", auth.id(), 2500));
-    assertThat(ref.netCaptured()).isZero();
+    RefundInfo first = success(payments.refund("r-1", auth.id(), 1000, "refund-a"));
+    assertThat(first).isEqualTo(new RefundInfo("re_00000001", auth.id(), "refund-a", 1000));
+    assertThat(success(payments.refund("r-1", auth.id(), 1000, "refund-a")))
+        .as("a replay is the same refund")
+        .isEqualTo(first);
+    RefundInfo second = success(payments.refund("r-2", auth.id(), 1500, "refund-b"));
+    assertThat(success(payments.findRefunds(auth.id()))).containsExactly(first, second);
+    assertThat(success(payments.findByReference("o1")).get(0).netCaptured()).isZero();
+    assertThat(payments.refund("r-3", auth.id(), 1, "refund-c"))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class, r -> assertThat(r.code()).isEqualTo("invalid_amount"));
+    assertThat(payments.findRefunds("pay_nothing"))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class, r -> assertThat(r.code()).isEqualTo("not_found"));
     assertThat(success(payments.findByReference("o1"))).hasSize(1);
     assertThat(success(payments.findByReference("nothing"))).isEmpty();
   }

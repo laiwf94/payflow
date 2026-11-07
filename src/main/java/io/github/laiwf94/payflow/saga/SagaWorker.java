@@ -398,6 +398,21 @@ public class SagaWorker implements SmartLifecycle {
         abandoned);
   }
 
+  /** Stops on its own thread, so the grace runs alongside the refund worker's, not before it. */
+  @Override
+  public void stop(Runnable callback) {
+    Thread.ofPlatform()
+        .name("saga-worker-stop")
+        .start(
+            () -> {
+              try {
+                stop();
+              } finally {
+                callback.run();
+              }
+            });
+  }
+
   private boolean abandon(UUID orderId, UUID token) {
     try {
       if (repo.abandon(orderId, token)) {

@@ -67,7 +67,18 @@ class SimulatorHttpTest {
     assertThat(auth.body()).contains("\"status\":\"AUTHORIZED\"").contains("pay_00000001");
     assertThat(send("POST", "/sim/payments/pay_00000001/capture", "{\"amount\":2500}").statusCode())
         .isEqualTo(200);
-    assertThat(send("POST", "/sim/payments/pay_00000001/refunds", "{\"amount\":2500}").body())
+    assertThat(
+            send(
+                    "POST",
+                    "/sim/payments/pay_00000001/refunds",
+                    "{\"amount\":2500,\"reference\":\"r1\"}")
+                .body())
+        .contains("\"id\":\"re_00000001\"")
+        .contains("\"payment_id\":\"pay_00000001\"")
+        .contains("\"reference\":\"r1\"");
+    assertThat(send("GET", "/sim/payments/pay_00000001/refunds", null).body())
+        .contains("\"data\":[{\"id\":\"re_00000001\"");
+    assertThat(send("GET", "/sim/payments?reference=o1", null).body())
         .contains("\"refunded\":2500");
     assertThat(send("POST", "/sim/payments/pay_00000001/void", null).statusCode()).isEqualTo(409);
     assertThat(send("GET", "/sim/payments?reference=o1", null).body()).contains("pay_00000001");

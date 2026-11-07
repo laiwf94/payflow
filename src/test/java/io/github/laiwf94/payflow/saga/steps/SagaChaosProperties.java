@@ -10,6 +10,12 @@ import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.Refund;
+import io.github.laiwf94.payflow.refund.RefundRepository;
+import io.github.laiwf94.payflow.refund.RefundService;
+import io.github.laiwf94.payflow.refund.RefundState;
+import io.github.laiwf94.payflow.refund.RefundTransitions;
+import io.github.laiwf94.payflow.refund.RefundWorker;
 import io.github.laiwf94.payflow.saga.Backoff;
 import io.github.laiwf94.payflow.saga.CrashPoints;
 import io.github.laiwf94.payflow.saga.SagaProperties;
@@ -56,6 +62,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  *   <li>a completed order was charged exactly its amount, once;
  *   <li>a failed or cancelled order kept nothing: no open hold, nothing captured net of refunds;
  *   <li>no order was ever authorized or captured twice;
+ *   <li>every refund settled, and the order's refunded total is exactly its succeeded refunds, each
+ *       of which the provider holds once under the refund's own id;
  *   <li>for every product, stock left plus stock held equals the stock it started with, and only
  *       completed orders hold any;
  *   <li>each order's events describe a legal path through the state machine.
@@ -134,7 +142,7 @@ class SagaChaosProperties {
                                     "CANCELLING_SHIPMENT",
                                     "REVERSING_PAYMENT",
                                     "RELEASING_INVENTORY",
-                                    "REFUNDING")
+                                    "REFUND")
                                 .map(s -> when + ":" + s)),
                 Arbitraries.integers().between(1, 4))
             .as(Crash::new);
@@ -161,6 +169,9 @@ class SagaChaosProperties {
     JdbcClient jdbc = c.getBean(JdbcClient.class);
     OrderRepository repo = c.getBean(OrderRepository.class);
     OrderTransitions transitions = c.getBean(OrderTransitions.class);
+    RefundRepository refunds = c.getBean(RefundRepository.class);
+    RefundTransitions refundTransitions = c.getBean(RefundTransitions.class);
+    RefundService refundService = c.getBean(RefundService.class);
     Db.truncateAll(jdbc);
 
     SplittableRandom random = new SplittableRandom(sc.seed());
@@ -200,8 +211,8 @@ class SagaChaosProperties {
             new CreateShipmentStep(ship),
             new CancelShipmentStep(ship),
             new ReversePaymentStep(pay, props, unknown),
-            new ReleaseInventoryStep(inv),
-            new RefundStep(pay, props, unknown));
+            new ReleaseInventoryStep(inv));
+    RefundStep refundStep = new RefundStep(pay, props, unknown);
 
     MutableClock clock = new MutableClock(Instant.parse("2030-01-01T00:00:00Z"));
     Map<String, Integer> seen = new HashMap<>();
@@ -237,6 +248,8 @@ class SagaChaosProperties {
     }
 
     SagaWorker worker = worker(repo, transitions, steps, props, clock, crash, random);
+    RefundWorker refundWorker =
+        refundWorker(refunds, repo, refundTransitions, refundStep, props, clock, crash, random);
     boolean refundsRequested = false;
     for (int round = 0; round < 2000; round++) {
       for (int i = 0; i < orders.size(); i++) {
@@ -246,18 +259,25 @@ class SagaChaosProperties {
       }
       try {
         worker.runOnce();
+        refundWorker.runOnce();
       } catch (SimulatedCrash e) {
         // The process died. A new one starts; the dead one's leases run out first.
         clock.advance(props.lease().plusSeconds(1));
         worker = worker(repo, transitions, steps, props, clock, crash, random);
+        refundWorker =
+            refundWorker(refunds, repo, refundTransitions, refundStep, props, clock, crash, random);
       }
       List<Order> now = orders.stream().map(o -> repo.findById(o.id()).orElseThrow()).toList();
-      if (now.stream().allMatch(o -> o.state().isTerminal())) {
+      boolean refundsSettled =
+          now.stream()
+              .flatMap(o -> refunds.listForOrder(o.id()).stream())
+              .allMatch(r -> r.state().isTerminal());
+      if (refundsSettled && now.stream().allMatch(o -> o.state().isTerminal())) {
         if (sc.refundCompleted() && !refundsRequested) {
           refundsRequested = true;
           now.stream()
               .filter(o -> o.state() == OrderState.COMPLETED)
-              .forEach(o -> transitions.requestRefund("acme", o.id(), clock.instant()));
+              .forEach(o -> refundService.refundRemaining("acme", o.id()));
           continue;
         }
         break;
@@ -265,7 +285,7 @@ class SagaChaosProperties {
       clock.advance(Duration.ofMillis(random.nextLong(5_000)));
     }
 
-    checkInvariants(jdbc, repo, orders, payments, inventory, shipping);
+    checkInvariants(jdbc, repo, refunds, orders, payments, inventory, shipping);
     for (Order o : orders) {
       Statistics.label("final state").collect(repo.findById(o.id()).orElseThrow().state());
     }
@@ -291,6 +311,27 @@ class SagaChaosProperties {
         new SimpleMeterRegistry());
   }
 
+  private static RefundWorker refundWorker(
+      RefundRepository refunds,
+      OrderRepository repo,
+      RefundTransitions transitions,
+      RefundStep step,
+      SagaProperties props,
+      MutableClock clock,
+      CrashPoints crash,
+      SplittableRandom random) {
+    return new RefundWorker(
+        refunds,
+        repo,
+        transitions,
+        step,
+        props,
+        clock,
+        new Backoff(props.backoffBase(), props.backoffCap(), random.split()),
+        crash,
+        new SimpleMeterRegistry());
+  }
+
   private static void plan(Faults faults, String dependency, Rates r, String... ops) {
     for (String op : ops) {
       faults.set(
@@ -302,6 +343,7 @@ class SagaChaosProperties {
   private static void checkInvariants(
       JdbcClient jdbc,
       OrderRepository repo,
+      RefundRepository refunds,
       List<Order> orders,
       PaymentProviderSimulator payments,
       InventorySimulator inventory,
@@ -324,6 +366,32 @@ class SagaChaosProperties {
       assertThat(captures).as("captures for %s", ref).isLessThanOrEqualTo(1);
       assertThat(o.capturedMinor()).as("recorded capture matches provider").isEqualTo(captured);
       assertThat(o.refundedMinor()).as("recorded refund matches provider").isEqualTo(refunded);
+      List<Refund> rows = refunds.listForOrder(o.id());
+      assertThat(rows).as("refunds of %s settled", ref).allMatch(r -> r.state().isTerminal());
+      List<Refund> succeeded =
+          rows.stream().filter(r -> r.state() == RefundState.SUCCEEDED).toList();
+      if (!rows.isEmpty()) {
+        // Only completed orders take refund rows, so their payment saw no reversal.
+        List<PaymentProviderSimulator.Refund> atProvider = payments.refundsFor(o.paymentId());
+        assertThat(atProvider)
+            .extracting(PaymentProviderSimulator.Refund::reference)
+            .as("provider refunds of %s are exactly its succeeded rows, once each", ref)
+            .containsExactlyInAnyOrderElementsOf(
+                succeeded.stream().map(r -> r.id().toString()).toList());
+        assertThat(succeeded)
+            .allMatch(
+                r ->
+                    atProvider.stream()
+                        .anyMatch(
+                            p ->
+                                p.id().equals(r.providerRefundId())
+                                    && p.amount() == r.amountMinor()));
+        assertThat(succeeded.stream().mapToLong(Refund::amountMinor).sum())
+            .as("succeeded refunds of %s add up to its refunded total", ref)
+            .isEqualTo(o.refundedMinor());
+        // The provider never refuses a refund of money it holds, so none may fail here.
+        assertThat(rows).as("refunds of %s", ref).allMatch(r -> r.state() != RefundState.FAILED);
+      }
       switch (o.state()) {
         case COMPLETED -> {
           assertThat(captured - refunded)

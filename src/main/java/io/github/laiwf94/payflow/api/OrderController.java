@@ -6,6 +6,7 @@ import io.github.laiwf94.payflow.order.OrderPage;
 import io.github.laiwf94.payflow.order.OrderPosition;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.RefundService;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
 import io.github.laiwf94.payflow.timeline.TimelineEntry;
 import io.github.laiwf94.payflow.timeline.TimelineProjection;
@@ -30,11 +31,17 @@ import org.springframework.web.bind.annotation.RestController;
 class OrderController {
 
   private final OrderService orders;
+  private final RefundService refunds;
   private final TimelineProjection timeline;
   private final OrderCursors cursors;
 
-  OrderController(OrderService orders, TimelineProjection timeline, OrderCursors cursors) {
+  OrderController(
+      OrderService orders,
+      RefundService refunds,
+      TimelineProjection timeline,
+      OrderCursors cursors) {
     this.orders = orders;
+    this.refunds = refunds;
     this.timeline = timeline;
     this.cursors = cursors;
   }
@@ -90,10 +97,14 @@ class OrderController {
         .body(OrderResponse.of(orders.cancel(merchant(http), parse(id))));
   }
 
+  /**
+   * Refunds whatever is left of a completed order's capture. The refund runs in the background; the
+   * order shows {@code REFUNDED} once the provider has returned the money.
+   */
   @PostMapping("/{id}/refund")
   ResponseEntity<OrderResponse> refund(@PathVariable String id, HttpServletRequest http) {
     return ResponseEntity.accepted()
-        .body(OrderResponse.of(orders.refund(merchant(http), parse(id))));
+        .body(OrderResponse.of(refunds.refundRemaining(merchant(http), parse(id))));
   }
 
   /**

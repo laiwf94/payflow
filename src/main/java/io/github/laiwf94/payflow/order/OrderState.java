@@ -9,11 +9,11 @@ import java.util.Set;
 /**
  * Where an order is in its saga. Forward states record what has been done; compensating states
  * record what is being undone. The same table is enforced by a CHECK constraint in the database
- * (see {@code V1__orders.sql}, as amended by {@code V10}), and {@code OrderSchemaTest} keeps the
- * two in step.
+ * (see {@code V1__orders.sql}, as amended by {@code V10} and {@code V14}), and {@code
+ * OrderSchemaTest} keeps the two in step.
  *
  * <pre>
- * PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED -> REFUNDING -> REFUNDED
+ * PENDING -> INVENTORY_RESERVED -> PAYMENT_AUTHORIZED -> PAYMENT_CAPTURED -> COMPLETED
  *    |              |   \                 |                    |
  *    |              |    +--> REVERSING_PAYMENT <--------------+-- CANCELLING_SHIPMENT
  *    v              v              |
@@ -24,9 +24,9 @@ import java.util.Set;
  * COMPLETED -> PARTIALLY_REFUNDED -> REFUNDED, and COMPLETED -> REFUNDED
  * </pre>
  *
- * <p>{@code PARTIALLY_REFUNDED} and the direct {@code COMPLETED -> REFUNDED} are the order-level
- * view of refunds recorded one row each in the {@code refunds} table. {@code REFUNDING} belongs to
- * the older full-refund step and goes once refunds run per refund row.
+ * <p>{@code PARTIALLY_REFUNDED} and {@code REFUNDED} are the order-level view of the refunds
+ * recorded one row each in the {@code refunds} table: the order moves only when a refund succeeds,
+ * and a refund in progress lives on its own row (see {@code refund.RefundState}), not here.
  */
 public enum OrderState {
   PENDING,
@@ -39,7 +39,6 @@ public enum OrderState {
   RELEASING_INVENTORY,
   FAILED,
   CANCELLED,
-  REFUNDING,
   PARTIALLY_REFUNDED,
   REFUNDED;
 
@@ -53,9 +52,8 @@ public enum OrderState {
     allow(CANCELLING_SHIPMENT, REVERSING_PAYMENT);
     allow(REVERSING_PAYMENT, RELEASING_INVENTORY);
     allow(RELEASING_INVENTORY, FAILED, CANCELLED);
-    allow(COMPLETED, REFUNDING, PARTIALLY_REFUNDED, REFUNDED);
+    allow(COMPLETED, PARTIALLY_REFUNDED, REFUNDED);
     allow(PARTIALLY_REFUNDED, REFUNDED);
-    allow(REFUNDING, REFUNDED);
     for (OrderState s : values()) {
       NEXT.putIfAbsent(s, Collections.unmodifiableSet(EnumSet.noneOf(OrderState.class)));
     }
@@ -87,10 +85,7 @@ public enum OrderState {
 
   /** True for steps that undo work. They retry until they succeed instead of giving up. */
   public boolean isCompensating() {
-    return this == CANCELLING_SHIPMENT
-        || this == REVERSING_PAYMENT
-        || this == RELEASING_INVENTORY
-        || this == REFUNDING;
+    return this == CANCELLING_SHIPMENT || this == REVERSING_PAYMENT || this == RELEASING_INVENTORY;
   }
 
   /** A cancel request is accepted only before money has been captured. */

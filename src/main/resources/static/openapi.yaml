@@ -209,14 +209,19 @@ paths:
   /v1/orders/{id}/refund:
     post:
       operationId: refundOrder
-      summary: Refund a completed order in full
+      summary: Refund what is left of a completed order's capture
+      description: >-
+        Starts one refund of everything no other refund has returned or is returning. The refund
+        runs in the background: the order stays as it is until the provider has returned the money,
+        then becomes `REFUNDED`. Asking again while that refund is pending starts nothing new and
+        answers 202 again.
       parameters:
         - $ref: '#/components/parameters/OrderId'
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/RequestId'
       responses:
         '202':
-          description: Refund started; the order moves to REFUNDING and then REFUNDED.
+          description: Refund started, or already pending; the order as it is now.
           headers:
             X-Request-Id:
               $ref: '#/components/headers/RequestId'
@@ -382,8 +387,9 @@ components:
             $ref: '#/components/schemas/Error'
     RefundConflict:
       description: |
-        Only a COMPLETED order can be refunded (`order_not_refundable`), or a request with this
-        Idempotency-Key is still running (`idempotency_key_in_use`).
+        Only a COMPLETED or PARTIALLY_REFUNDED order with money left to refund can be refunded
+        (`order_not_refundable`), or a request with this Idempotency-Key is still running
+        (`idempotency_key_in_use`).
       x-error-codes: [order_not_refundable, idempotency_key_in_use]
       headers:
         X-Request-Id:
@@ -583,7 +589,7 @@ components:
       enum:
         [PENDING, INVENTORY_RESERVED, PAYMENT_AUTHORIZED, PAYMENT_CAPTURED, COMPLETED,
          CANCELLING_SHIPMENT, REVERSING_PAYMENT, RELEASING_INVENTORY, FAILED, CANCELLED,
-         REFUNDING, PARTIALLY_REFUNDED, REFUNDED]
+         PARTIALLY_REFUNDED, REFUNDED]
       description: >-
         `PARTIALLY_REFUNDED` is a completed order some but not all of whose capture has been
         refunded; like `COMPLETED` it changes only when another refund is made.

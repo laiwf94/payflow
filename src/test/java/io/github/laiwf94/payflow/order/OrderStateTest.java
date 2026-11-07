@@ -33,11 +33,9 @@ class OrderStateTest {
           List.of(REVERSING_PAYMENT, RELEASING_INVENTORY),
           List.of(RELEASING_INVENTORY, FAILED),
           List.of(RELEASING_INVENTORY, CANCELLED),
-          List.of(COMPLETED, REFUNDING),
           List.of(COMPLETED, PARTIALLY_REFUNDED),
           List.of(COMPLETED, REFUNDED),
-          List.of(PARTIALLY_REFUNDED, REFUNDED),
-          List.of(REFUNDING, REFUNDED));
+          List.of(PARTIALLY_REFUNDED, REFUNDED));
 
   @Test
   void transitionTableMatchesTheWrittenOutList() {
@@ -55,7 +53,7 @@ class OrderStateTest {
     assertThat(FAILED.next()).isEmpty();
     assertThat(CANCELLED.next()).isEmpty();
     assertThat(REFUNDED.next()).isEmpty();
-    assertThat(COMPLETED.next()).containsExactlyInAnyOrder(REFUNDING, PARTIALLY_REFUNDED, REFUNDED);
+    assertThat(COMPLETED.next()).containsExactlyInAnyOrder(PARTIALLY_REFUNDED, REFUNDED);
     assertThat(PARTIALLY_REFUNDED.next()).containsExactly(REFUNDED);
     assertThat(EnumSet.allOf(OrderState.class).stream().filter(OrderState::isTerminal))
         .containsExactlyInAnyOrder(COMPLETED, FAILED, CANCELLED, PARTIALLY_REFUNDED, REFUNDED);

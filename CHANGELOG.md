@@ -13,6 +13,15 @@ notes on GitHub link here.
 - A JSON number or boolean where the API expects a string (`"sku": 123`,
   `"merchant_reference": 7`) is now `400 invalid_argument`; it used to be coerced to a string
   (#76).
+- The order state `REFUNDING` is gone (#24). `POST /v1/orders/{id}/refund` now answers `202`
+  with the order still `COMPLETED` (or `PARTIALLY_REFUNDED`); it becomes `REFUNDED` when the
+  provider has returned the money, with no state in between, and there is no `order.refunding`
+  event. Asking again while that refund is pending is a `202` that starts nothing new.
+- Upgrading from 0.1.x: migration V14 refuses to run while any order is still `REFUNDING`. Let
+  the 0.1.x instances finish those refunds (seconds), then start this release again.
+- The payment provider adapter expects refunds as objects with an id and the caller's
+  reference, listed per payment (`GET /payments/{id}/refunds`), as the common providers have
+  them; the simulator implements this.
 
 ### Added
 
@@ -36,8 +45,16 @@ notes on GitHub link here.
 - Groundwork for partial refunds (#24): a `refunds` table with one row per refund, and a new order
   state, `PARTIALLY_REFUNDED`, between `COMPLETED` and `REFUNDED`. The database refuses, at
   commit and under concurrency, any refunds of an order that add up to more than it captured or
-  return more of a line than it bought. No endpoint writes refunds yet; clients that switch over
-  every order state should add the new one.
+  return more of a line than it bought. Clients that switch over every order state should add the
+  new one.
+- Refunds run one row at a time (#24). A full refund is a refund of whatever is left of the
+  capture, and refunds of one order can settle side by side. A new refund worker, on the saga
+  worker's settings, leases due refunds, asks the provider whether the refund exists before
+  making it (so a lost answer or a crash never refunds twice, with or without provider-side
+  idempotency keys), and records success, refusal or a retry in one fenced write. A refused
+  refund is `FAILED` with the provider's reason and frees its share of the capture. New metrics
+  `payflow.refund.attempt`, `payflow.refunds.settled`, `payflow.refunds.retries` and
+  `payflow.refunds.handed_back`.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

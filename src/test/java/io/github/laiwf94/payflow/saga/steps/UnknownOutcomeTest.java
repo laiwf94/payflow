@@ -8,6 +8,11 @@ import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.RefundRepository;
+import io.github.laiwf94.payflow.refund.RefundService;
+import io.github.laiwf94.payflow.refund.RefundState;
+import io.github.laiwf94.payflow.refund.RefundTransitions;
+import io.github.laiwf94.payflow.refund.RefundWorker;
 import io.github.laiwf94.payflow.saga.Backoff;
 import io.github.laiwf94.payflow.saga.CrashPoints;
 import io.github.laiwf94.payflow.saga.SagaProperties;
@@ -60,9 +65,14 @@ class UnknownOutcomeTest {
   @Autowired InventorySimulator inventory;
   @Autowired ShippingSimulator shipping;
   @Autowired MeterRegistry meters;
+  @Autowired RefundService refundService;
+  @Autowired RefundRepository refunds;
+  @Autowired RefundTransitions refundTransitions;
+  @Autowired RefundStep refundStep;
 
   private final MutableClock clock = new MutableClock(Instant.now());
   private SagaWorker worker;
+  private RefundWorker refundWorker;
 
   @BeforeEach
   void setUp() {
@@ -76,6 +86,17 @@ class UnknownOutcomeTest {
             repo,
             transitions,
             steps,
+            props,
+            clock,
+            new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
+            CrashPoints.NONE,
+            new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    refundWorker =
+        new RefundWorker(
+            refunds,
+            repo,
+            refundTransitions,
+            refundStep,
             props,
             clock,
             new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
@@ -106,11 +127,13 @@ class UnknownOutcomeTest {
   private Order drive(Order o) {
     for (int i = 0; i < 40; i++) {
       Order now = repo.findById(o.id()).orElseThrow();
-      if (now.state().isTerminal()) {
+      if (now.state().isTerminal()
+          && refunds.listForOrder(o.id()).stream().allMatch(r -> r.state().isTerminal())) {
         return now;
       }
       clock.advance(Duration.ofSeconds(5));
       worker.runOnce();
+      refundWorker.runOnce();
     }
     return repo.findById(o.id()).orElseThrow();
   }
@@ -131,14 +154,22 @@ class UnknownOutcomeTest {
   @ValueSource(booleans = {true, false})
   void lostAuthorizationAnswerIsFoundNotRepeated(boolean honorKeys) {
     settings.honorIdempotencyKeys(honorKeys);
-    double before = counter("payflow.payment.unknown.resolved", "resolution", "applied");
+    double before =
+        counter(
+            "payflow.payment.unknown.resolved", "operation", "authorize", "resolution", "applied");
     lose("payment.authorize", Fault.UNKNOWN_AFTER);
     Order o = insert("pm_card_ok", Orders.ADDRESS);
     Order done = drive(o);
     assertThat(done.state()).isEqualTo(COMPLETED);
     assertThat(count(o, "authorize")).isEqualTo(1);
     assertThat(count(o, "capture")).isEqualTo(1);
-    assertThat(counter("payflow.payment.unknown.resolved", "resolution", "applied"))
+    assertThat(
+            counter(
+                "payflow.payment.unknown.resolved",
+                "operation",
+                "authorize",
+                "resolution",
+                "applied"))
         .isEqualTo(before + 1);
   }
 
@@ -199,10 +230,18 @@ class UnknownOutcomeTest {
     Order o = insert("pm_card_ok", Orders.ADDRESS);
     drive(o);
     lose("payment.refund", Fault.UNKNOWN_AFTER);
-    transitions.requestRefund("acme", o.id(), clock.instant());
+    refundService.refundRemaining("acme", o.id());
     Order done = drive(o);
     assertThat(done.state()).isEqualTo(REFUNDED);
+    assertThat(done.refundedMinor()).isEqualTo(2500);
     assertThat(count(o, "refund")).isEqualTo(1);
+    assertThat(refunds.listForOrder(o.id()))
+        .singleElement()
+        .satisfies(
+            r -> {
+              assertThat(r.state()).isEqualTo(RefundState.SUCCEEDED);
+              assertThat(r.attempt()).as("found on the retry, not made again").isEqualTo(1);
+            });
   }
 
   @ParameterizedTest

@@ -58,7 +58,7 @@ class OrderSchemaTest {
         }
       }
     }
-    assertThat(accepted).isEqualTo(18);
+    assertThat(accepted).isEqualTo(16);
   }
 
   @Test
@@ -142,6 +142,29 @@ class OrderSchemaTest {
         .hasMessageContaining("orders_terminal_unscheduled");
     move(id, OrderState.REFUNDED);
     assertThat(state(id)).isEqualTo("REFUNDED");
+  }
+
+  @Test
+  void refundingIsNoLongerAState() {
+    UUID id = insertPending();
+    for (OrderState s :
+        List.of(
+            OrderState.INVENTORY_RESERVED,
+            OrderState.PAYMENT_AUTHORIZED,
+            OrderState.PAYMENT_CAPTURED,
+            OrderState.COMPLETED)) {
+      move(id, s);
+    }
+    // Refunds in progress live on refund rows; the order has no state for them.
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(
+                        "UPDATE orders SET state = 'REFUNDING', next_attempt_at = now() WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .isInstanceOf(DataIntegrityViolationException.class)
+        .hasMessageContaining("orders_known_state");
+    assertThat(state(id)).isEqualTo("COMPLETED");
   }
 
   @Test
@@ -331,7 +354,6 @@ class OrderSchemaTest {
   private void move(UUID id, OrderState to) {
     boolean captured =
         to == OrderState.COMPLETED
-            || to == OrderState.REFUNDING
             || to == OrderState.PARTIALLY_REFUNDED
             || to == OrderState.REFUNDED;
     jdbc.sql(

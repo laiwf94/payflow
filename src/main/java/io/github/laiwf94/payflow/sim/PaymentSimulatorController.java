@@ -22,6 +22,8 @@ class PaymentSimulatorController {
 
   record AmountRequest(long amount) {}
 
+  record RefundRequest(long amount, String reference) {}
+
   private final PaymentProviderSimulator provider;
   private final SimulatedResponses responses;
 
@@ -73,8 +75,19 @@ class PaymentSimulatorController {
   ResponseEntity<?> refund(
       @RequestHeader(name = "Idempotency-Key", required = false) String key,
       @PathVariable String id,
-      @RequestBody AmountRequest req) {
-    return responses.respond(provider.refund(key, id, req.amount()), ResponseEntity::ok);
+      @RequestBody RefundRequest req) {
+    return responses.respond(
+        provider.refund(key, id, req.amount(), req.reference()), ResponseEntity::ok);
+  }
+
+  @GetMapping("/{id}/refunds")
+  ResponseEntity<?> refunds(@PathVariable String id) {
+    return responses.respond(
+        provider.findRefunds(id),
+        list ->
+            ResponseEntity.ok(
+                Map.<String, Object>of(
+                    "data", list.toArray(PaymentProviderSimulator.Refund[]::new))));
   }
 
   @GetMapping

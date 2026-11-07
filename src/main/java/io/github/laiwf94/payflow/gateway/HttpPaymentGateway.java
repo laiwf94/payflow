@@ -64,13 +64,36 @@ final class HttpPaymentGateway implements PaymentGateway {
   }
 
   @Override
-  public CallResult<PaymentInfo> refund(String idempotencyKey, String paymentId, long amount) {
+  public CallResult<RefundInfo> refund(
+      String idempotencyKey, String paymentId, long amount, String reference) {
     return http.call(
         HttpMethod.POST,
-        Map.of("amount", amount),
+        Map.of("amount", amount, "reference", reference),
         Map.of("Idempotency-Key", idempotencyKey),
         u -> u.pathSegment(paymentId, "refunds"),
-        this::payment);
+        (status, body) ->
+            status >= 300
+                ? HttpDependency.rejected(body, "refund_error")
+                : new CallResult.Success<>(http.read(body, RefundInfo.class)));
+  }
+
+  @Override
+  public CallResult<List<RefundInfo>> findRefunds(String paymentId) {
+    return http.call(
+        HttpMethod.GET,
+        null,
+        Map.of(),
+        u -> u.pathSegment(paymentId, "refunds"),
+        (status, body) -> {
+          if (status >= 300) {
+            return HttpDependency.rejected(body, "lookup_failed");
+          }
+          List<RefundInfo> out = new ArrayList<>();
+          for (JsonNode n : body.path("data")) {
+            out.add(http.read(n, RefundInfo.class));
+          }
+          return new CallResult.Success<>(List.copyOf(out));
+        });
   }
 
   @Override

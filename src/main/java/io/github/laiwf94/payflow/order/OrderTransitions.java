@@ -58,11 +58,22 @@ public class OrderTransitions {
     return after;
   }
 
-  /** Starts a full refund. Empty when the order doesn't exist for this merchant or isn't done. */
+  /**
+   * Records a succeeded refund of {@code amount} on its order and writes the order's event, in the
+   * caller's transaction (the refund row changes in the same one).
+   *
+   * @throws IllegalStateException when the order is not refundable; the database refuses a refund
+   *     row for such an order, so this means the two disagree and the transaction must not commit
+   */
   @Transactional
-  public Optional<Order> requestRefund(String merchantId, UUID id, Instant now) {
-    Optional<Order> after = repo.requestRefund(merchantId, id, now);
-    after.ifPresent(o -> outbox.write(eventType(o.state()), o, OrderState.COMPLETED, now));
+  public Order recordRefund(UUID orderId, long amount, Instant now) {
+    Order after =
+        repo.addRefunded(orderId, amount, now)
+            .orElseThrow(
+                () -> new IllegalStateException("order " + orderId + " is not refundable"));
+    OrderState before =
+        after.refundedMinor() == amount ? OrderState.COMPLETED : OrderState.PARTIALLY_REFUNDED;
+    outbox.write(eventType(after.state()), after, before, now);
     return after;
   }
 

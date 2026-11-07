@@ -90,7 +90,9 @@ Configuration is environment variables; the main ones are listed in
 An order moves through reserve stock, authorize the card, capture, and book the shipment. If a
 step fails for good (a decline, no stock, an address the carrier refuses) or runs out of time,
 the saga undoes what came before it: cancel the shipment, void or refund the payment, release the
-stock. The order ends `COMPLETED`, `FAILED`, `CANCELLED` or, after a refund, `REFUNDED`.
+stock. The order ends `COMPLETED`, `FAILED`, `CANCELLED` or, after refunds, `PARTIALLY_REFUNDED`
+or `REFUNDED`. Each refund is a row of its own, made at the provider by a refund worker and
+recorded on the order only once the money has gone back.
 
 The interesting failure is the one where nobody knows what happened. A capture that times out
 may have moved the money. payflow never retries a payment call blind: when a step runs again,
@@ -141,7 +143,7 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 | `GET /v1/orders` | The merchant's orders, newest first, up to 100 a page with a signed `next_cursor`. Filters: `state`, `created_gte`, `created_lt`, `currency`, `merchant_reference`. |
 | `GET /v1/orders/{id}` | The order, with payment, shipment and failure details. |
 | `POST /v1/orders/{id}/cancel` | Cancel before capture. `202`; the saga unwinds and ends `CANCELLED`. |
-| `POST /v1/orders/{id}/refund` | Refund a completed order in full. `202`; ends `REFUNDED`. |
+| `POST /v1/orders/{id}/refund` | Refund whatever is left of a completed order's capture. `202` with the order as it is; it becomes `REFUNDED` once the provider has returned the money. |
 | `GET /v1/orders/{id}/events` | The order's history as consumed from Kafka. |
 | `GET /livez`, `GET /readyz` | Liveness, and readiness (database only; Kafka being down doesn't stop orders). |
 | `GET :8081/actuator/prometheus` | Metrics, on the loopback management port. |
@@ -161,8 +163,9 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Killing the process | The packaged jar runs as a child process and is killed with `SIGKILL` once while an authorization is in flight and once after the provider captured but before the service heard back. It completes with one authorization, one capture and one shipment. |
 | Stopping the process | The packaged jar is stopped with `SIGTERM` while an authorization is in flight (it finishes and the lease is released) and while a capture outlasts the shutdown grace (the lease is fenced and expired). With a 90 s lease, the next instance resumes on its first poll and completes with one authorization and one capture. In-process tests cover draining, the deadline, and claims made while stopping. |
 | Lost answers | Every money-moving call is applied by the provider and its answer lost, over real HTTP with real read timeouts, with the provider's key handling on and off. |
-| State machine | Every one of the 169 state pairs is tried with raw SQL; the database accepts exactly the 18 the code allows. |
-| Refund bounds | Raw SQL refunds race each other in `READ COMMITTED` and `SERIALIZABLE`; the database never lets them add up to more than the capture, or return more of a line than was bought. |
+| State machine | Every one of the 144 state pairs is tried with raw SQL; the database accepts exactly the 16 the code allows. The migration that drops `REFUNDING` refuses to run while an older release still has an order in it. |
+| Refund bounds | Raw SQL refunds race each other in `READ COMMITTED` and `SERIALIZABLE`; the database never lets them add up to more than the capture, or return more of a line than was bought. Ten requests for 6.00 of a 25.00 order race through the service, and exactly four are made. |
+| Refund worker | Partial refunds settle on their own and add up to a full one; a refused refund fails and frees its share; an unavailable provider is retried with backoff; a worker killed after the provider refunded, with key handling off, is resumed without a second refund; a stale lease can't settle; `SIGTERM` hands back a refund still waiting for the provider. |
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
@@ -174,7 +177,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 318 tests, 90% line coverage floor (currently 95%)
+$ ./gradlew check          # format, Error Prone, 331 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

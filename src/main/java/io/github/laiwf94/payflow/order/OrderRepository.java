@@ -257,18 +257,40 @@ public class OrderRepository {
         .optional();
   }
 
-  /** Moves a completed order to {@code REFUNDING}. Completed orders are never leased. */
-  public Optional<Order> requestRefund(String merchantId, UUID id, Instant now) {
+  /**
+   * Locks the merchant's order against other refunds for the rest of the transaction and returns
+   * it. The lock is the one the refunds trigger takes ({@code FOR NO KEY UPDATE}), so a refund
+   * sized from what this transaction then reads can't race another one.
+   */
+  public Optional<Order> lockForRefund(String merchantId, UUID id) {
     return jdbc.sql(
-            """
-            UPDATE orders SET state = 'REFUNDING', attempt = 0, step_started_at = :now,
-                next_attempt_at = :now, version = version + 1, updated_at = :now
-            WHERE id = :id AND merchant_id = :merchant AND state = 'COMPLETED'
-            RETURNING *
-            """)
-        .param("now", ts(now))
+            "SELECT * FROM orders WHERE id = :id AND merchant_id = :merchant FOR NO KEY UPDATE")
         .param("id", id)
         .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /**
+   * Adds a succeeded refund of {@code amount} to the order: {@code PARTIALLY_REFUNDED} while some
+   * of the capture is left, {@code REFUNDED} when none is. Completed orders are never leased, so
+   * this write needs no lease; it is one atomic increment, so refunds settling at the same moment
+   * add up instead of overwriting each other. Empty when the order is not refundable.
+   */
+  public Optional<Order> addRefunded(UUID id, long amount, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET
+                refunded_minor = refunded_minor + :amount,
+                state = CASE WHEN refunded_minor + :amount = captured_minor
+                             THEN 'REFUNDED' ELSE 'PARTIALLY_REFUNDED' END,
+                version = version + 1, updated_at = :now
+            WHERE id = :id AND state IN ('COMPLETED', 'PARTIALLY_REFUNDED')
+            RETURNING *
+            """)
+        .param("amount", amount)
+        .param("now", ts(now))
+        .param("id", id)
         .query((rs, n) -> map(rs))
         .optional();
   }

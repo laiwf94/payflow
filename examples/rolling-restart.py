@@ -69,7 +69,7 @@ SETTLE_TIMEOUT = float(os.environ.get("SETTLE_TIMEOUT", "300"))
 # How long a request keeps trying the two instances before the run gives up on it.
 FAILOVER_TIMEOUT = 60.0
 
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "REFUNDED"}
+TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "PARTIALLY_REFUNDED", "REFUNDED"}
 NON_TERMINAL = [
     "PENDING",
     "INVENTORY_RESERVED",
@@ -78,7 +78,6 @@ NON_TERMINAL = [
     "CANCELLING_SHIPMENT",
     "REVERSING_PAYMENT",
     "RELEASING_INVENTORY",
-    "REFUNDING",
 ]
 SKU = "rr-widget"
 

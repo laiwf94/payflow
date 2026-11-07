@@ -3,8 +3,9 @@ package io.github.laiwf94.payflow.saga.steps;
 import java.util.UUID;
 
 /**
- * Idempotency keys sent to the payment provider. Each is derived from the order (or payment) and
- * the step, so every attempt of one step sends the same key and different steps never collide.
+ * Idempotency keys sent to the payment provider. Each is derived from the order (or payment, or
+ * refund) and the step, so every attempt of one step sends the same key and different steps never
+ * collide.
  */
 final class Keys {
 
@@ -26,7 +27,11 @@ final class Keys {
     return "reverse-" + paymentId;
   }
 
-  static String refund(String paymentId) {
-    return "refund-" + paymentId;
+  /**
+   * One key per refund row, not per payment: two partial refunds of the same payment are two
+   * refunds, while every attempt at one of them is the same one.
+   */
+  static String refund(UUID refund) {
+    return "refund-" + refund;
   }
 }
