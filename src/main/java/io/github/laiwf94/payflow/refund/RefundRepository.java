@@ -6,9 +6,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 import tools.jackson.core.JacksonException;
@@ -82,6 +85,24 @@ public class RefundRepository {
         .param("order", orderId)
         .query(Long.class)
         .single();
+  }
+
+  /**
+   * How many units of each sku an order's refunds that haven't failed give back. Exact only while
+   * the order is locked, like {@link #activeTotal}.
+   */
+  public Map<String, Long> activeLineQuantities(UUID orderId) {
+    Map<String, Long> out = new HashMap<>();
+    jdbc.sql(
+            """
+            SELECT l ->> 'sku' AS sku, sum((l ->> 'quantity')::bigint) AS quantity
+            FROM refunds, jsonb_array_elements(lines) AS l
+            WHERE order_id = :order AND state <> 'FAILED' AND lines IS NOT NULL
+            GROUP BY 1
+            """)
+        .param("order", orderId)
+        .query((RowCallbackHandler) rs -> out.put(rs.getString("sku"), rs.getLong("quantity")));
+    return out;
   }
 
   /**

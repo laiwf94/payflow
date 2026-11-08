@@ -2,6 +2,7 @@ package io.github.laiwf94.payflow.api;
 
 import io.github.laiwf94.payflow.money.InvalidMoneyException;
 import io.github.laiwf94.payflow.order.OrderService;
+import io.github.laiwf94.payflow.refund.RefundService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Comparator;
 import java.util.Map;
@@ -92,6 +93,18 @@ class ApiExceptionHandler {
   ResponseEntity<Map<String, Object>> referenceInUse(
       OrderService.ReferenceInUse e, HttpServletRequest req) {
     return error(ApiError.ORDER_REFERENCE_IN_USE, e.getMessage(), req);
+  }
+
+  @ExceptionHandler(RefundService.ExceedsCaptured.class)
+  ResponseEntity<Map<String, Object>> refundExceedsCaptured(
+      RefundService.ExceedsCaptured e, HttpServletRequest req) {
+    return error(ApiError.REFUND_EXCEEDS_CAPTURED, e.getMessage(), req);
+  }
+
+  @ExceptionHandler(RefundService.ExceedsPurchased.class)
+  ResponseEntity<Map<String, Object>> refundExceedsPurchased(
+      RefundService.ExceedsPurchased e, HttpServletRequest req) {
+    return error(ApiError.REFUND_EXCEEDS_PURCHASED, e.getMessage(), req);
   }
 
   @ExceptionHandler(HttpRequestMethodNotSupportedException.class)

@@ -175,6 +175,39 @@ class OpenApiContractTest {
     record("POST /v1/orders/{id}/refund", api.post("/v1/orders/" + done + "/refund", null));
     replayed("POST /v1/orders/{id}/refund", 202, "/v1/orders/" + done + "/refund", null);
 
+    // POST and GET /v1/orders/{id}/refunds
+    String refundable = createdOrderId();
+    while (worker.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+    String op = "POST /v1/orders/{id}/refunds";
+    String refunds = "/v1/orders/" + refundable + "/refunds";
+    String amount = "{\"amount\":100}";
+    record(op, api.post(refunds, amount));
+    replayed(op, 202, refunds, "{\"lines\":[{\"sku\":\"sku-2\",\"quantity\":1}]}");
+    record(op, api.post(refunds, "{\"amount\":0}"));
+    replayed(op, 400, refunds, "{\"amount\":100,\"lines\":[]}");
+    record(op, api.post(refunds, amount, "Idempotency-Key", "has space"));
+    record(op, anonymous.post(refunds, amount));
+    record(op, api.post("/v1/orders/" + missing + "/refunds", amount));
+    replayed(op, 404, "/v1/orders/" + missing + "/refunds", amount);
+    record(op, api.post("/v1/orders/" + pending + "/refunds", amount));
+    record(op, api.post(refunds, "{\"amount\":2500}"));
+    replayed(op, 409, refunds, "{\"amount\":2500}");
+    record(op, api.post(refunds, "{\"lines\":[{\"sku\":\"sku-2\",\"quantity\":1}]}"));
+    busyKey("busy-refunds", refunds, amount);
+    record(op, api.post(refunds, amount, "Idempotency-Key", "busy-refunds"));
+    record(op, api.post(refunds, tooLarge));
+    record(op, api.post(refunds, "<refund/>", "Content-Type", "application/xml"));
+    api.post(refunds, amount, "Idempotency-Key", "reused-refunds");
+    record(op, api.post(refunds, "{\"amount\":101}", "Idempotency-Key", "reused-refunds"));
+    record("GET /v1/orders/{id}/refunds", api.get(refunds));
+    record("GET /v1/orders/{id}/refunds", api.get("/v1/orders/" + missing + "/refunds"));
+    record("GET /v1/orders/{id}/refunds", anonymous.get(refunds));
+    assertThat(api.get(refunds).json().get("data"))
+        .extracting(r -> r.get("amount").asLong())
+        .containsExactly(100L, 500L, 100L);
+
     assertThat(exercised).isEqualTo(documentedResponses());
   }
 

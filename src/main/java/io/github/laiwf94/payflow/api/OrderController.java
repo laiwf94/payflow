@@ -6,6 +6,8 @@ import io.github.laiwf94.payflow.order.OrderPage;
 import io.github.laiwf94.payflow.order.OrderPosition;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.Refund;
+import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundService;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
 import io.github.laiwf94.payflow.timeline.TimelineEntry;
@@ -105,6 +107,44 @@ class OrderController {
   ResponseEntity<OrderResponse> refund(@PathVariable String id, HttpServletRequest http) {
     return ResponseEntity.accepted()
         .body(OrderResponse.of(refunds.refundRemaining(merchant(http), parse(id))));
+  }
+
+  /**
+   * Starts one refund of an amount or of some of the order's goods. It runs in the background: the
+   * answer is the refund, {@code PENDING}, and the order changes once the provider has returned the
+   * money.
+   */
+  @PostMapping(path = "/{id}/refunds", consumes = MediaType.APPLICATION_JSON_VALUE)
+  ResponseEntity<RefundResponse> createRefund(
+      @PathVariable String id,
+      @Valid @RequestBody CreateRefundRequest req,
+      HttpServletRequest http) {
+    UUID orderId = parse(id);
+    String merchant = merchant(http);
+    if ((req.amount() == null) == (req.lines() == null)) {
+      throw new IllegalArgumentException("give either amount or lines, not both");
+    }
+    Refund r =
+        req.amount() != null
+            ? refunds.create(merchant, orderId, req.amount(), List.of())
+            : refunds.refundLines(
+                merchant,
+                orderId,
+                req.lines().stream().map(l -> new RefundLine(l.sku(), l.quantity())).toList());
+    // The currency never changes, so reading it after the refund can't disagree with it.
+    String currency = orders.get(merchant, orderId).amount().currencyCode();
+    return ResponseEntity.accepted().body(RefundResponse.of(r, currency));
+  }
+
+  /** The order's refunds, oldest first, in every state. */
+  @GetMapping("/{id}/refunds")
+  Map<String, List<RefundResponse>> refunds(@PathVariable String id, HttpServletRequest http) {
+    UUID orderId = parse(id);
+    String merchant = merchant(http);
+    String currency = orders.get(merchant, orderId).amount().currencyCode();
+    return Map.of(
+        "data",
+        refunds.list(merchant, orderId).stream().map(r -> RefundResponse.of(r, currency)).toList());
   }
 
   /**

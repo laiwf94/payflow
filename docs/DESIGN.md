@@ -9,7 +9,7 @@ retry any request safely: the same request with the same key gives the same answ
 creates a second order or a second refund. Other systems learn about every state change, in order
 per order, even if Kafka is down when the change happens.
 
-This version leaves out partial captures and partial refunds, multiple payments per order (split
+This version leaves out partial captures, multiple payments per order (split
 tender), inventory reservation expiry, and running the saga across regions. Some of these come up
 under [Growing past one database](#growing-past-one-database).
 
@@ -203,6 +203,21 @@ left, so two requests can't both be given the last of the capture. The trigger c
 again at commit. A full refund (`POST /v1/orders/{id}/refund`) is one refund of whatever is left.
 If pending refunds already cover all of it, nothing new is created and the order comes back as it
 is.
+
+`POST /v1/orders/{id}/refunds` takes exactly one of `amount` or `lines`. A line refund is priced
+from the order itself, never by the client: each unit comes back at what the order paid for it.
+When a sku is on more than one line, possibly at different prices, units come back from the
+first line first, after the units earlier refunds that haven't failed already took. So however a
+merchant splits a sku's units across refunds, they add up to what those units cost
+(`RefundShareTest`). The service refuses, under the order's lock, a sku that isn't on the order
+or is named twice (`400 invalid_argument`), more of a sku than is left of what was bought (`409
+refund_exceeds_purchased`), and a share larger than what is left of the capture (`409
+refund_exceeds_captured`, so a line refund can be refused once amount refunds have used the
+money up). Each message says how much is left. The trigger's two rules are the same two checks,
+so the database would refuse anything the service let through. `RefundApiTest` races ten
+requests for 6.00 of a 25.00 order and six requests for one of two mugs over HTTP: exactly four
+and exactly two are made, the rest are 409s, and the provider holds exactly those refunds.
+`GET /v1/orders/{id}/refunds` lists an order's refunds, oldest first, in every state.
 
 `RefundWorker` runs them. It works the way the saga worker does, with the same settings: a
 dispatcher leases due refunds with `SKIP LOCKED` (a partial index on `next_attempt_at` keeps the
@@ -526,6 +541,7 @@ response without the other fails the build.
 | API key length | 256 characters | `ApiKeys` |
 | Merchant id | 1-64 of `a-z 0-9 _ -` | `ApiKeys`, `orders_merchant_format` |
 | Refunds of an order | add up to at most the capture, and at most each line's quantity | `refunds_within_order` trigger, `RefundService` |
+| Refund amount / lines per refund / quantity per line | 1-99,999,999 minor units / 1-50 / 1-1,000 | `CreateRefundRequest` |
 | Refunds claimed per poll and in flight | 64 | `payflow.saga.batch-size` |
 | Saga lease | 30 s | `payflow.saga.lease` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |

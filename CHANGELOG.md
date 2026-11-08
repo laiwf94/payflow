@@ -55,6 +55,10 @@ notes on GitHub link here.
   refund is `FAILED` with the provider's reason and frees its share of the capture. New metrics
   `payflow.refund.attempt`, `payflow.refunds.settled`, `payflow.refunds.retries` and
   `payflow.refunds.handed_back`.
+- Partial and line-item refunds over the API (#24). `POST /v1/orders/{id}/refunds` takes an
+  `amount` or `lines` (sku and quantity, priced from the order) and answers `202` with the
+  refund, `PENDING`; `GET /v1/orders/{id}/refunds` lists an order's refunds. New codes
+  `409 refund_exceeds_captured` and `409 refund_exceeds_purchased` say how much is left.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

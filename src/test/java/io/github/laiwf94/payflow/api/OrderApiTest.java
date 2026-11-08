@@ -219,6 +219,101 @@ class OrderApiTest {
     }
   }
 
+  /**
+   * Each row: a refund body for a completed order of 2 x sku-1 at 10.00 and 1 x sku-2 at 5.00, the
+   * expected status, and the expected amount (202) or error code.
+   */
+  @ParameterizedTest(name = "{0}")
+  @CsvSource(
+      delimiter = '|',
+      textBlock =
+          """
+          one minor unit            | {"amount":1}                                           | 202 | 1
+          the whole capture         | {"amount":2500}                                        | 202 | 2500
+          one unit over the capture | {"amount":2501}                                        | 409 | refund_exceeds_captured
+          at the amount cap         | {"amount":99999999}                                    | 409 | refund_exceeds_captured
+          over the amount cap       | {"amount":100000000}                                   | 400 | invalid_argument
+          amount zero               | {"amount":0}                                           | 400 | invalid_argument
+          amount negative           | {"amount":-1}                                          | 400 | invalid_argument
+          amount as string          | {"amount":"100"}                                       | 400 | invalid_argument
+          amount as money           | {"amount":"1.00"}                                      | 400 | invalid_argument
+          amount as decimal         | {"amount":10.5}                                        | 400 | invalid_argument
+          amount as exponent        | {"amount":1e3}                                         | 400 | invalid_argument
+          amount as boolean         | {"amount":true}                                        | 400 | invalid_argument
+          amount null               | {"amount":null}                                        | 400 | invalid_argument
+          empty object              | {}                                                     | 400 | invalid_argument
+          amount and lines          | {"amount":100,"lines":[{"sku":"sku-1","quantity":1}]}  | 400 | invalid_argument
+          one line                  | {"lines":[{"sku":"sku-1","quantity":1}]}               | 202 | 1000
+          two lines                 | {"lines":[{"sku":"sku-2","quantity":1},{"sku":"sku-1","quantity":2}]} | 202 | 2500
+          more than was bought      | {"lines":[{"sku":"sku-1","quantity":3}]}               | 409 | refund_exceeds_purchased
+          sku not on the order      | {"lines":[{"sku":"sku-9","quantity":1}]}               | 400 | invalid_argument
+          sku twice                 | {"lines":[{"sku":"sku-1","quantity":1},{"sku":"sku-1","quantity":1}]} | 400 | invalid_argument
+          no lines                  | {"lines":[]}                                           | 400 | invalid_argument
+          lines null                | {"lines":null}                                         | 400 | invalid_argument
+          lines not an array        | {"lines":{"sku":"sku-1","quantity":1}}                 | 400 | invalid_argument
+          null line                 | {"lines":[null]}                                       | 400 | invalid_argument
+          line without quantity     | {"lines":[{"sku":"sku-1"}]}                            | 400 | invalid_argument
+          line without sku          | {"lines":[{"quantity":1}]}                             | 400 | invalid_argument
+          quantity zero             | {"lines":[{"sku":"sku-1","quantity":0}]}               | 400 | invalid_argument
+          quantity over the cap     | {"lines":[{"sku":"sku-1","quantity":1001}]}            | 400 | invalid_argument
+          quantity as string        | {"lines":[{"sku":"sku-1","quantity":"1"}]}             | 400 | invalid_argument
+          quantity as decimal       | {"lines":[{"sku":"sku-1","quantity":1.5}]}             | 400 | invalid_argument
+          sku as number             | {"lines":[{"sku":1,"quantity":1}]}                     | 400 | invalid_argument
+          bad sku                   | {"lines":[{"sku":"sku 1","quantity":1}]}               | 400 | invalid_argument
+          unknown line field        | {"lines":[{"sku":"sku-1","quantity":1,"amount":5}]}    | 400 | invalid_argument
+          unknown field             | {"amount":100,"reason":"damaged"}                      | 400 | invalid_argument
+          json array                | []                                                     | 400 | invalid_argument
+          not json                  | {"amount":                                             | 400 | invalid_argument
+          """)
+  void refundValidationMatrix(String name, String body, int status, String expected) {
+    String id = create(Api.orderBody());
+    awaitState(id, "COMPLETED");
+    Api.Response r = api.post("/v1/orders/" + id + "/refunds", body);
+    assertThat(r.status()).as(name + ": " + r.body()).isEqualTo(status);
+    if (status == 202) {
+      assertThat(r.json().get("amount").asLong()).isEqualTo(Long.parseLong(expected));
+      assertThat(r.json().get("state").asString()).isEqualTo("PENDING");
+      assertThat(r.json().get("order_id").asString()).isEqualTo(id);
+    } else {
+      assertThat(r.errorCode()).isEqualTo(expected);
+      assertThat(r.json().at("/error/request_id").asString()).isNotBlank();
+      assertThat(api.get("/v1/orders/" + id + "/refunds").json().get("data"))
+          .as("a refused refund leaves nothing behind")
+          .isEmpty();
+    }
+  }
+
+  @Test
+  void tooManyRefundLines() {
+    String id = create(Api.orderBody());
+    awaitState(id, "COMPLETED");
+    String lines =
+        IntStream.range(0, 51)
+            .mapToObj(i -> "{\"sku\":\"s" + i + "\",\"quantity\":1}")
+            .collect(Collectors.joining(","));
+    Api.Response r = api.post("/v1/orders/" + id + "/refunds", "{\"lines\":[" + lines + "]}");
+    assertThat(r.status()).isEqualTo(400);
+    assertThat(r.json().at("/error/message").asString()).startsWith("lines:");
+  }
+
+  @Test
+  void refundsBeforeCompletionAndOfOtherMerchantsOrdersAreRefused() {
+    faults.set("inventory.reserve", new FaultPlan(0, 0, 0, Duration.ofMillis(800), List.of()));
+    String id = create(Api.orderBody());
+    for (String body :
+        List.of("{\"amount\":100}", "{\"lines\":[{\"sku\":\"sku-1\",\"quantity\":1}]}")) {
+      Api.Response early = api.post("/v1/orders/" + id + "/refunds", body);
+      assertThat(early.status()).as(body).isEqualTo(409);
+      assertThat(early.errorCode()).isEqualTo("order_not_refundable");
+    }
+    Api globex = api.as(TestKeys.GLOBEX);
+    assertThat(globex.post("/v1/orders/" + id + "/refunds", "{\"amount\":100}").errorCode())
+        .isEqualTo("not_found");
+    assertThat(globex.get("/v1/orders/" + id + "/refunds").errorCode()).isEqualTo("not_found");
+    assertThat(api.get("/v1/orders/not-a-uuid/refunds").errorCode()).isEqualTo("not_found");
+    assertThat(api.get("/v1/orders/" + id + "/refunds").json().get("data")).isEmpty();
+  }
+
   @Test
   void aTotalOverTheCapIsRefused() {
     String body =
