@@ -212,7 +212,7 @@ class SagaChaosProperties {
             new CancelShipmentStep(ship),
             new ReversePaymentStep(pay, props, unknown),
             new ReleaseInventoryStep(inv));
-    RefundStep refundStep = new RefundStep(pay, props, unknown);
+    RefundStep refundStep = new RefundStep(pay, inv, props, unknown);
 
     MutableClock clock = new MutableClock(Instant.parse("2030-01-01T00:00:00Z"));
     Map<String, Integer> seen = new HashMap<>();

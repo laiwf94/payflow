@@ -32,6 +32,23 @@ final class HttpInventoryService implements InventoryService {
   }
 
   @Override
+  public CallResult<String> restock(String reservationId, String restockId, List<StockLine> lines) {
+    List<Map<String, Object>> body =
+        lines.stream()
+            .map(l -> Map.<String, Object>of("sku", l.sku(), "quantity", l.quantity()))
+            .toList();
+    return http.call(
+        HttpMethod.POST,
+        Map.of("restock_id", restockId, "lines", body),
+        Map.of(),
+        u -> u.pathSegment(reservationId, "restocks"),
+        (status, answer) ->
+            status >= 300
+                ? HttpDependency.rejected(answer, "restock_failed")
+                : new CallResult.Success<>(answer.path("id").asString(restockId)));
+  }
+
+  @Override
   public CallResult<Boolean> release(String reservationId) {
     return http.call(
         HttpMethod.DELETE,

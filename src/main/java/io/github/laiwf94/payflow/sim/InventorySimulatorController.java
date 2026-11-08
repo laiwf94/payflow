@@ -18,6 +18,8 @@ class InventorySimulatorController {
 
   record ReserveRequest(String reservationId, List<InventorySimulator.Line> lines) {}
 
+  record RestockRequest(String restockId, List<InventorySimulator.Line> lines) {}
+
   private final InventorySimulator inventory;
   private final SimulatedResponses responses;
 
@@ -36,6 +38,18 @@ class InventorySimulatorController {
   @DeleteMapping("/{id}")
   ResponseEntity<?> release(@PathVariable String id) {
     return responses.respond(inventory.release(id), released -> ResponseEntity.noContent().build());
+  }
+
+  @PostMapping("/{id}/restocks")
+  ResponseEntity<?> restock(@PathVariable String id, @RequestBody RestockRequest req) {
+    return responses.respond(
+        inventory.restock(id, req.restockId(), req.lines()),
+        r -> ResponseEntity.status(201).body(r));
+  }
+
+  @GetMapping("/{id}/restocks")
+  ResponseEntity<?> restocks(@PathVariable String id) {
+    return responses.respond(inventory.findRestocks(id), ResponseEntity::ok);
   }
 
   @GetMapping("/{id}")

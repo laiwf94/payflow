@@ -27,6 +27,7 @@ import org.springframework.boot.test.context.SpringBootTest;
     properties = {
       "payflow.simulator.answer-delay=700ms",
       "payflow.dependencies.payment.read-timeout=300ms",
+      "payflow.dependencies.inventory.read-timeout=300ms",
       "payflow.dependencies.shipping.read-timeout=300ms"
     })
 class GatewayHttpTest {
@@ -125,6 +126,74 @@ class GatewayHttpTest {
             CallResult.Rejected.class, r -> assertThat(r.code()).isEqualTo("out_of_stock"));
     assertThat(success(inventory.release("o1"))).isTrue();
     assertThat(success(inventory.release("o1"))).isTrue();
+    assertThat(inventorySim.heldFor("sku-1")).isZero();
+  }
+
+  @Test
+  void inventoryRestockReturnsUnitsAndReplays() {
+    assertThat(success(inventory.reserve("o1", List.of(new LineItem("sku-1", 3, 100)))))
+        .isEqualTo("o1");
+    List<StockLine> one = List.of(new StockLine("sku-1", 1));
+    assertThat(success(inventory.restock("o1", "refund-a", one))).isEqualTo("refund-a");
+    assertThat(success(inventory.restock("o1", "refund-a", one)))
+        .as("a retry replays")
+        .isEqualTo("refund-a");
+    assertThat(inventorySim.heldFor("sku-1")).isEqualTo(2);
+    assertThat(inventory.restock("o1", "refund-a", List.of(new StockLine("sku-1", 2))))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class, r -> assertThat(r.code()).isEqualTo("conflict"));
+    assertThat(inventory.restock("o1", "refund-b", List.of(new StockLine("sku-1", 3))))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class,
+            r -> {
+              assertThat(r.code()).isEqualTo("exceeds_reserved");
+              assertThat(r.message()).contains("holds 2 of sku-1");
+            });
+    assertThat(inventory.restock("o2", "refund-c", one))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class,
+            r -> assertThat(r.code()).isEqualTo("reservation_not_found"));
+    assertThat(inventory.restock("../o1", "refund-d", one))
+        .as("the reservation id is one path segment")
+        .isInstanceOf(CallResult.Rejected.class);
+    assertThat(inventorySim.restocksOf("o1"))
+        .extracting(InventorySimulator.Restock::id)
+        .containsExactly("refund-a");
+  }
+
+  @Test
+  void aLostRestockAnswerIsUnknownAndTheRetryReplaysIt() {
+    success(inventory.reserve("o1", List.of(new LineItem("sku-1", 2, 100))));
+    long before = inventorySim.stock("sku-1");
+    faults.set(
+        "inventory.restock", new FaultPlan(0, 0, 0, Duration.ZERO, List.of(Fault.UNKNOWN_AFTER)));
+    List<StockLine> one = List.of(new StockLine("sku-1", 1));
+    assertThat(inventory.restock("o1", "refund-a", one)).isInstanceOf(CallResult.Unknown.class);
+    assertThat(inventorySim.stock("sku-1"))
+        .as("applied before the answer was lost")
+        .isEqualTo(before + 1);
+    assertThat(success(inventory.restock("o1", "refund-a", one))).isEqualTo("refund-a");
+    assertThat(inventorySim.stock("sku-1")).as("not returned twice").isEqualTo(before + 1);
+    assertThat(inventorySim.heldFor("sku-1")).isEqualTo(1);
+  }
+
+  @Test
+  void aLostRestockRequestIsUnknownAndNothingMoved() {
+    success(inventory.reserve("o1", List.of(new LineItem("sku-1", 2, 100))));
+    long before = inventorySim.stock("sku-1");
+    faults.set(
+        "inventory.restock", new FaultPlan(0, 0, 0, Duration.ZERO, List.of(Fault.UNKNOWN_BEFORE)));
+    List<StockLine> two = List.of(new StockLine("sku-1", 2));
+    assertThat(inventory.restock("o1", "refund-a", two)).isInstanceOf(CallResult.Unknown.class);
+    assertThat(inventorySim.stock("sku-1")).isEqualTo(before);
+    assertThat(inventorySim.restocksOf("o1")).isEmpty();
+    faults.set("inventory.restock", new FaultPlan(1, 0, 0, Duration.ZERO, List.of()));
+    assertThat(inventory.restock("o1", "refund-a", two))
+        .as("a 503 is transient")
+        .isInstanceOf(CallResult.Transient.class);
+    faults.set("inventory.restock", FaultPlan.NONE);
+    assertThat(success(inventory.restock("o1", "refund-a", two))).isEqualTo("refund-a");
+    assertThat(inventorySim.stock("sku-1")).isEqualTo(before + 2);
     assertThat(inventorySim.heldFor("sku-1")).isZero();
   }
 

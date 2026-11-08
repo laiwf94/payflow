@@ -11,4 +11,12 @@ public interface InventoryService {
 
   /** Releases the reservation. Releasing an unknown id succeeds. */
   CallResult<Boolean> release(String reservationId);
+
+  /**
+   * Puts {@code lines} of a reservation's units back into stock, e.g. goods a customer returned. It
+   * is idempotent on {@code restockId}: after a lost answer the same call is a replay, not a second
+   * restock. Returning more of a SKU than the reservation still holds, or restocking from an
+   * unknown reservation, is {@link CallResult.Rejected}.
+   */
+  CallResult<String> restock(String reservationId, String restockId, List<StockLine> lines);
 }

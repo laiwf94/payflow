@@ -8,6 +8,7 @@ import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundRepository;
 import io.github.laiwf94.payflow.refund.RefundService;
 import io.github.laiwf94.payflow.refund.RefundState;
@@ -35,6 +36,7 @@ import java.util.List;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,7 +52,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = {
       "payflow.simulator.answer-delay=600ms",
-      "payflow.dependencies.payment.read-timeout=300ms"
+      "payflow.dependencies.payment.read-timeout=300ms",
+      "payflow.dependencies.inventory.read-timeout=300ms"
     })
 class UnknownOutcomeTest {
 
@@ -242,6 +245,85 @@ class UnknownOutcomeTest {
               assertThat(r.state()).isEqualTo(RefundState.SUCCEEDED);
               assertThat(r.attempt()).as("found on the retry, not made again").isEqualTo(1);
             });
+  }
+
+  /**
+   * One mug of two refunded by line, with the given restock faults: the money goes back once, the
+   * mug goes back to stock once, and the refund settles on attempt {@code attempts - 1}.
+   */
+  private void lineRefundSettlesOnce(boolean honorKeys, int attempts) {
+    settings.honorIdempotencyKeys(honorKeys);
+    Order o = insert("pm_card_ok", Orders.ADDRESS);
+    assertThat(drive(o).state()).isEqualTo(COMPLETED);
+    long shelf = inventory.stock("sku-1");
+    assertThat(inventory.heldFor("sku-1")).isEqualTo(2);
+
+    refundService.refundLines("acme", o.id(), List.of(new RefundLine("sku-1", 1)));
+    Order done = drive(o);
+    assertThat(done.state()).isEqualTo(PARTIALLY_REFUNDED);
+    assertThat(done.refundedMinor()).isEqualTo(1000);
+    assertThat(count(o, "refund")).as("the money went back once").isEqualTo(1);
+    assertThat(inventory.stock("sku-1")).as("the mug went back once").isEqualTo(shelf + 1);
+    assertThat(inventory.heldFor("sku-1")).isEqualTo(1);
+    assertThat(inventory.heldFor("sku-2")).as("the other line is untouched").isEqualTo(1);
+    assertThat(inventory.stock("sku-1") + inventory.heldFor("sku-1"))
+        .isEqualTo(inventory.initialStock("sku-1"));
+    var refund = refunds.listForOrder(o.id()).get(0);
+    assertThat(refund.state()).isEqualTo(RefundState.SUCCEEDED);
+    assertThat(refund.attempt()).isEqualTo(attempts - 1);
+    assertThat(inventory.restocksOf(o.id().toString()))
+        .singleElement()
+        .satisfies(
+            x -> {
+              assertThat(x.id())
+                  .as("restocked under the refund's id")
+                  .isEqualTo(refund.id().toString());
+              assertThat(x.lines()).containsExactly(new InventorySimulator.Line("sku-1", 1));
+            });
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void lostRestockAnswerReturnsTheStockOnce(boolean honorKeys) {
+    lose("inventory.restock", Fault.UNKNOWN_AFTER);
+    lineRefundSettlesOnce(honorKeys, 2);
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void lostRestockRequestIsRetried(boolean honorKeys) {
+    lose("inventory.restock", Fault.UNKNOWN_BEFORE, Fault.ERROR);
+    lineRefundSettlesOnce(honorKeys, 3);
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {true, false})
+  void lostLineRefundAnswerRestocksAfterTheMoneyIsFound(boolean honorKeys) {
+    lose("payment.refund", Fault.UNKNOWN_AFTER);
+    lose("inventory.restock", Fault.UNKNOWN_AFTER);
+    lineRefundSettlesOnce(honorKeys, 3);
+  }
+
+  @Test
+  void aRefusedRestockKeepsTheRefundPendingWithoutRefundingTwice() {
+    settings.honorIdempotencyKeys(false);
+    Order o = insert("pm_card_ok", Orders.ADDRESS);
+    assertThat(drive(o).state()).isEqualTo(COMPLETED);
+    // The inventory system lost the reservation, so it refuses every restock from it.
+    inventory.reset();
+    refundService.refundLines("acme", o.id(), List.of(new RefundLine("sku-2", 1)));
+    for (int i = 0; i < 4; i++) {
+      clock.advance(Duration.ofSeconds(5));
+      refundWorker.runOnce();
+    }
+    var refund = refunds.listForOrder(o.id()).get(0);
+    assertThat(refund.state()).as("the stock is still owed").isEqualTo(RefundState.PENDING);
+    assertThat(refund.attempt()).isEqualTo(4);
+    assertThat(count(o, "refund"))
+        .as("each retry finds the money it already returned")
+        .isEqualTo(1);
+    assertThat(repo.findById(o.id()).orElseThrow().state()).isEqualTo(COMPLETED);
+    assertThat(inventory.stock("sku-2")).isEqualTo(inventory.initialStock("sku-2"));
   }
 
   @ParameterizedTest

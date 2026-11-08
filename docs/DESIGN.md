@@ -244,6 +244,21 @@ idempotency key, one per refund row (`Keys.refund`), covers the gap between the 
 call at a provider that does honour keys. `RefundWorkerTest` kills a worker after the provider
 refunded with keys ignored, and the next claim records the refund without a second one.
 
+A line refund also returns its units to stock. After the money is back, the step restocks the
+refund's lines from the order's reservation through `InventoryService.restock`, under the refund
+row's id, which the inventory system treats as idempotent: a retry after a lost answer is a
+replay, not a second restock. It never returns more of a SKU than the reservation still holds
+(`exceeds_reserved`), and releasing a reservation later releases only what is left of it. Money
+goes first on purpose. A refund the provider refuses ends `FAILED` and frees its lines to be
+refunded again, so stock returned before the money would come back twice. The refund only
+succeeds once both are done. Until then it stays `PENDING`, and each attempt finds the provider's
+refund by its reference instead of making another, then repeats the restock. An inventory system
+that refuses the restock outright (it has lost the reservation) is retried with an error log, as
+a refused release is: the money has gone back, and dropping the stock silently would leave the
+shelf short. `UnknownOutcomeTest` loses the restock's answer, its request, and both the refund's
+and the restock's answers, with the provider's key handling on and off: each time one refund is
+made and one mug goes back to the shelf.
+
 On `SIGTERM` the refund worker stops claiming and gives in-flight refunds the same grace as the
 saga. It stops alongside the saga worker, not after it, so together they still fit inside
 `docker stop`'s 10 s. A refund still waiting for the provider at the deadline is abandoned: fenced
@@ -512,6 +527,8 @@ response without the other fails the build.
 | Compensation keeps failing | Order stays in the compensating state | Retries forever, capped at 30 s apart; error log after 10 attempts |
 | Provider refuses a refund | Refund ends `FAILED` with the reason; the order is unchanged | Its share of the capture is free for another refund; error log |
 | Refund answer lost, or payflow killed mid-refund | Refund stays `PENDING` | The next attempt finds the provider's refund by the row's id; no second refund |
+| Restock answer lost after a line refund | Refund stays `PENDING`; the money is back | The next attempt finds the provider's refund, and the restock replays by the refund's id; stock comes back once |
+| Inventory refuses a restock | Refund stays `PENDING`; error log | Retries until the inventory system accepts it; the money is never refunded twice |
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
 | payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |

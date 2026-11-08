@@ -8,6 +8,7 @@ import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.gateway.RefundInfo;
 import io.github.laiwf94.payflow.gateway.ShipmentInfo;
 import io.github.laiwf94.payflow.gateway.ShippingService;
+import io.github.laiwf94.payflow.gateway.StockLine;
 import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.ShippingAddress;
@@ -131,6 +132,20 @@ final class DirectGateways {
       @Override
       public CallResult<Boolean> release(String reservationId) {
         return call(() -> sim.release(reservationId), r -> new CallResult.Success<>(Boolean.TRUE));
+      }
+
+      @Override
+      public CallResult<String> restock(
+          String reservationId, String restockId, List<StockLine> lines) {
+        return call(
+            () ->
+                sim.restock(
+                    reservationId,
+                    restockId,
+                    lines.stream()
+                        .map(l -> new InventorySimulator.Line(l.sku(), l.quantity()))
+                        .toList()),
+            r -> new CallResult.Success<>(r.id()));
       }
     };
   }

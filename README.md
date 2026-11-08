@@ -92,7 +92,8 @@ step fails for good (a decline, no stock, an address the carrier refuses) or run
 the saga undoes what came before it: cancel the shipment, void or refund the payment, release the
 stock. The order ends `COMPLETED`, `FAILED`, `CANCELLED` or, after refunds, `PARTIALLY_REFUNDED`
 or `REFUNDED`. Each refund is a row of its own, made at the provider by a refund worker and
-recorded on the order only once the money has gone back.
+recorded on the order only once the money has gone back. A refund of lines also puts those
+units back into stock, once, after the money.
 
 The interesting failure is the one where nobody knows what happened. A capture that times out
 may have moved the money. payflow never retries a payment call blind: when a step runs again,
@@ -165,7 +166,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Money and stock under chaos | jqwik generates failure rates for every call to the three providers, whether the payment provider honours idempotency keys, orders with declines, bad addresses, scarce stock, cancels and refunds, and crash points inside the worker. After everything settles, the providers' own ledgers must show: every order terminal, completed orders charged exactly their amount once, failed and cancelled orders holding nothing, no double authorization or capture, stock balanced, and each order's events a legal path. Deliberately broken versions of the saga fail it. |
 | Killing the process | The packaged jar runs as a child process and is killed with `SIGKILL` once while an authorization is in flight and once after the provider captured but before the service heard back. It completes with one authorization, one capture and one shipment. |
 | Stopping the process | The packaged jar is stopped with `SIGTERM` while an authorization is in flight (it finishes and the lease is released) and while a capture outlasts the shutdown grace (the lease is fenced and expired). With a 90 s lease, the next instance resumes on its first poll and completes with one authorization and one capture. In-process tests cover draining, the deadline, and claims made while stopping. |
-| Lost answers | Every money-moving call is applied by the provider and its answer lost, over real HTTP with real read timeouts, with the provider's key handling on and off. |
+| Lost answers | Every money-moving call is applied by the provider and its answer lost, over real HTTP with real read timeouts, with the provider's key handling on and off. A line refund's restock is lost before and after the inventory applies it: the money goes back once and the stock comes back once. |
 | State machine | Every one of the 144 state pairs is tried with raw SQL; the database accepts exactly the 16 the code allows. The migration that drops `REFUNDING` refuses to run while an older release still has an order in it. |
 | Refund bounds | Raw SQL refunds race each other in `READ COMMITTED` and `SERIALIZABLE`; the database never lets them add up to more than the capture, or return more of a line than was bought. Ten requests for 6.00 of a 25.00 order race through the service, and exactly four are made. Over HTTP, ten amount refunds and six one-mug refunds of a two-mug order race: exactly four and two are made, the rest are `409`, and the provider holds exactly those refunds. A line refund is priced from the order's lines, however its units are split. |
 | Refund worker | Partial refunds settle on their own and add up to a full one; a refused refund fails and frees its share; an unavailable provider is retried with backoff; a worker killed after the provider refunded, with key handling off, is resumed without a second refund; a stale lease can't settle; `SIGTERM` hands back a refund still waiting for the provider. |
@@ -180,7 +181,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 378 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 391 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

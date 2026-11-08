@@ -59,6 +59,11 @@ notes on GitHub link here.
   `amount` or `lines` (sku and quantity, priced from the order) and answers `202` with the
   refund, `PENDING`; `GET /v1/orders/{id}/refunds` lists an order's refunds. New codes
   `409 refund_exceeds_captured` and `409 refund_exceeds_purchased` say how much is left.
+- Line-item refunds return their stock (#24). Once the money is back, the refund worker restocks
+  the refund's lines from the order's reservation, idempotent on the refund's id, so a lost
+  answer or a crash never returns stock twice. The inventory adapter has a new `restock` call
+  (`POST /reservations/{id}/restocks` with `{restock_id, lines}`, refusing more than the
+  reservation still holds), and the simulator implements it.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

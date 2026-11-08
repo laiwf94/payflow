@@ -142,6 +142,22 @@ class SimulatorHttpTest {
             "{\"reservation_id\":\"o2\",\"lines\":[{\"sku\":\"a\",\"quantity\":1}]}");
     assertThat(oos.statusCode()).isEqualTo(409);
     assertThat(oos.body()).contains("out_of_stock");
+    String restock = "{\"restock_id\":\"x1\",\"lines\":[{\"sku\":\"a\",\"quantity\":1}]}";
+    HttpResponse<String> back = send("POST", "/sim/inventory/reservations/o1/restocks", restock);
+    assertThat(back.statusCode()).isEqualTo(201);
+    assertThat(back.body()).contains("\"id\":\"x1\"", "\"reservation_id\":\"o1\"");
+    assertThat(send("GET", "/sim/inventory/reservations/o1/restocks", null).body())
+        .startsWith("[")
+        .contains("\"id\":\"x1\"");
+    HttpResponse<String> over =
+        send("POST", "/sim/inventory/reservations/o1/restocks", restock.replace("x1", "x2"));
+    assertThat(over.statusCode()).isEqualTo(409);
+    assertThat(over.body()).contains("exceeds_reserved");
+    HttpResponse<String> none =
+        send("POST", "/sim/inventory/reservations/o9/restocks", restock.replace("x1", "x3"));
+    assertThat(none.statusCode()).isEqualTo(404);
+    assertThat(none.body()).contains("reservation_not_found");
+    assertThat(inventory.stock("a")).as("the restocked unit is back on the shelf").isEqualTo(1);
     assertThat(send("DELETE", "/sim/inventory/reservations/o1", null).statusCode()).isEqualTo(204);
     assertThat(send("GET", "/sim/inventory/reservations/o1", null).statusCode()).isEqualTo(404);
 
