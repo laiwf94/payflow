@@ -224,10 +224,11 @@ dispatcher leases due refunds with `SKIP LOCKED` (a partial index on `next_attem
 poll cheap when there are none), each runs on a virtual thread, and no transaction is open while
 the provider is asked. A refund is a single step, so each claim ends in exactly one fenced write:
 
-- **succeeded:** the refund row, the order's `refunded_minor`, its state and the order's event
-  commit together, the order moving to `PARTIALLY_REFUNDED` or `REFUNDED`;
-- **refused by the provider:** the row is `FAILED` with the provider's reason, and its share of
-  the capture is free again;
+- **succeeded:** the refund row, its `refund.succeeded` event, the order's `refunded_minor`, its
+  state and the order's event commit together, the order moving to `PARTIALLY_REFUNDED` or
+  `REFUNDED`;
+- **refused by the provider:** the row is `FAILED` with the provider's reason, with its
+  `refund.failed` event, and its share of the capture is free again;
 - **otherwise:** the row is scheduled for another try with the saga's backoff, at least 2 s after
   an unknown outcome.
 
@@ -284,6 +285,51 @@ checks what must hold for every interleaving:
 
 Two deliberately broken versions fail it within a run: a refund step that skips the restock, and
 a line price that ignores units earlier refunds took.
+
+### Refund events and what an order shows
+
+Each refund puts its own events into its order's stream: `refund.created` when it is started,
+then exactly one of `refund.succeeded` and `refund.failed`. Each is written in the transaction
+that makes the change, by `RefundTransitions`, so it exists exactly when the change committed. A
+refund event carries the order's usual fields (its state at that moment, with no
+`previous_state`, since the order didn't change state) and a `refund` object: `id`, `amount`,
+`lines` for a refund of goods, its `state`, and `failure_code` when the provider refused it. A
+success is followed in the same transaction by the order's `order.partially_refunded` or
+`order.refunded`, so a consumer always sees the refund before the change it caused.
+
+An event's sequence number is the order's `version`, and the outbox holds `(order, seq)` unique,
+so a refund event needs a version of its own: `OrderRepository.touch` adds one (and moves
+`updated_at`) without changing anything else. That costs nothing in locking. Starting a refund
+already holds the order's row lock, and settling one takes it for the commit-time money check
+anyway, and a version-only update doesn't fire `orders_within_refunds`, whose `WHEN` looks only at
+the capture and the state.
+Completed orders are never leased, so the saga's fenced writes are unaffected. The order of locks
+doesn't change either: starting a refund locks the order and then writes a new refund row;
+settling one locks its own refund row and then the order. No two transactions lock the same pair
+in opposite orders, so no deadlock.
+
+The timeline keeps each refund event's refund id, amount and failure code (V16 adds the columns,
+`NOT VALID`; V17 validates them), and `GET /v1/orders/{id}/events` returns them as `refund`. A
+consumer reading a refund event without its refund id or amount sends it to the dead-letter topic
+as malformed.
+
+Every order the API returns carries `refunds`: up to the ten newest refunds, newest first, in
+every state, `has_more` when it has older ones, and `pending_amount`, what its `PENDING` refunds
+are returning on top of `payment.refunded_amount`. `OrderViews` reads the orders and their
+refunds in one `REPEATABLE READ` snapshot, so the refunds shown always agree with the order's
+state and refunded amount, even when a refund settles between the two statements. (The refunds
+trigger refuses `REPEATABLE READ` for writes only; these transactions are read-only.) A page of the
+listing reads all its orders' refunds in two statements, not one per order: a `LATERAL` join on
+the `refunds_order` index takes each order's eleven newest, the eleventh only telling whether more
+exist, and an aggregate sums the pending ones. `POST /v1/orders/{id}/refund` reads them inside
+its own transaction, under the order's lock, so its `202` shows the refund it just started. A
+created or cancelled order can't have refunds yet, so neither is read for those answers.
+
+`RefundWorkerTest` checks the sequence numbers and payloads, `RefundApiTest` checks what the order
+shows while a refund is pending, after it succeeds and once there are twelve, the timeline of
+three refunds and one refused one, and that the listing shows the same refunds, and
+`SagaChaosProperties` checks that under every crash each refund has exactly one `refund.created`
+and one `refund.succeeded`, with the order's change right after the success.
 
 On `SIGTERM` the refund worker stops claiming and gives in-flight refunds the same grace as the
 saga. It stops alongside the saga worker, not after it, so together they still fit inside
@@ -460,7 +506,8 @@ crash between them loses the event or publishes one for a change that rolled bac
 [transactional outbox](https://microservices.io/patterns/data/transactional-outbox.html)
 (Chris Richardson) writes the event to an `outbox` table in the same transaction as the change.
 `OutboxWriter` uses `Propagation.MANDATORY`, so it can't be called outside one. The event's
-sequence number is the order's `version`, which every update increments.
+sequence number is the order's `version`, which every update increments; a refund event takes a
+version of its own (see "Refund events and what an order shows").
 
 A relay publishes the table to Kafka, keyed by order id, so all of one order's events go to one
 partition in order. Each poll:
@@ -596,6 +643,7 @@ response without the other fails the build.
 | Outbox batch / send timeout / retention | 100 orders / 10 s / 7 days | `payflow.outbox.*` |
 | Inbox retention | 14 days | `TimelineProjection.INBOX_RETENTION` |
 | Events returned per timeline | 1,000 | `TimelineProjection.forOrder` |
+| Refunds shown on an order | the 10 newest, with `has_more` | `RefundSummary.RECENT` |
 | Consumer session timeout | 10 s | `spring.kafka.consumer.properties` |
 | Database pool | 20 connections | `PAYFLOW_DB_POOL` |
 

@@ -30,6 +30,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -44,6 +45,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Refund rows end to end: the service that sizes them under the order's lock, the worker that
@@ -152,6 +155,21 @@ class RefundWorkerTest {
         .list();
   }
 
+  /** The order's refund events as {@code type:refund state:refund id:amount}, in sequence. */
+  private List<String> refundEvents(Order o) {
+    return jdbc.sql(
+            """
+            SELECT event_type || ':' || (payload->'refund'->>'state') || ':'
+                || (payload->'refund'->>'id') || ':' || (payload->'refund'->>'amount')
+            FROM outbox
+            WHERE aggregate_id = :id AND event_type LIKE 'refund.%'
+            ORDER BY aggregate_seq
+            """)
+        .param("id", o.id())
+        .query(String.class)
+        .list();
+  }
+
   private long providerRefunds(Order o) {
     return payments.ledgerFor(o.id().toString()).stream()
         .filter(e -> e.operation().equals("refund"))
@@ -176,7 +194,7 @@ class RefundWorkerTest {
     assertThat(refund(a).lines()).containsExactly(new RefundLine("sku-1", 1));
     assertThat(refund(b).state()).isEqualTo(RefundState.SUCCEEDED);
 
-    assertThat(service.refundRemaining("acme", o.id()).state())
+    assertThat(service.refundRemaining("acme", o.id()).order().state())
         .isEqualTo(OrderState.PARTIALLY_REFUNDED);
     assertThat(worker.runOnce()).isEqualTo(1);
     Order done = order(o);
@@ -202,11 +220,38 @@ class RefundWorkerTest {
                         }));
     assertThat(payments.paymentsFor(o.id().toString()).get(0).refunded()).isEqualTo(2500);
     assertThat(events(o))
+        .filteredOn(e -> e.startsWith("order."))
         .endsWith(
             "order.completed:COMPLETED",
             "order.partially_refunded:PARTIALLY_REFUNDED",
             "order.partially_refunded:PARTIALLY_REFUNDED",
             "order.refunded:REFUNDED");
+    // Each refund has its own two events in the order's stream, and each success is followed at
+    // once by the order change it causes.
+    List<String> events = events(o);
+    List<String> refundEvents = refundEvents(o);
+    for (Refund r : rows) {
+      assertThat(refundEvents)
+          .filteredOn(e -> e.endsWith(":" + r.id() + ":" + r.amountMinor()))
+          .containsExactly(
+              "refund.created:PENDING:" + r.id() + ":" + r.amountMinor(),
+              "refund.succeeded:SUCCEEDED:" + r.id() + ":" + r.amountMinor());
+    }
+    for (int i = 0; i < events.size(); i++) {
+      if (events.get(i).startsWith("refund.succeeded:")) {
+        assertThat(i + 1).as("an order change follows %s", events).isLessThan(events.size());
+        assertThat(events.get(i + 1)).startsWith("order.");
+        assertThat(events.get(i + 1)).doesNotStartWith("order.completed");
+      }
+    }
+    assertThat(events.indexOf("order.completed:COMPLETED"))
+        .as("no refund event before the order completed")
+        .isLessThan(
+            events.stream()
+                .filter(e -> e.startsWith("refund."))
+                .findFirst()
+                .map(events::indexOf)
+                .orElseThrow());
     assertThatThrownBy(() -> service.create("acme", o.id(), 1, List.of()))
         .isInstanceOf(OrderService.WrongState.class)
         .hasMessageContaining("refunded");
@@ -296,7 +341,66 @@ class RefundWorkerTest {
     assertThat(order(o).state()).isEqualTo(OrderState.COMPLETED);
     assertThat(order(o).refundedMinor()).isZero();
     assertThat(refunds.activeTotal(o.id())).isZero();
+    assertThat(refundEvents(o))
+        .containsExactly(
+            "refund.created:PENDING:" + r.id() + ":1000",
+            "refund.failed:FAILED:" + r.id() + ":1000");
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT payload->'refund'->>'failure_code' FROM outbox
+                    WHERE aggregate_id = :id AND event_type = 'refund.failed'
+                    """)
+                .param("id", o.id())
+                .query(String.class)
+                .single())
+        .isEqualTo("provider_refused");
+    assertThat(events(o))
+        .as("a refused refund doesn't move the order")
+        .last()
+        .isEqualTo("refund.failed:COMPLETED");
     assertThat(service.create("acme", o.id(), 2500, List.of()).amountMinor()).isEqualTo(2500);
+  }
+
+  @Test
+  void aRefundsEventsCarryItsLinesAndFollowTheOrdersVersion() {
+    Order o = completed();
+    Refund r = service.create("acme", o.id(), 1000, List.of(new RefundLine("sku-1", 1)));
+    Order created = order(o);
+    assertThat(created.version())
+        .as("the event took a version of its own")
+        .isEqualTo(o.version() + 1);
+    assertThat(created.updatedAt()).isEqualTo(r.createdAt());
+    worker.runOnce();
+    Order after = order(o);
+    assertThat(after.version())
+        .as("refund.succeeded and order.partially_refunded each took one")
+        .isEqualTo(o.version() + 3);
+    List<Map<String, Object>> rows =
+        jdbc.sql(
+                """
+                SELECT aggregate_seq, event_type, payload::text AS payload FROM outbox
+                WHERE aggregate_id = :id AND aggregate_seq > :seq ORDER BY aggregate_seq
+                """)
+            .param("id", o.id())
+            .param("seq", o.version())
+            .query()
+            .listOfRows();
+    assertThat(rows)
+        .extracting(m -> m.get("event_type"))
+        .containsExactly("refund.created", "refund.succeeded", "order.partially_refunded");
+    assertThat(rows)
+        .extracting(m -> ((Number) m.get("aggregate_seq")).longValue())
+        .containsExactly(o.version() + 1, o.version() + 2, o.version() + 3);
+    JsonNode created0 = new ObjectMapper().readTree((String) rows.get(0).get("payload"));
+    assertThat(created0.get("seq").asLong()).isEqualTo(o.version() + 1);
+    assertThat(created0.get("state").asString()).isEqualTo("COMPLETED");
+    assertThat(created0.has("previous_state")).isFalse();
+    assertThat(created0.get("refund").get("id").asString()).isEqualTo(r.id().toString());
+    assertThat(created0.get("refund").get("amount").asLong()).isEqualTo(1000);
+    assertThat(created0.get("refund").get("lines").toString())
+        .isEqualTo("[{\"sku\":\"sku-1\",\"quantity\":1}]");
+    assertThat(created0.get("refund").has("failure_code")).isFalse();
   }
 
   @Test

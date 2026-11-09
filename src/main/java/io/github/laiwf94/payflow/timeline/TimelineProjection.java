@@ -2,6 +2,8 @@ package io.github.laiwf94.payflow.timeline;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -50,11 +52,14 @@ public class TimelineProjection {
       duplicates.increment();
       return false;
     }
+    OrderEvent.Refund refund = e.refund();
     jdbc.sql(
             """
             INSERT INTO order_timeline (order_id, merchant_id, seq, event_id, event_type, state,
-                failure_code, occurred_at, recorded_at)
-            VALUES (:order, :merchant, :seq, :event, :type, :state, :failure, :occurred, :now)
+                failure_code, refund_id, refund_amount, refund_failure_code, occurred_at,
+                recorded_at)
+            VALUES (:order, :merchant, :seq, :event, :type, :state, :failure, :refund,
+                :refundAmount, :refundFailure, :occurred, :now)
             ON CONFLICT DO NOTHING
             """)
         .param("order", e.orderId())
@@ -64,6 +69,9 @@ public class TimelineProjection {
         .param("type", e.eventType())
         .param("state", e.state())
         .param("failure", e.failureCode())
+        .param("refund", refund == null ? null : refund.id())
+        .param("refundAmount", refund == null ? null : refund.amount())
+        .param("refundFailure", refund == null ? null : refund.failureCode())
         .param("occurred", e.occurredAt())
         .param("now", now)
         .update();
@@ -74,7 +82,9 @@ public class TimelineProjection {
   public List<TimelineEntry> forOrder(String merchantId, UUID orderId) {
     return jdbc.sql(
             """
-            SELECT seq, event_type, state, failure_code, occurred_at FROM order_timeline
+            SELECT seq, event_type, state, failure_code, refund_id, refund_amount,
+                refund_failure_code, occurred_at
+            FROM order_timeline
             WHERE order_id = :order AND merchant_id = :merchant
             ORDER BY seq
             LIMIT 1000
@@ -88,8 +98,17 @@ public class TimelineProjection {
                     rs.getString("event_type"),
                     rs.getString("state"),
                     rs.getString("failure_code"),
+                    refund(rs),
                     rs.getObject("occurred_at", OffsetDateTime.class).toInstant()))
         .list();
+  }
+
+  private static TimelineEntry.Refund refund(ResultSet rs) throws SQLException {
+    UUID id = rs.getObject("refund_id", UUID.class);
+    return id == null
+        ? null
+        : new TimelineEntry.Refund(
+            id, rs.getLong("refund_amount"), rs.getString("refund_failure_code"));
   }
 
   @Scheduled(fixedDelay = 1, timeUnit = java.util.concurrent.TimeUnit.HOURS)

@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import io.github.laiwf94.payflow.sim.FaultPlan;
 import io.github.laiwf94.payflow.sim.Faults;
 import io.github.laiwf94.payflow.sim.PaymentProviderSimulator;
 import io.github.laiwf94.payflow.support.Api;
@@ -24,13 +25,18 @@ import org.springframework.test.annotation.DirtiesContext;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Partial and line refunds over HTTP, with the saga and the refund worker running against the
- * in-process provider: the order's money, the refund rows and the provider's ledger agree, and
- * refunds racing each other never return more than was captured or bought.
+ * Partial and line refunds over HTTP, with the saga, the refund worker, the outbox relay and the
+ * timeline consumer running against the in-process provider: the order's money, the refunds it
+ * shows, the refund rows, its events and the provider's ledger agree, and refunds racing each other
+ * never return more than was captured or bought.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = {"payflow.saga.enabled=true"})
+    properties = {
+      "payflow.saga.enabled=true",
+      "payflow.outbox.enabled=true",
+      "payflow.timeline.enabled=true"
+    })
 @DirtiesContext
 class RefundApiTest {
 
@@ -132,6 +138,133 @@ class RefundApiTest {
     assertThat(after.errorCode()).isEqualTo("order_not_refundable");
   }
 
+  /** The order's timeline once it has {@code n} entries. */
+  private JsonNode awaitEvents(String id, int n) {
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() >= n);
+    return api.get("/v1/orders/" + id + "/events").json().get("data");
+  }
+
+  private static List<String> ids(JsonNode refunds) {
+    List<String> out = new ArrayList<>();
+    refunds.forEach(r -> out.add(r.get("id").asString()));
+    return out;
+  }
+
+  @Test
+  void anOrderShowsItsRefundsAndItsEventsRecordEachOne() {
+    String id = completedOrder();
+    JsonNode none = api.get("/v1/orders/" + id).json();
+    assertThat(none.at("/refunds/data")).isEmpty();
+    assertThat(none.at("/refunds/has_more").asBoolean()).isFalse();
+    assertThat(none.at("/refunds/pending_amount").asLong()).isZero();
+
+    // The provider takes its time, so the refund is still PENDING while the order is read.
+    faults.set("payment.refund", new FaultPlan(0, 0, 0, Duration.ofMillis(1500), List.of()));
+    Api.Response amount = api.post("/v1/orders/" + id + "/refunds", "{\"amount\":300}");
+    assertThat(amount.status()).isEqualTo(202);
+    JsonNode pending = api.get("/v1/orders/" + id).json();
+    assertThat(pending.get("state").asString()).isEqualTo("COMPLETED");
+    assertThat(pending.at("/payment/refunded_amount").asLong()).isZero();
+    assertThat(pending.at("/refunds/pending_amount").asLong()).isEqualTo(300);
+    assertThat(pending.at("/refunds/data")).singleElement().isEqualTo(amount.json());
+    faults.reset(new SplittableRandom(7));
+
+    JsonNode partial = awaitOrder(id, "PARTIALLY_REFUNDED");
+    assertThat(partial.at("/refunds/pending_amount").asLong()).isZero();
+    assertThat(partial.at("/refunds/data/0/state").asString()).isEqualTo("SUCCEEDED");
+    assertThat(partial.at("/refunds/data/0/id").asString())
+        .isEqualTo(amount.json().get("id").asString());
+
+    String mug = api.post("/v1/orders/" + id + "/refunds", ONE_MUG).json().get("id").asString();
+    // The full refund answers with the order and the refund it just started, read under the
+    // order's lock: the new refund is PENDING and counted, the order not yet changed.
+    Api.Response full = api.post("/v1/orders/" + id + "/refund", null);
+    assertThat(full.status()).isEqualTo(202);
+    JsonNode answered = full.json();
+    String rest = answered.at("/refunds/data/0/id").asString();
+    assertThat(answered.at("/refunds/data/0/state").asString()).isEqualTo("PENDING");
+    assertThat(answered.at("/refunds/data/0/amount").asLong()).isEqualTo(1200);
+    assertThat(ids(answered.at("/refunds/data")))
+        .containsExactly(rest, mug, amount.json().get("id").asString());
+    assertThat(
+            answered.at("/payment/refunded_amount").asLong()
+                + answered.at("/refunds/pending_amount").asLong())
+        .as("what is back plus what is pending is never more than the capture")
+        .isLessThanOrEqualTo(2500)
+        .isGreaterThanOrEqualTo(1200 + 300);
+
+    JsonNode refunded = awaitOrder(id, "REFUNDED");
+    assertThat(refunded.at("/refunds/pending_amount").asLong()).isZero();
+    assertThat(refunded.at("/refunds/data"))
+        .extracting(r -> r.get("state").asString())
+        .containsOnly("SUCCEEDED");
+    assertThat(ids(refunded.at("/refunds/data")))
+        .as("newest first, the reverse of the refunds listing")
+        .containsExactlyElementsOf(ids(settledRefunds(id)).reversed());
+    JsonNode listed = null;
+    for (JsonNode o : api.get("/v1/orders?limit=100").json().get("data")) {
+      if (o.get("id").asString().equals(id)) {
+        listed = o;
+      }
+    }
+    assertThat(listed).as("the listing shows the same refunds").isNotNull();
+    assertThat(listed.get("refunds")).isEqualTo(refunded.get("refunds"));
+
+    // order.created .. order.completed (5), then three refunds of two events each and the three
+    // order changes they made.
+    JsonNode events = awaitEvents(id, 14);
+    assertThat(events).hasSize(14);
+    List<String> types = new ArrayList<>();
+    events.forEach(e -> types.add(e.get("event_type").asString()));
+    assertThat(types.subList(0, 5)).last().isEqualTo("order.completed");
+    for (String refund : List.of(amount.json().get("id").asString(), mug, rest)) {
+      List<String> its = new ArrayList<>();
+      for (int i = 0; i < events.size(); i++) {
+        JsonNode e = events.get(i);
+        if (e.has("refund") && e.at("/refund/id").asString().equals(refund)) {
+          its.add(e.get("event_type").asString());
+          assertThat(e.at("/refund/amount").asLong()).isPositive();
+          assertThat(e.at("/refund").has("failure_code")).isFalse();
+          if (e.get("event_type").asString().equals("refund.succeeded")) {
+            assertThat(events.get(i + 1).get("event_type").asString())
+                .as("a success is followed by the order change it made")
+                .isIn("order.partially_refunded", "order.refunded");
+          }
+        }
+      }
+      assertThat(its).containsExactly("refund.created", "refund.succeeded");
+    }
+    assertThat(types).last().isEqualTo("order.refunded");
+    assertThat(events)
+        .extracting(e -> e.get("seq").asLong())
+        .as("each event has its own place in the order's stream")
+        .doesNotHaveDuplicates()
+        .isSorted();
+  }
+
+  @Test
+  void anOrderShowsItsTenNewestRefunds() {
+    String id = completedOrder();
+    for (int i = 0; i < 12; i++) {
+      assertThat(api.post("/v1/orders/" + id + "/refunds", "{\"amount\":100}").status())
+          .isEqualTo(202);
+    }
+    List<String> all = ids(settledRefunds(id));
+    assertThat(all).hasSize(12);
+    awaitOrder(id, "PARTIALLY_REFUNDED");
+    await()
+        .atMost(Duration.ofSeconds(20))
+        .until(
+            () ->
+                api.get("/v1/orders/" + id).json().at("/payment/refunded_amount").asLong() == 1200);
+    JsonNode order = api.get("/v1/orders/" + id).json();
+    assertThat(order.at("/refunds/has_more").asBoolean()).isTrue();
+    assertThat(ids(order.at("/refunds/data")))
+        .containsExactlyElementsOf(all.reversed().subList(0, 10));
+  }
+
   @Test
   void aRefusedRefundFailsAndGivesItsShareBack() {
     String id = completedOrder();
@@ -144,7 +277,16 @@ class RefundApiTest {
     assertThat(failed.get("state").asString()).isEqualTo("FAILED");
     assertThat(failed.at("/failure/code").asString()).isEqualTo("provider_refused");
     assertThat(failed.at("/failure/message").asString()).isNotBlank();
-    assertThat(api.get("/v1/orders/" + id).json().at("/payment/refunded_amount").asLong()).isZero();
+    JsonNode order = api.get("/v1/orders/" + id).json();
+    assertThat(order.at("/payment/refunded_amount").asLong()).isZero();
+    assertThat(order.at("/refunds/pending_amount").asLong()).isZero();
+    assertThat(order.at("/refunds/data/0")).isEqualTo(failed);
+    JsonNode last = awaitEvents(id, 7).get(6);
+    assertThat(last.get("event_type").asString()).isEqualTo("refund.failed");
+    assertThat(last.get("state").asString()).isEqualTo("COMPLETED");
+    assertThat(last.at("/refund/id").asString()).isEqualTo(failed.get("id").asString());
+    assertThat(last.at("/refund/amount").asLong()).isEqualTo(2500);
+    assertThat(last.at("/refund/failure_code").asString()).isEqualTo("provider_refused");
 
     assertThat(api.post("/v1/orders/" + id + "/refunds", "{\"amount\":1500}").status())
         .as("the failed refund no longer counts against the capture")

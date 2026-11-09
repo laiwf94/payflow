@@ -6,6 +6,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +72,60 @@ public class RefundRepository {
         .param("order", orderId)
         .query((rs, n) -> map(rs))
         .list();
+  }
+
+  /**
+   * The {@link RefundSummary} of each of {@code orderIds}; orders without refunds are left out. Two
+   * statements read it, so a caller that needs it to agree with the orders reads both in one
+   * snapshot or under the orders' locks. Each order's newest refunds come from the {@code
+   * refunds_order} index, however many it has.
+   */
+  public Map<UUID, RefundSummary> summaries(Collection<UUID> orderIds) {
+    if (orderIds.isEmpty()) {
+      return Map.of();
+    }
+    Map<UUID, List<Refund>> recent = new HashMap<>();
+    jdbc.sql(
+            """
+            SELECT r.* FROM orders o
+            CROSS JOIN LATERAL (
+                SELECT * FROM refunds WHERE order_id = o.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT :limit) r
+            WHERE o.id IN (:ids)
+            ORDER BY r.order_id, r.created_at DESC, r.id DESC
+            """)
+        .param("ids", orderIds)
+        .param("limit", RefundSummary.RECENT + 1)
+        .query(
+            (RowCallbackHandler)
+                rs -> {
+                  Refund r = map(rs);
+                  recent.computeIfAbsent(r.orderId(), k -> new ArrayList<>()).add(r);
+                });
+    Map<UUID, Long> pending = new HashMap<>();
+    jdbc.sql(
+            """
+            SELECT order_id, sum(amount_minor) AS pending FROM refunds
+            WHERE order_id IN (:ids) AND state = 'PENDING'
+            GROUP BY order_id
+            """)
+        .param("ids", orderIds)
+        .query(
+            (RowCallbackHandler)
+                rs -> pending.put(rs.getObject("order_id", UUID.class), rs.getLong("pending")));
+    Map<UUID, RefundSummary> out = new HashMap<>();
+    recent.forEach(
+        (order, rows) -> {
+          boolean more = rows.size() > RefundSummary.RECENT;
+          out.put(
+              order,
+              new RefundSummary(
+                  more ? rows.subList(0, RefundSummary.RECENT) : rows,
+                  more,
+                  pending.getOrDefault(order, 0L)));
+        });
+    return out;
   }
 
   /**

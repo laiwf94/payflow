@@ -2,10 +2,10 @@ package io.github.laiwf94.payflow.api;
 
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
-import io.github.laiwf94.payflow.order.OrderPage;
 import io.github.laiwf94.payflow.order.OrderPosition;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.OrderRefunds;
 import io.github.laiwf94.payflow.refund.Refund;
 import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundService;
@@ -33,16 +33,19 @@ import org.springframework.web.bind.annotation.RestController;
 class OrderController {
 
   private final OrderService orders;
+  private final OrderViews views;
   private final RefundService refunds;
   private final TimelineProjection timeline;
   private final OrderCursors cursors;
 
   OrderController(
       OrderService orders,
+      OrderViews views,
       RefundService refunds,
       TimelineProjection timeline,
       OrderCursors cursors) {
     this.orders = orders;
+    this.views = views;
     this.refunds = refunds;
     this.timeline = timeline;
     this.cursors = cursors;
@@ -58,10 +61,10 @@ class OrderController {
     OrderListRequest req = OrderListRequest.parse(http.getParameterMap());
     OrderPosition after =
         req.cursor() == null ? null : cursors.decode(merchant, req.filter(), req.cursor());
-    OrderPage page = orders.list(merchant, req.filter(), after, req.limit());
+    OrderViews.Page page = views.list(merchant, req.filter(), after, req.limit());
     OrderPosition next = page.next();
     return new OrderList(
-        page.orders().stream().map(OrderResponse::of).toList(),
+        page.orders(),
         page.hasMore(),
         next == null ? null : cursors.encode(merchant, req.filter(), next));
   }
@@ -90,9 +93,10 @@ class OrderController {
 
   @GetMapping("/{id}")
   OrderResponse get(@PathVariable String id, HttpServletRequest http) {
-    return OrderResponse.of(orders.get(merchant(http), parse(id)));
+    return views.get(merchant(http), parse(id));
   }
 
+  /** Only an order not yet captured can be cancelled, so it has no refunds to show. */
   @PostMapping("/{id}/cancel")
   ResponseEntity<OrderResponse> cancel(@PathVariable String id, HttpServletRequest http) {
     return ResponseEntity.accepted()
@@ -105,8 +109,8 @@ class OrderController {
    */
   @PostMapping("/{id}/refund")
   ResponseEntity<OrderResponse> refund(@PathVariable String id, HttpServletRequest http) {
-    return ResponseEntity.accepted()
-        .body(OrderResponse.of(refunds.refundRemaining(merchant(http), parse(id))));
+    OrderRefunds r = refunds.refundRemaining(merchant(http), parse(id));
+    return ResponseEntity.accepted().body(OrderResponse.of(r.order(), r.refunds()));
   }
 
   /**

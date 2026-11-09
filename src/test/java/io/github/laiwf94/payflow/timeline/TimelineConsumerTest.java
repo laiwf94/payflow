@@ -2,6 +2,7 @@ package io.github.laiwf94.payflow.timeline;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.awaitility.Awaitility.await;
 
 import io.github.laiwf94.payflow.order.Order;
@@ -150,6 +151,136 @@ class TimelineConsumerTest {
     assertThatThrownBy(() -> consumer.parse(null)).isInstanceOf(MalformedEventException.class);
     assertThatThrownBy(() -> consumer.parse("null")).isInstanceOf(MalformedEventException.class);
     assertThatThrownBy(() -> consumer.parse("[1]")).isInstanceOf(MalformedEventException.class);
+  }
+
+  private static String refundEvent(
+      UUID eventId, UUID order, long seq, String type, String state, String refund) {
+    return """
+        {"event_id":"%s","event_type":"%s","order_id":"%s","merchant_id":"acme","seq":%d,
+         "state":"%s","amount":2500,"currency":"EUR","occurred_at":"2030-01-01T00:00:0%dZ"%s}
+        """
+        .formatted(eventId, type, order, seq, state, seq, refund == null ? "" : "," + refund);
+  }
+
+  @Test
+  void refundEventsKeepTheirRefundOnTheTimeline() throws Exception {
+    UUID order = UUID.randomUUID();
+    UUID ok = UUID.randomUUID();
+    UUID refused = UUID.randomUUID();
+    send(
+        order.toString(),
+        refundEvent(
+            UUID.randomUUID(),
+            order,
+            5,
+            "refund.created",
+            "COMPLETED",
+            "\"refund\":{\"id\":\"%s\",\"amount\":1000,\"lines\":[{\"sku\":\"mug\",\"quantity\":1}],\"state\":\"PENDING\"}"
+                .formatted(ok)),
+        null);
+    send(
+        order.toString(),
+        refundEvent(
+            UUID.randomUUID(),
+            order,
+            6,
+            "refund.succeeded",
+            "COMPLETED",
+            "\"refund\":{\"id\":\"%s\",\"amount\":1000,\"state\":\"SUCCEEDED\",\"later\":1}"
+                .formatted(ok)),
+        null);
+    send(
+        order.toString(),
+        refundEvent(
+            UUID.randomUUID(), order, 7, "order.partially_refunded", "PARTIALLY_REFUNDED", null),
+        null);
+    send(
+        order.toString(),
+        refundEvent(
+            UUID.randomUUID(),
+            order,
+            8,
+            "refund.failed",
+            "PARTIALLY_REFUNDED",
+            "\"refund\":{\"id\":\"%s\",\"amount\":300,\"state\":\"FAILED\",\"failure_code\":\"provider_refused\"}"
+                .formatted(refused)),
+        null);
+    await().atMost(Duration.ofSeconds(20)).until(() -> timelineRows(order) == 4);
+    assertThat(projection.forOrder("acme", order))
+        .extracting(TimelineEntry::eventType, TimelineEntry::state, TimelineEntry::refund)
+        .containsExactly(
+            tuple("refund.created", "COMPLETED", new TimelineEntry.Refund(ok, 1000, null)),
+            tuple("refund.succeeded", "COMPLETED", new TimelineEntry.Refund(ok, 1000, null)),
+            tuple("order.partially_refunded", "PARTIALLY_REFUNDED", null),
+            tuple(
+                "refund.failed",
+                "PARTIALLY_REFUNDED",
+                new TimelineEntry.Refund(refused, 300, "provider_refused")));
+  }
+
+  @Test
+  void aRefundEventWithoutItsRefundIsMalformed() {
+    UUID order = UUID.randomUUID();
+    assertThatThrownBy(
+            () ->
+                consumer.parse(
+                    refundEvent(UUID.randomUUID(), order, 1, "refund.created", "COMPLETED", null)))
+        .isInstanceOf(MalformedEventException.class);
+    assertThatThrownBy(
+            () ->
+                consumer.parse(
+                    refundEvent(
+                        UUID.randomUUID(),
+                        order,
+                        1,
+                        "refund.created",
+                        "COMPLETED",
+                        "\"refund\":{\"amount\":1000}")))
+        .isInstanceOf(MalformedEventException.class);
+    assertThatThrownBy(
+            () ->
+                consumer.parse(
+                    refundEvent(
+                        UUID.randomUUID(),
+                        order,
+                        1,
+                        "refund.created",
+                        "COMPLETED",
+                        "\"refund\":{\"id\":\"%s\"}".formatted(UUID.randomUUID()))))
+        .isInstanceOf(MalformedEventException.class);
+    assertThat(
+            consumer
+                .parse(
+                    refundEvent(UUID.randomUUID(), order, 1, "order.completed", "COMPLETED", null))
+                .refund())
+        .as("an order event needs no refund")
+        .isNull();
+  }
+
+  @Test
+  void theTimelineRefusesAHalfRecordedRefund() {
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(
+                        """
+                        INSERT INTO order_timeline (order_id, merchant_id, seq, event_id,
+                            event_type, state, refund_id, occurred_at, recorded_at)
+                        VALUES (gen_random_uuid(), 'acme', 1, gen_random_uuid(),
+                            'refund.created', 'COMPLETED', gen_random_uuid(), now(), now())
+                        """)
+                    .update())
+        .hasMessageContaining("order_timeline_refund_pair");
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(
+                        """
+                        INSERT INTO order_timeline (order_id, merchant_id, seq, event_id,
+                            event_type, state, refund_failure_code, occurred_at, recorded_at)
+                        VALUES (gen_random_uuid(), 'acme', 1, gen_random_uuid(),
+                            'refund.failed', 'COMPLETED', 'provider_refused', now(), now())
+                        """)
+                    .update())
+        .hasMessageContaining("order_timeline_refund_failure");
   }
 
   @Test

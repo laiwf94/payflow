@@ -295,6 +295,26 @@ public class OrderRepository {
         .optional();
   }
 
+  /**
+   * Gives the order a new version without changing anything else, for an event about it that is not
+   * a change of its own: a refund of it being started or settled. The version is the event's
+   * sequence number, so each such event gets a place in the order's stream. Completed orders are
+   * never leased, so this needs no lease; the row lock it takes is the one the refunds trigger
+   * takes anyway. Empty when the order doesn't exist.
+   */
+  public Optional<Order> touch(UUID id, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET version = version + 1, updated_at = :now
+            WHERE id = :id
+            RETURNING *
+            """)
+        .param("now", ts(now))
+        .param("id", id)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
   /** Gives the lease back without changing anything else. */
   public boolean release(UUID id, UUID leaseToken) {
     return jdbc.sql(

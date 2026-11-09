@@ -80,13 +80,19 @@ public class RefundService {
 
   private final OrderRepository orders;
   private final RefundRepository refunds;
+  private final RefundTransitions transitions;
   private final RefundWorker worker;
   private final Clock clock;
 
   public RefundService(
-      OrderRepository orders, RefundRepository refunds, RefundWorker worker, Clock clock) {
+      OrderRepository orders,
+      RefundRepository refunds,
+      RefundTransitions transitions,
+      RefundWorker worker,
+      Clock clock) {
     this.orders = orders;
     this.refunds = refunds;
+    this.transitions = transitions;
     this.worker = worker;
     this.clock = clock;
   }
@@ -94,21 +100,23 @@ public class RefundService {
   /**
    * Refunds everything left of a completed order's capture: what no other refund has returned or is
    * returning. When pending refunds already cover all of it, nothing new is created and the order
-   * is returned as it is, so a repeated request is harmless.
+   * is returned as it is, so a repeated request is harmless. The order comes back with its refunds,
+   * read under its lock, so the two agree.
    *
    * @throws OrderService.NotFound when the merchant has no such order
    * @throws OrderService.WrongState when the order isn't completed or is already refunded in full
    */
   @Transactional(noRollbackFor = {OrderService.NotFound.class, OrderService.WrongState.class})
-  public Order refundRemaining(String merchantId, UUID orderId) {
+  public OrderRefunds refundRemaining(String merchantId, UUID orderId) {
     Order order = refundable(merchantId, orderId);
     long remaining = order.capturedMinor() - refunds.activeTotal(orderId);
     if (remaining > 0) {
-      start(order, remaining, List.of());
+      order = start(order, remaining, List.of()).order();
     } else if (order.refundedMinor() == order.capturedMinor()) {
       throw notRefundable(OrderState.REFUNDED);
     }
-    return order;
+    return new OrderRefunds(
+        order, refunds.summaries(List.of(orderId)).getOrDefault(orderId, RefundSummary.NONE));
   }
 
   /**
@@ -136,7 +144,7 @@ public class RefundService {
     if (amountMinor > remaining) {
       throw new ExceedsCaptured(amountMinor, remaining);
     }
-    return start(order, amountMinor, lines);
+    return start(order, amountMinor, lines).refund();
   }
 
   /**
@@ -193,7 +201,7 @@ public class RefundService {
     if (amount > remaining) {
       throw new ExceedsCaptured(amount, remaining);
     }
-    return start(order, amount, lines);
+    return start(order, amount, lines).refund();
   }
 
   /**
@@ -240,9 +248,11 @@ public class RefundService {
     return order;
   }
 
-  private Refund start(Order order, long amountMinor, List<RefundLine> lines) {
+  private record Started(Refund refund, Order order) {}
+
+  private Started start(Order order, long amountMinor, List<RefundLine> lines) {
     Refund r = Refund.pending(UUID.randomUUID(), order.id(), amountMinor, lines, clock.instant());
-    refunds.insert(r);
+    Order after = transitions.create(r, r.createdAt());
     TransactionSynchronizationManager.registerSynchronization(
         new TransactionSynchronization() {
           @Override
@@ -251,7 +261,7 @@ public class RefundService {
           }
         });
     log.info("refund {} of {} started", r.id(), amountMinor);
-    return r;
+    return new Started(r, after);
   }
 
   private static OrderService.WrongState notRefundable(OrderState state) {

@@ -117,7 +117,7 @@ class RefundingMigrationTest {
         "UPDATE orders SET state = 'REFUNDED', next_attempt_at = NULL, refunded_minor = 2500"
             + " WHERE id = '%s'".formatted(id));
 
-    flyway("latest").migrate();
+    flyway("15").migrate();
     assertThat(one("SELECT max(version::int)::text FROM flyway_schema_history WHERE success"))
         .isEqualTo("15");
     assertThat(
@@ -145,5 +145,25 @@ class RefundingMigrationTest {
             () -> exec("UPDATE orders SET state = 'REFUNDING' WHERE id = '%s'".formatted(other)))
         .isInstanceOf(SQLException.class)
         .hasMessageContaining("orders_known_state");
+
+    // V16 and V17 add the timeline's refund columns over rows recorded before them.
+    exec(
+        """
+        INSERT INTO order_timeline (order_id, merchant_id, seq, event_id, event_type, state,
+            occurred_at, recorded_at)
+        VALUES ('%s', 'acme', 0, gen_random_uuid(), 'order.created', 'PENDING', now(), now())
+        """
+            .formatted(other));
+    flyway("latest").migrate();
+    assertThat(
+            one(
+                "SELECT count(*)::text FROM pg_constraint"
+                    + " WHERE conrelid = 'order_timeline'::regclass AND NOT convalidated"))
+        .isEqualTo("0");
+    assertThat(
+            one(
+                "SELECT coalesce(refund_id::text, 'none') FROM order_timeline WHERE order_id = '%s'"
+                    .formatted(other)))
+        .isEqualTo("none");
   }
 }

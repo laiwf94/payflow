@@ -693,7 +693,7 @@ components:
       additionalProperties: false
       required:
         [id, state, amount, currency, items, shipping_address, payment_method, cancel_requested,
-         created_at, updated_at]
+         refunds, created_at, updated_at]
       properties:
         id:
           type: string
@@ -750,6 +750,30 @@ components:
                  shipping_failed, step_timeout]
             message:
               type: string
+        refunds:
+          type: object
+          additionalProperties: false
+          required: [data, has_more, pending_amount]
+          description: >-
+            The order's newest refunds, read in the same snapshot as the order, so they always
+            agree with `payment.refunded_amount` and `state`. `GET /v1/orders/{id}/refunds` lists
+            all of them.
+          properties:
+            data:
+              type: array
+              maxItems: 10
+              description: Up to the ten newest refunds, newest first, in every state.
+              items:
+                $ref: '#/components/schemas/Refund'
+            has_more:
+              type: boolean
+              description: True when the order has older refunds than `data` shows.
+            pending_amount:
+              type: integer
+              minimum: 0
+              description: >-
+                Minor units that `PENDING` refunds are returning, on top of
+                `payment.refunded_amount`.
         created_at:
           type: string
           format: date-time
@@ -788,10 +812,32 @@ components:
           type: integer
         event_type:
           type: string
+          description: >-
+            `order.<state>` when the order changed state, `order.cancel_requested`, or one of
+            `refund.created`, `refund.succeeded` and `refund.failed` for one of its refunds. A
+            refund that succeeds is followed by the order's `order.partially_refunded` or
+            `order.refunded`.
         state:
           type: string
+          description: The order's state when the event happened.
         failure_code:
           type: string
+          description: Why the order failed, on the event that failed it.
+        refund:
+          type: object
+          additionalProperties: false
+          required: [id, amount]
+          description: Present on a `refund.*` event.
+          properties:
+            id:
+              type: string
+              format: uuid
+            amount:
+              type: integer
+              description: Minor units the refund returns.
+            failure_code:
+              type: string
+              description: Why the provider refused it, on `refund.failed`.
         occurred_at:
           type: string
           format: date-time

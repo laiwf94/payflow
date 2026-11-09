@@ -259,9 +259,9 @@ class SagaFlowTest {
     worker.runOnce();
     assertThatThrownBy(() -> refundService.refundRemaining("globex", o.id()))
         .isInstanceOf(OrderService.NotFound.class);
-    assertThat(refundService.refundRemaining("acme", o.id()).state()).isEqualTo(COMPLETED);
+    assertThat(refundService.refundRemaining("acme", o.id()).order().state()).isEqualTo(COMPLETED);
     // Asked again while the first is pending: nothing is left to promise, so nothing new starts.
-    assertThat(refundService.refundRemaining("acme", o.id()).state()).isEqualTo(COMPLETED);
+    assertThat(refundService.refundRemaining("acme", o.id()).order().state()).isEqualTo(COMPLETED);
     assertThat(refunds.listForOrder(o.id()))
         .singleElement()
         .satisfies(r -> assertThat(r.amountMinor()).isEqualTo(2500));

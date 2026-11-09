@@ -674,6 +674,40 @@ class SagaChaosProperties {
             .as("line refunds of %s add up to what their units cost", ref)
             .isEqualTo(lineCost);
       }
+      // Whatever crashed, each refund has exactly one refund.created and then exactly one
+      // refund.succeeded in the order's stream, with its amount, and every success is followed
+      // at once by the order change it made.
+      List<String> stream =
+          jdbc.sql(
+                  """
+                  SELECT event_type || ':' || coalesce(payload->'refund'->>'id', '')
+                      || ':' || coalesce(payload->'refund'->>'amount', '')
+                  FROM outbox WHERE aggregate_id = :id ORDER BY aggregate_seq
+                  """)
+              .param("id", o.id())
+              .query(String.class)
+              .list();
+      for (Refund r : rows) {
+        String tail = ":" + r.id() + ":" + r.amountMinor();
+        assertThat(stream)
+            .filteredOn(e -> e.startsWith("refund.") && e.contains(r.id().toString()))
+            .as("events of refund %s of %s", r.id(), ref)
+            .containsExactly("refund.created" + tail, "refund.succeeded" + tail);
+      }
+      assertThat(stream)
+          .filteredOn(e -> e.startsWith("refund."))
+          .as("refund events of %s name one of its refunds", ref)
+          .hasSize(2 * rows.size());
+      for (int i = 0; i < stream.size(); i++) {
+        if (stream.get(i).startsWith("refund.succeeded:")) {
+          assertThat(i + 1)
+              .as("an order change follows %s of %s: %s", stream.get(i), ref, stream)
+              .isLessThan(stream.size());
+          assertThat(stream.get(i + 1))
+              .as("order change after %s of %s", stream.get(i), ref)
+              .matches("order\\.(partially_refunded|refunded)::");
+        }
+      }
       switch (o.state()) {
         case COMPLETED -> {
           assertThat(captured - refunded)

@@ -64,6 +64,14 @@ notes on GitHub link here.
   answer or a crash never returns stock twice. The inventory adapter has a new `restock` call
   (`POST /reservations/{id}/restocks` with `{restock_id, lines}`, refusing more than the
   reservation still holds), and the simulator implements it.
+- Refund events and refund details (#24). Each refund writes `refund.created` and then
+  `refund.succeeded` or `refund.failed` into its order's event stream, with a `refund` object
+  (`id`, `amount`, `lines`, `state`, `failure_code`); a success is followed by the order's
+  `order.partially_refunded` or `order.refunded`. The timeline shows each refund event's id,
+  amount and failure code. Every order the API returns has `refunds`: its ten newest refunds,
+  `has_more` and `pending_amount`, read in the same snapshot as the order. A refund event takes
+  a `seq` of its own and moves the order's `updated_at`, so consumers that expect only `order.*`
+  events should skip types they don't know.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

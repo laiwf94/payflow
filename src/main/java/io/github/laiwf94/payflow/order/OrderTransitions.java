@@ -77,6 +77,24 @@ public class OrderTransitions {
     return after;
   }
 
+  /**
+   * Writes an event about one of the order's refunds ({@code refund.created}, {@code
+   * refund.succeeded} or {@code refund.failed}), in the caller's transaction, under a new version
+   * of the order so it has its own place in the order's stream. Returns the order as it now is.
+   *
+   * @throws IllegalStateException when the order doesn't exist; a refund row can't exist without
+   *     its order, so the transaction must not commit
+   */
+  @Transactional
+  public Order recordRefundEvent(
+      UUID orderId, String type, OutboxWriter.RefundDetails refund, Instant now) {
+    Order after =
+        repo.touch(orderId, now)
+            .orElseThrow(() -> new IllegalStateException("order " + orderId + " does not exist"));
+    outbox.writeRefund(type, after, refund, now);
+    return after;
+  }
+
   static String eventType(OrderState state) {
     return "order." + state.name().toLowerCase(Locale.ROOT);
   }
