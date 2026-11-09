@@ -69,6 +69,10 @@ notes on GitHub link here.
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,
   profile `pair`) and `PAYFLOW_IMAGE` to run a published image. `examples/rolling-restart.py`
   pages 10,000 orders of the two merchants while both instances restart.
+- The chaos property covers refunds racing each other: bursts of amount, line and full refunds
+  sent concurrently against orders with repeated skus, under lost answers, crashes and a provider
+  that may ignore keys. It checks the provider's refunds and ledger, the restocks, line pricing
+  and stock against the stored refunds, and that every refusal was justified.
 
 ### Changed
 

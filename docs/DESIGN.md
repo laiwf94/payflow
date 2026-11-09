@@ -259,6 +259,32 @@ shelf short. `UnknownOutcomeTest` loses the restock's answer, its request, and b
 and the restock's answers, with the provider's key handling on and off: each time one refund is
 made and one mug goes back to the shelf.
 
+`SagaChaosProperties` puts all of this under random faults. Orders have one to three lines, and a
+sku can sit on two lines at two prices. Once the saga has settled them, up to twelve amount, line
+and full refunds arrive in up to four bursts, one per worker round, so a burst lands while the
+last one's refunds are still pending, retrying or recovering from a crash. Each burst's requests
+start together on their own threads and race for the same orders. Every call to the payment
+provider and the inventory system can fail, be lost before it arrives or lose its answer, the
+provider may ignore idempotency keys, and the refund worker crashes before, after and once it
+has committed an attempt. Which request wins a race differs from run to run, so the property
+checks what must hold for every interleaving:
+
+- the provider's refunds, and the refund entries in its ledger, are exactly the order's succeeded
+  refund rows, by reference and amount;
+- each succeeded line refund restocked once, under its own id, with exactly its lines;
+- an order's line refunds add up to what the order paid for the first units of each sku, which is
+  what pricing units "after the ones already given back" means whatever order the refunds won
+  the lock in;
+- stock held is exactly what completed orders bought less what their refunds returned;
+- every refusal is justified by the final state. No refund fails here and none is removed, so what
+  an order has refunded by the end is at least what was promised when a request was refused: an
+  amount or line refund refused as `refund_exceeds_captured` must not fit even then (for lines,
+  at the cheapest units it could have been given), and `refund_exceeds_purchased` must name more
+  of a sku than was bought less what ended up returned.
+
+Two deliberately broken versions fail it within a run: a refund step that skips the restock, and
+a line price that ignores units earlier refunds took.
+
 On `SIGTERM` the refund worker stops claiming and gives in-flight refunds the same grace as the
 saga. It stops alongside the saga worker, not after it, so together they still fit inside
 `docker stop`'s 10 s. A refund still waiting for the provider at the deadline is abandoned: fenced
