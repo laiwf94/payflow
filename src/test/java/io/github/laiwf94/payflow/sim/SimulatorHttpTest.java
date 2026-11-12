@@ -83,7 +83,10 @@ class SimulatorHttpTest {
     assertThat(send("POST", "/sim/payments/pay_00000001/void", null).statusCode()).isEqualTo(409);
     assertThat(send("GET", "/sim/payments?reference=o1", null).body()).contains("pay_00000001");
     assertThat(send("GET", "/sim/control/ledger?reference=o1", null).body())
-        .contains("\"operation\":\"refund\"");
+        .contains("\"operation\":\"refund\"")
+        .contains(
+            "\"refunds\":[{\"id\":\"re_00000001\",\"payment_id\":\"pay_00000001\","
+                + "\"reference\":\"r1\",\"amount\":2500}]");
   }
 
   @Test
@@ -178,6 +181,14 @@ class SimulatorHttpTest {
     assertThat(none.statusCode()).isEqualTo(404);
     assertThat(none.body()).contains("reservation_not_found");
     assertThat(inventory.stock("a")).as("the restocked unit is back on the shelf").isEqualTo(1);
+    assertThat(send("GET", "/sim/control/stock/a", null).body())
+        .contains("\"sku\":\"a\"", "\"available\":1");
+    assertThat(send("GET", "/sim/control/ledger?reference=o1", null).body())
+        .contains(
+            "\"restocks\":[{\"id\":\"x1\",\"reservation_id\":\"o1\","
+                + "\"lines\":[{\"sku\":\"a\",\"quantity\":1}]}]");
+    assertThat(send("GET", "/sim/control/ledger?reference=o9", null).body())
+        .contains("\"refunds\":[]", "\"restocks\":[]");
     assertThat(send("DELETE", "/sim/inventory/reservations/o1", null).statusCode()).isEqualTo(204);
     assertThat(send("GET", "/sim/inventory/reservations/o1", null).statusCode()).isEqualTo(404);
 

@@ -72,6 +72,11 @@ notes on GitHub link here.
   `has_more` and `pending_amount`, read in the same snapshot as the order. A refund event takes
   a `seq` of its own and moves the order's `updated_at`, so consumers that expect only `order.*`
   events should skip types they don't know.
+- `examples/demo.sh` scenario 7 refunds one mug of two by line while the refund's and the
+  restock's answers are lost and the provider ignores idempotency keys, then prints the order,
+  its refunds, the provider's refunds and ledger, the restock and the shelf (#24). The
+  simulator's `GET /sim/control/ledger` now includes the payments' `refunds` and the
+  reservation's `restocks`, and `GET /sim/control/stock/{sku}` reads a SKU's stock.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

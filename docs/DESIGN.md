@@ -258,7 +258,9 @@ that refuses the restock outright (it has lost the reservation) is retried with 
 a refused release is: the money has gone back, and dropping the stock silently would leave the
 shelf short. `UnknownOutcomeTest` loses the restock's answer, its request, and both the refund's
 and the restock's answers, with the provider's key handling on and off: each time one refund is
-made and one mug goes back to the shelf.
+made and one mug goes back to the shelf. Scenario 7 of `examples/demo.sh` does the same against
+the compose stack, through the simulator's control API: it loses both answers with keys ignored
+and prints the provider's refunds and ledger, the restock and the shelf.
 
 `SagaChaosProperties` puts all of this under random faults. Orders have one to three lines, and a
 sku can sit on two lines at two prices. Once the saga has settled them, up to twelve amount, line

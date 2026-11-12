@@ -128,13 +128,25 @@ class SimulatorControlController {
     return ResponseEntity.ok(Map.of("sku", sku, "available", inventory.stock(sku)));
   }
 
-  /** Everything the three providers know about one order reference. */
+  @GetMapping("/stock/{sku}")
+  ResponseEntity<?> stock(@PathVariable String sku) {
+    return ResponseEntity.ok(Map.of("sku", sku, "available", inventory.stock(sku)));
+  }
+
+  /**
+   * Everything the three providers know about one order reference: its payments, every applied
+   * payment operation, the refund objects of its payments, its reservation, the restocks from that
+   * reservation, and its shipment.
+   */
   @GetMapping("/ledger")
   ResponseEntity<?> ledger(@RequestParam String reference) {
+    List<PaymentProviderSimulator.Payment> ps = payments.paymentsFor(reference);
     Map<String, Object> body = new LinkedHashMap<>();
-    body.put("payments", payments.paymentsFor(reference));
+    body.put("payments", ps);
     body.put("payment_operations", payments.ledgerFor(reference));
+    body.put("refunds", ps.stream().flatMap(p -> payments.refundsFor(p.id()).stream()).toList());
     body.put("reservation", inventory.reservation(reference).orElse(null));
+    body.put("restocks", inventory.restocksOf(reference));
     body.put("shipment", shipping.shipment(reference).orElse(null));
     return ResponseEntity.ok(body);
   }

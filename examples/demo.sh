@@ -55,6 +55,10 @@ show() { # id
     jq -c '{provider_operations: [.payment_operations[] | "\(.operation) \(.amount)"], shipment: .shipment.status}'
 }
 
+stock() { # sku
+  curl -fsS "$SIM/sim/control/stock/$1" -H "Authorization: Bearer $SIM_KEY" | jq -r .available
+}
+
 echo "waiting for payflow at $API"
 for _ in $(seq 1 120); do curl -fsS "$API/readyz" > /dev/null 2>&1 && break; sleep 1; done
 curl -fsS "$API/readyz" > /dev/null
@@ -108,10 +112,37 @@ for _ in $(seq 1 120); do curl -fsS "$API/readyz" > /dev/null 2>&1 && break; sle
 wait_for "$id" COMPLETED
 show "$id"
 
+say "7. Refund one mug of two; the refund's answer and the restock's answer are both lost"
+id=$(create pm_card_ok 12345)
+wait_for "$id" COMPLETED
+shelf_before=$(stock mug)
+# Keys off: only asking the provider before acting again stops a second refund.
+sim PUT /settings '{"honor_idempotency_keys":false}'
+sim PUT /faults/payment.refund '{"script":["unknown_after"]}'
+sim PUT /faults/inventory.restock '{"script":["unknown_after"]}'
+curl -fsS "$API/v1/orders/$id/refunds" -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"lines":[{"sku":"mug","quantity":1}]}' |
+  jq -c '{refund: .id, state, amount, lines: [.lines[] | "\(.quantity) \(.sku)"]}'
+wait_for "$id" PARTIALLY_REFUNDED
+sim PUT /settings '{"honor_idempotency_keys":true}'
+sim DELETE /faults
+show "$id"
+curl -fsS "$API/v1/orders/$id/refunds" -H "Authorization: Bearer $KEY" |
+  jq -c '.data[] | {refund: .id, state, amount, lines: [.lines[] | "\(.quantity) \(.sku)"]}'
+ledger=$(curl -fsS "$SIM/sim/control/ledger?reference=$id" -H "Authorization: Bearer $SIM_KEY")
+jq -c '{provider_refunds: [.refunds[] | "\(.id) \(.amount) for \(.reference)"],
+        restocks: [.restocks[] | "\(.id): " + ([.lines[] | "\(.quantity) \(.sku)"] | join(", "))]}' <<< "$ledger"
+shelf_after=$(stock mug)
+echo "mugs on the shelf: $shelf_before before the refund, $shelf_after after"
+jq -e '[.refunds[].amount] == [1250] and [.restocks[].lines] == [[{"sku":"mug","quantity":1}]]' \
+  <<< "$ledger" > /dev/null || { echo "expected one refund of 1250 and one mug restocked" >&2; exit 1; }
+(( shelf_after == shelf_before + 1 )) || { echo "expected exactly one mug back on the shelf" >&2; exit 1; }
+
 say "Event timeline for the last order (from Kafka, through the consumer)"
 for _ in $(seq 1 120); do
   curl -fsS "$API/v1/orders/$id/events" -H "Authorization: Bearer $KEY" |
-    jq -e '.data | map(.event_type) | index("order.completed")' > /dev/null && break
+    jq -e '.data | map(.event_type) | index("order.partially_refunded")' > /dev/null && break
   sleep 0.5
 done
 curl -fsS "$API/v1/orders/$id/events" -H "Authorization: Bearer $KEY" | jq -r '.data[] | "\(.seq)\t\(.event_type)"'

@@ -33,12 +33,14 @@ $ docker compose up -d --build
 $ ./examples/demo.sh
 ```
 
-The demo runs six scenarios against the stack and prints each order's final state next to the
-fake provider's ledger: a happy path, a declined card, a carrier refusing the address after
-capture (refunded), a capture whose answer is lost, an idempotent retry, and a `SIGKILL` of the
-service while an authorization is in flight. If ports 8080, 8081 or 8090 are taken, set
-`PAYFLOW_HOST_PORT`, `PAYFLOW_HOST_MANAGEMENT_PORT` and `PAYFLOW_HOST_SIMULATOR_PORT` for both
-commands.
+The demo runs seven scenarios against the stack and prints each order's final state next to the fake
+provider's ledger: a happy path, a declined card, a carrier refusing the address after capture
+(refunded), a capture whose answer is lost, an idempotent retry, a `SIGKILL` of the service while an
+authorization is in flight, and a refund of one mug of two whose refund and restock answers are both
+lost, with the provider ignoring idempotency keys. That one prints the provider's refunds, the
+restock and the mugs on the shelf before and after: one refund of 12.50, one mug back. If ports
+8080, 8081 or 8090 are taken, set `PAYFLOW_HOST_PORT`, `PAYFLOW_HOST_MANAGEMENT_PORT` and
+`PAYFLOW_HOST_SIMULATOR_PORT` for both commands.
 
 A second instance and a rolling restart:
 
@@ -181,7 +183,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 397 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 400 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
