@@ -464,9 +464,11 @@ class SagaChaosProperties {
                 .anyMatch(l -> given.getOrDefault(l.sku(), 0L) + l.quantity() > bought(o, l.sku()));
         case "exceeds_captured" -> {
           // A line refund takes the next units of each sku, after those earlier refunds took, and
-          // those can only have been fewer than the final count. Its share was at least the
-          // cheapest such run of units that would still fit in what the order bought.
-          long least =
+          // those can only have been fewer than the final count. Which refunds were earlier
+          // depends on the race, so its share was at most the dearest such run of units that
+          // would still fit in what the order bought; a request that fits even at that price, on
+          // top of everything refunded by the end, was refused wrongly (#82).
+          long most =
               a.kind() == RefundKind.LINES
                   ? a.lines().stream()
                       .mapToLong(
@@ -478,15 +480,15 @@ class SagaChaosProperties {
                             assertThat(last)
                                 .as("%s fits in what was bought, or it'd be exceeds_purchased", l)
                                 .isNotNegative();
-                            long min = Long.MAX_VALUE;
+                            long max = 0;
                             for (long from = 0; from <= last; from++) {
-                              min = Math.min(min, unitsCost(o, l.sku(), from, l.quantity()));
+                              max = Math.max(max, unitsCost(o, l.sku(), from, l.quantity()));
                             }
-                            return min;
+                            return max;
                           })
                       .sum()
                   : a.amount();
-          assertThat(o.refundedMinor() + least)
+          assertThat(o.refundedMinor() + most)
               .as("%s refused for money, with %d refunded", a, o.refundedMinor())
               .isGreaterThan(o.capturedMinor());
         }

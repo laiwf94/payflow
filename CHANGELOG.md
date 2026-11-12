@@ -95,6 +95,8 @@ notes on GitHub link here.
 
 ### Fixed
 
+- The chaos property no longer flags a correct `refund_exceeds_captured`: it priced a refused line
+  refund at the cheapest units it could have been given rather than the dearest (#82).
 - The simulator's control API accepts faults on `inventory.restock`, so the compose stack can
   lose or fail a restock as the in-process tests do (#81).
 - `GET` requests answer `503 unavailable` when the database is down, as POSTs did, instead of

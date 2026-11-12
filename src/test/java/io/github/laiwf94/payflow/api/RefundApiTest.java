@@ -265,6 +265,51 @@ class RefundApiTest {
         .containsExactlyElementsOf(all.reversed().subList(0, 10));
   }
 
+  /**
+   * Which of two line refunds for the same sku is refused depends on which wins the lock, since
+   * each takes the next units at what the order paid for them. Here sku-1 is 2 x 2.50 and 1 x
+   * 10.00, so after 0.01 the order has 14.99 left: one unit and then two costs 2.50 + 12.50, two
+   * and then one costs 5.00 + 10.00, and either way the second request is the one that doesn't fit
+   * (#82).
+   */
+  @Test
+  void theLaterOfTwoLineRefundsIsTheOneRefusedForMoney() {
+    String body =
+        Api.orderBody()
+            .replace(
+                "{\"sku\":\"sku-1\",\"quantity\":2,\"unit_amount\":1000},\n"
+                    + "          {\"sku\":\"sku-2\",\"quantity\":1,\"unit_amount\":500}",
+                "{\"sku\":\"sku-1\",\"quantity\":2,\"unit_amount\":250},\n"
+                    + "          {\"sku\":\"sku-1\",\"quantity\":1,\"unit_amount\":1000}");
+    assertThat(body).contains("\"unit_amount\":250");
+    String one = "{\"lines\":[{\"sku\":\"sku-1\",\"quantity\":1}]}";
+    String two = "{\"lines\":[{\"sku\":\"sku-1\",\"quantity\":2}]}";
+    for (boolean oneFirst : new boolean[] {true, false}) {
+      Api.Response r = api.post("/v1/orders", body);
+      assertThat(r.status()).as(r.body()).isEqualTo(201);
+      String id = r.json().get("id").asString();
+      awaitOrder(id, "COMPLETED");
+      assertThat(api.post("/v1/orders/" + id + "/refunds", "{\"amount\":1}").status())
+          .isEqualTo(202);
+
+      Api.Response first = api.post("/v1/orders/" + id + "/refunds", oneFirst ? one : two);
+      assertThat(first.status()).as(first.body()).isEqualTo(202);
+      assertThat(first.json().get("amount").asLong()).isEqualTo(oneFirst ? 250 : 500);
+
+      Api.Response second = api.post("/v1/orders/" + id + "/refunds", oneFirst ? two : one);
+      assertThat(second.status()).as(second.body()).isEqualTo(409);
+      assertThat(second.errorCode()).isEqualTo("refund_exceeds_captured");
+      assertThat(second.json().at("/error/message").asString())
+          .isEqualTo(
+              oneFirst
+                  ? "refund of 1250 exceeds the 1249 left to refund"
+                  : "refund of 1000 exceeds the 999 left to refund");
+      assertThat(settledRefunds(id))
+          .extracting(x -> x.get("amount").asLong())
+          .containsExactly(1L, oneFirst ? 250L : 500L);
+    }
+  }
+
   @Test
   void aRefusedRefundFailsAndGivesItsShareBack() {
     String id = completedOrder();
