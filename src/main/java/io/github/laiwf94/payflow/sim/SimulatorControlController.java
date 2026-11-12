@@ -33,6 +33,7 @@ class SimulatorControlController {
           "payment.lookup",
           "inventory.reserve",
           "inventory.release",
+          "inventory.restock",
           "inventory.lookup",
           "shipping.create",
           "shipping.cancel",

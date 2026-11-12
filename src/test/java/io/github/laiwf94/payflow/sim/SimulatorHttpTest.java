@@ -129,6 +129,26 @@ class SimulatorHttpTest {
   }
 
   @Test
+  void aRestockCanBeFaultedThroughTheControlApi() throws Exception {
+    String reserve = "{\"reservation_id\":\"o1\",\"lines\":[{\"sku\":\"a\",\"quantity\":2}]}";
+    assertThat(send("POST", "/sim/inventory/reservations", reserve).statusCode()).isEqualTo(201);
+    long before = inventory.stock("a");
+    assertThat(
+            send("PUT", "/sim/control/faults/inventory.restock", "{\"script\":[\"error\"]}")
+                .statusCode())
+        .isEqualTo(200);
+    String restock = "{\"restock_id\":\"x1\",\"lines\":[{\"sku\":\"a\",\"quantity\":1}]}";
+    assertThat(send("POST", "/sim/inventory/reservations/o1/restocks", restock).statusCode())
+        .isEqualTo(503);
+    assertThat(inventory.restocksOf("o1")).isEmpty();
+    assertThat(inventory.stock("a")).isEqualTo(before);
+    assertThat(send("POST", "/sim/inventory/reservations/o1/restocks", restock).statusCode())
+        .as("the script is spent, so the retry is answered")
+        .isEqualTo(201);
+    assertThat(inventory.stock("a")).isEqualTo(before + 1);
+  }
+
+  @Test
   void inventoryAndShippingOverHttp() throws Exception {
     assertThat(send("PUT", "/sim/control/stock/a", "{\"available\":1}").body())
         .contains("\"available\":1");

@@ -95,6 +95,8 @@ notes on GitHub link here.
 
 ### Fixed
 
+- The simulator's control API accepts faults on `inventory.restock`, so the compose stack can
+  lose or fail a restock as the in-process tests do (#81).
 - `GET` requests answer `503 unavailable` when the database is down, as POSTs did, instead of
   `500 internal` (#78).
 - Guava and snappy-java moved to versions without the new advisories (#75). The osv-scanner
