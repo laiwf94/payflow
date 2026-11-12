@@ -16,6 +16,14 @@ import org.springframework.transaction.annotation.Transactional;
 @Component
 public class OrderTransitions {
 
+  /**
+   * The type of the event a new order writes; each later state has its own ({@link #eventType}).
+   */
+  public static final String CREATED = "order.created";
+
+  /** The type of the event a cancel request writes before the saga acts on it. */
+  public static final String CANCEL_REQUESTED = "order.cancel_requested";
+
   private final OrderRepository repo;
   private final OutboxWriter outbox;
 
@@ -33,7 +41,7 @@ public class OrderTransitions {
     if (!repo.insert(order)) {
       return false;
     }
-    outbox.write("order.created", order, null, order.createdAt());
+    outbox.write(CREATED, order, null, order.createdAt());
     return true;
   }
 
@@ -54,7 +62,7 @@ public class OrderTransitions {
   @Transactional
   public Optional<Order> requestCancel(String merchantId, UUID id, Instant now) {
     Optional<Order> after = repo.requestCancel(merchantId, id, now);
-    after.ifPresent(o -> outbox.write("order.cancel_requested", o, null, now));
+    after.ifPresent(o -> outbox.write(CANCEL_REQUESTED, o, null, now));
     return after;
   }
 
@@ -95,7 +103,7 @@ public class OrderTransitions {
     return after;
   }
 
-  static String eventType(OrderState state) {
+  public static String eventType(OrderState state) {
     return "order." + state.name().toLowerCase(Locale.ROOT);
   }
 }

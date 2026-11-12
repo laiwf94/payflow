@@ -208,7 +208,68 @@ class OpenApiContractTest {
         .extracting(r -> r.get("amount").asLong())
         .containsExactly(100L, 500L, 100L);
 
+    webhookEndpoints(anonymous, missing, tooLarge);
+
     assertThat(exercised).isEqualTo(documentedResponses());
+  }
+
+  /** Every documented answer of the webhook endpoint routes. */
+  private void webhookEndpoints(Api anonymous, String missing, String tooLarge) {
+    String hooks = "/v1/webhook_endpoints";
+    String create = "POST " + hooks;
+    String body = "{\"url\":\"https://hooks.example.com/payflow\",\"enabled_events\":[\"*\"]}";
+    Api.Response created = api.post(hooks, body);
+    record(create, created);
+    String hook = created.json().get("id").asString();
+    replayed(create, 201, hooks, body);
+    String ftp = "{\"url\":\"ftp://hooks.example.com\",\"enabled_events\":[\"*\"]}";
+    record(create, api.post(hooks, ftp));
+    replayed(create, 400, hooks, ftp);
+    record(create, api.post(hooks, body, "Idempotency-Key", "has space"));
+    record(create, anonymous.post(hooks, body));
+    busyKey("busy-hook", hooks, body);
+    record(create, api.post(hooks, body, "Idempotency-Key", "busy-hook"));
+    record(create, api.post(hooks, tooLarge));
+    record(create, api.post(hooks, "<hook/>", "Content-Type", "application/xml"));
+    api.post(hooks, body, "Idempotency-Key", "reused-hook");
+    record(create, api.post(hooks, ftp, "Idempotency-Key", "reused-hook"));
+    // Fill up to the limit; then one more is refused, and the refusal replays.
+    for (int i = api.get(hooks).json().get("data").size(); i < 16; i++) {
+      assertThat(api.post(hooks, body).status()).isEqualTo(201);
+    }
+    record(create, api.post(hooks, body));
+    replayed(create, 409, hooks, body);
+
+    record("GET " + hooks, api.get(hooks));
+    record("GET " + hooks, anonymous.get(hooks));
+
+    String one = hooks + "/{id}";
+    String path = hooks + "/" + hook;
+    record("GET " + one, api.get(path));
+    record("GET " + one, api.get(hooks + "/" + missing));
+    record("GET " + one, anonymous.get(path));
+
+    String update = "POST " + one;
+    String disable = "{\"state\":\"DISABLED\"}";
+    record(update, api.post(path, disable));
+    replayed(update, 200, path, "{\"description\":\"replayed\"}");
+    record(update, api.post(path, "{}"));
+    replayed(update, 400, path, "{}");
+    record(update, api.post(path, disable, "Idempotency-Key", "has space"));
+    record(update, anonymous.post(path, disable));
+    record(update, api.post(hooks + "/" + missing, disable));
+    replayed(update, 404, hooks + "/" + missing, disable);
+    busyKey("busy-hook-update", path, disable);
+    record(update, api.post(path, disable, "Idempotency-Key", "busy-hook-update"));
+    record(update, api.post(path, tooLarge));
+    record(update, api.post(path, "<hook/>", "Content-Type", "application/xml"));
+    api.post(path, disable, "Idempotency-Key", "reused-hook-update");
+    record(
+        update, api.post(path, "{\"state\":\"ENABLED\"}", "Idempotency-Key", "reused-hook-update"));
+
+    record("DELETE " + one, anonymous.send("DELETE", path, null));
+    record("DELETE " + one, api.send("DELETE", path, null));
+    record("DELETE " + one, api.send("DELETE", path, null));
   }
 
   @Test
@@ -222,6 +283,19 @@ class OpenApiContractTest {
         api.get("/v1/orders/" + order, "X-Request-Id", "caller-chosen.id_1"),
         null,
         "caller-chosen.id_1");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void theSpecListsExactlyTheEventTypesAnEndpointCanSubscribeTo() {
+    List<String> documented =
+        (List<String>)
+            ((Map<String, Object>) validator.resolve("#/components/schemas/WebhookEventType"))
+                .get("enum");
+    List<String> expected = new java.util.ArrayList<>();
+    expected.add(io.github.laiwf94.payflow.webhook.WebhookEvents.ALL);
+    expected.addAll(io.github.laiwf94.payflow.webhook.WebhookEvents.TYPES);
+    assertThat(documented).isEqualTo(expected);
   }
 
   @Test

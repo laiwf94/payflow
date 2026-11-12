@@ -61,6 +61,11 @@ payflow:
   # Signs the order listing's cursors. Every instance needs the same value; a comma-separated list
   # rotates it (the first signs, all verify). Unset means a random per-process secret.
   cursor-secrets: ${PAYFLOW_CURSOR_SECRETS:}
+  # Seals the secrets payflow stores and reads back, such as webhook signing secrets (AES-256-GCM).
+  # id:base64key with a 32-byte key; a comma-separated list rotates it (the first seals, all
+  # open). Every instance needs the same list. Unset means a random per-process key, and those
+  # secrets are unreadable after a restart.
+  secret-keys: ${PAYFLOW_SECRET_KEYS:}
   simulator:
     enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
     key: ${PAYFLOW_SIMULATOR_KEY:}

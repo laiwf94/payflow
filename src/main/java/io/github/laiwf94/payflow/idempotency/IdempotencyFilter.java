@@ -4,6 +4,7 @@ import io.github.laiwf94.payflow.api.ApiError;
 import io.github.laiwf94.payflow.api.ApiErrors;
 import io.github.laiwf94.payflow.api.RequestIds;
 import io.github.laiwf94.payflow.security.ApiKeyFilter;
+import io.github.laiwf94.payflow.security.SecretBox;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
@@ -17,6 +18,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +45,11 @@ import tools.jackson.databind.SerializationFeature;
  * <p>The whole request runs in one database transaction and the response is stored in that same
  * transaction, so the order and the key's response commit together or not at all. A 5xx rolls the
  * work back and releases the key, so the client's retry runs fresh.
+ *
+ * <p>An answer that carries a secret shown only once, such as a new webhook endpoint's signing
+ * secret, is marked by its controller with {@link #sealStoredAnswer}. Its stored copy is then
+ * sealed with the {@link SecretBox}, bound to the merchant and key, so the secret isn't kept in the
+ * clear for the key's lifetime; a replay opens it and answers byte for byte as the first time.
  */
 public final class IdempotencyFilter extends OncePerRequestFilter {
 
@@ -50,6 +57,11 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
 
   public static final String HEADER = "Idempotency-Key";
   public static final String REPLAYED_HEADER = "Idempotent-Replayed";
+
+  private static final String SEAL_ATTRIBUTE = IdempotencyFilter.class.getName() + ".seal";
+
+  /** How a sealed answer is stored: this prefix, then key id, nonce and ciphertext. */
+  static final String SEALED_PREFIX = "sealed:v1:";
 
   /** Printable ASCII without spaces, at most 255 characters. */
   private static final Pattern KEY = Pattern.compile("[\\x21-\\x7e]{1,255}");
@@ -59,10 +71,16 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
   private final ObjectMapper json;
   private final ObjectMapper canonical;
   private final MeterRegistry meters;
+  private final SecretBox box;
 
   public IdempotencyFilter(
-      IdempotencyStore store, TransactionTemplate tx, ObjectMapper json, MeterRegistry meters) {
+      IdempotencyStore store,
+      TransactionTemplate tx,
+      ObjectMapper json,
+      MeterRegistry meters,
+      SecretBox box) {
     this.store = store;
+    this.box = box;
     this.tx = tx;
     this.json = json;
     this.canonical =
@@ -127,6 +145,15 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
             "a request with this Idempotency-Key is still running; retry later");
       }
       case IdempotencyStore.Claim.Replay r -> {
+        String stored;
+        try {
+          stored = open(merchant, key, r.body());
+        } catch (SecretBox.CannotOpen e) {
+          log.error("can't open the stored answer for an idempotency key: {}", e.getMessage());
+          ApiErrors.write(
+              req, res, json, ApiError.INTERNAL, "the stored answer for this key can't be read");
+          return;
+        }
         count("replayed");
         res.setStatus(r.status());
         res.setHeader(REPLAYED_HEADER, "true");
@@ -134,7 +161,7 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
           res.setHeader(HttpHeaders.LOCATION, r.location());
         }
         res.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        res.getOutputStream().write(r.body().getBytes(StandardCharsets.UTF_8));
+        res.getOutputStream().write(stored.getBytes(StandardCharsets.UTF_8));
       }
       case IdempotencyStore.Claim.Proceed p -> {
         count("new");
@@ -167,6 +194,9 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
               return;
             }
             String bodyText = new String(wrapped.getContentAsByteArray(), StandardCharsets.UTF_8);
+            if (Boolean.TRUE.equals(req.getAttribute(SEAL_ATTRIBUTE))) {
+              bodyText = seal(merchant, key, bodyText);
+            }
             if (!store.complete(
                 merchant,
                 key,
@@ -207,6 +237,48 @@ public final class IdempotencyFilter extends OncePerRequestFilter {
       }
     }
     wrapped.copyBodyToResponse();
+  }
+
+  /**
+   * Marks the answer to this request as carrying a secret, so its stored copy is sealed. Called by
+   * the controller while the request runs; outside this filter it does nothing.
+   */
+  public static void sealStoredAnswer(HttpServletRequest req) {
+    req.setAttribute(SEAL_ATTRIBUTE, true);
+  }
+
+  private String seal(String merchant, String key, String body) {
+    SecretBox.Sealed s = box.seal(body, context(merchant, key));
+    Base64.Encoder b64 = Base64.getEncoder();
+    return SEALED_PREFIX
+        + s.keyId()
+        + ":"
+        + b64.encodeToString(s.nonce())
+        + ":"
+        + b64.encodeToString(s.ciphertext());
+  }
+
+  /** The stored answer as it was sent: opened when it was sealed, as is otherwise. */
+  private String open(String merchant, String key, String stored) {
+    if (!stored.startsWith(SEALED_PREFIX)) {
+      return stored;
+    }
+    String[] parts = stored.substring(SEALED_PREFIX.length()).split(":", -1);
+    if (parts.length != 3) {
+      throw new SecretBox.CannotOpen("stored answer is not a sealed value");
+    }
+    try {
+      Base64.Decoder b64 = Base64.getDecoder();
+      return box.open(
+          new SecretBox.Sealed(parts[0], b64.decode(parts[1]), b64.decode(parts[2])),
+          context(merchant, key));
+    } catch (IllegalArgumentException e) {
+      throw new SecretBox.CannotOpen("stored answer is not a sealed value");
+    }
+  }
+
+  private static String context(String merchant, String key) {
+    return "idempotency_keys.response\n" + merchant + "\n" + key;
   }
 
   /**

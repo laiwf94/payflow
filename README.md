@@ -81,7 +81,10 @@ or the rolling restart against a published image instead of a local build, set
 in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 Behind more than one instance, set `PAYFLOW_CURSOR_SECRETS` (at least 32 characters, the same
-everywhere) so a listing cursor issued by one instance is accepted by the next.
+everywhere) so a listing cursor issued by one instance is accepted by the next. Set
+`PAYFLOW_SECRET_KEYS` too, also the same everywhere: it seals webhook signing secrets at rest
+(`id:base64key` with a 32-byte key, e.g. `k1:$(openssl rand -base64 32)`; a comma-separated list
+rotates it). Without it each process uses a random key and those secrets don't survive a restart.
 
 Configuration is environment variables; the main ones are listed in
 [application.yml](src/main/resources/application.yml) and the limits in
@@ -150,6 +153,10 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 | `POST /v1/orders/{id}/refunds` | Refund part of a completed order: `{"amount": 500}`, or `{"lines": [{"sku": "mug", "quantity": 1}]}` priced from the order. `202` with the refund, `PENDING`; the order becomes `PARTIALLY_REFUNDED` or `REFUNDED` once the provider has returned the money. |
 | `GET /v1/orders/{id}/refunds` | The order's refunds, oldest first, each `PENDING`, `SUCCEEDED` or `FAILED` (with the provider's reason). |
 | `GET /v1/orders/{id}/events` | The order's history as consumed from Kafka, including `refund.created`, `refund.succeeded` and `refund.failed` with the refund's id and amount. |
+| `POST /v1/webhook_endpoints` | Register a webhook URL with `enabled_events` (`["*"]` or event types). `201` with the endpoint's signing `secret`, shown only this once and stored encrypted. At most 16 per merchant. |
+| `GET /v1/webhook_endpoints`, `GET /v1/webhook_endpoints/{id}` | The merchant's endpoints, oldest first, or one of them; never the secret. |
+| `POST /v1/webhook_endpoints/{id}` | Change `url`, `enabled_events`, `description` or `state` (`ENABLED`, `DISABLED`). |
+| `DELETE /v1/webhook_endpoints/{id}` | Delete the endpoint; its secret is erased. |
 | `GET /livez`, `GET /readyz` | Liveness, and readiness (database only; Kafka being down doesn't stop orders). |
 | `GET :8081/actuator/prometheus` | Metrics, on the loopback management port. |
 
@@ -157,9 +164,9 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 `invalid_argument` / `invalid_cursor` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
 `not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
 `order_reference_in_use` / `refund_exceeds_captured` / `refund_exceeds_purchased` /
-`idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
+`webhook_endpoint_limit_reached` / `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
 `idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a
-404, the same as a missing one. openapi.yaml lists the codes each response can carry.
+404, the same as a missing one, and so is another merchant's webhook endpoint. openapi.yaml lists the codes each response can carry.
 
 ## Test suite
 
@@ -177,13 +184,14 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
 | Listing | jqwik pages through two merchants' orders with random filters and page sizes while orders keep arriving, many tied on `created_at`, and every page boundary goes through a signed cursor: no order is repeated, none that existed when paging began is skipped, and the order is strictly newest first. Over HTTP, two threads insert while 300 orders are paged; a flipped bit, another merchant's cursor or changed filters is a 400. |
 | Rolling restart | Outside the gate, against the compose stack: `examples/rolling-restart.py` pages 10,000 orders of two merchants across two instances while each is stopped with `SIGTERM` and started again under load, and checks every listing and every provider ledger. |
+| Webhook endpoints | Over HTTP: the secret is in the `201` and nowhere else, neither in any read nor in the database (the endpoint's row and the stored idempotent answer are scanned for it), yet it opens again to sign; a retry replays the same endpoint and secret; changes, deletion, merchant isolation, and ten racing creates against twelve endpoints make exactly four. Raw SQL can't store a bad state, URL, event filter, secret, delivery schedule or attempt. Every bit of a sealed secret is covered by its tag, and a secret moved to another row doesn't open. |
 | Contract | The OpenAPI document and Spring's routes must match both ways. Every documented response and every error code it lists is produced by a real request and checked against its schema and headers, nothing undocumented comes back, and the spec's codes are exactly the ones the code can send. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 400 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 425 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
@@ -224,7 +232,8 @@ src/main/java/io/github/laiwf94/payflow/
   outbox      outbox writer and Kafka relay
   timeline    idempotent consumer and the order timeline
   idempotency Idempotency-Key filter and store
-  security    API keys
+  security    API keys, and the box that seals secrets at rest
+  webhook     merchant webhook endpoints, event types and URL rules
   api         controllers, request ids, errors, body limit
   sim         the fake providers and their control API
 src/main/resources/db/migration   Flyway migrations

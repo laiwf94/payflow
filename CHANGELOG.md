@@ -77,6 +77,18 @@ notes on GitHub link here.
   its refunds, the provider's refunds and ledger, the restock and the shelf (#24). The
   simulator's `GET /sim/control/ledger` now includes the payments' `refunds` and the
   reservation's `restocks`, and `GET /sim/control/stock/{sku}` reads a SKU's stock.
+- Webhook endpoints (#25). `POST /v1/webhook_endpoints` registers a URL with an event filter
+  (`enabled_events`: `["*"]` or any of the order and refund event types) and answers `201` with
+  the endpoint's signing secret, `whsec_...`, shown only that once. `GET` lists them or reads
+  one, `POST /v1/webhook_endpoints/{id}` changes `url`, `enabled_events`, `description` or
+  `state` (`ENABLED`, `DISABLED`), and `DELETE` removes one. A merchant has at most 16; one more
+  is the new `409 webhook_endpoint_limit_reached`. Migration V18 adds `webhook_endpoints`,
+  `webhook_deliveries` and `webhook_attempts`. Delivery itself follows later in the week.
+- Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
+  rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
+  idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each
+  process uses a random key and logs a warning; set it, the same on every instance, before
+  registering endpoints.
 - openapi.yaml lists the error codes each response can carry, and the headers of every response;
   the contract test produces every documented (operation, status, code).
 - The compose stack has a second merchant (`globex`), an optional second instance (`app2`,

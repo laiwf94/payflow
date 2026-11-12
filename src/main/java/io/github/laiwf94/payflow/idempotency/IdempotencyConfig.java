@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.idempotency;
 
+import io.github.laiwf94.payflow.security.SecretBox;
 import io.github.laiwf94.payflow.security.SecurityConfig;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -16,9 +17,13 @@ public class IdempotencyConfig {
 
   @Bean
   FilterRegistrationBean<IdempotencyFilter> idempotencyFilter(
-      IdempotencyStore store, TransactionTemplate tx, ObjectMapper json, MeterRegistry meters) {
+      IdempotencyStore store,
+      TransactionTemplate tx,
+      ObjectMapper json,
+      MeterRegistry meters,
+      SecretBox box) {
     FilterRegistrationBean<IdempotencyFilter> reg =
-        new FilterRegistrationBean<>(new IdempotencyFilter(store, tx, json, meters));
+        new FilterRegistrationBean<>(new IdempotencyFilter(store, tx, json, meters, box));
     reg.addUrlPatterns("/v1/*");
     reg.setOrder(SecurityConfig.AUTH_ORDER + 20);
     return reg;

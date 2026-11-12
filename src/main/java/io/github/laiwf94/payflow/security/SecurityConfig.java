@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import tools.jackson.databind.ObjectMapper;
 
-/** API key authentication for the merchant API. */
+/** API key authentication for the merchant API, and the box that seals stored secrets. */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig {
 
@@ -17,6 +17,12 @@ public class SecurityConfig {
   @Bean
   ApiKeys apiKeys(@Value("${payflow.api-keys:}") String spec) {
     return ApiKeys.parse(spec);
+  }
+
+  /** Seals stored secrets; see {@link SecretBox} for the format of {@code payflow.secret-keys}. */
+  @Bean
+  SecretBox secretBox(@Value("${payflow.secret-keys:}") String keys) {
+    return SecretBox.of(keys);
   }
 
   @Bean

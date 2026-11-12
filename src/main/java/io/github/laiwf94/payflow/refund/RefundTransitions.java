@@ -17,6 +17,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Component
 public class RefundTransitions {
 
+  /** The types of the events a refund writes into its order's stream. */
+  public static final String CREATED = "refund.created";
+
+  public static final String SUCCEEDED = "refund.succeeded";
+  public static final String FAILED = "refund.failed";
+
   private final RefundRepository refunds;
   private final OrderTransitions orders;
 
@@ -32,7 +38,7 @@ public class RefundTransitions {
   @Transactional
   public Order create(Refund refund, Instant now) {
     refunds.insert(refund);
-    return orders.recordRefundEvent(refund.orderId(), "refund.created", details(refund), now);
+    return orders.recordRefundEvent(refund.orderId(), CREATED, details(refund), now);
   }
 
   /**
@@ -45,7 +51,7 @@ public class RefundTransitions {
     Optional<Refund> after = refunds.succeed(refund.id(), leaseToken, providerRefundId, now);
     after.ifPresent(
         r -> {
-          orders.recordRefundEvent(r.orderId(), "refund.succeeded", details(r), now);
+          orders.recordRefundEvent(r.orderId(), SUCCEEDED, details(r), now);
           orders.recordRefund(r.orderId(), r.amountMinor(), now);
         });
     return after;
@@ -59,7 +65,7 @@ public class RefundTransitions {
   public Optional<Refund> fail(
       Refund refund, UUID leaseToken, String code, String message, Instant now) {
     Optional<Refund> after = refunds.fail(refund.id(), leaseToken, code, message, now);
-    after.ifPresent(r -> orders.recordRefundEvent(r.orderId(), "refund.failed", details(r), now));
+    after.ifPresent(r -> orders.recordRefundEvent(r.orderId(), FAILED, details(r), now));
     return after;
   }
 

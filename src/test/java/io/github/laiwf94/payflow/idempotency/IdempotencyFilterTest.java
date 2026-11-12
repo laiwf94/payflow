@@ -24,7 +24,12 @@ class IdempotencyFilterTest {
         .thenThrow(new CannotGetJdbcConnectionException("down"));
     IdempotencyFilter filter =
         new IdempotencyFilter(
-            store, mock(TransactionTemplate.class), new ObjectMapper(), new SimpleMeterRegistry());
+            store,
+            mock(TransactionTemplate.class),
+            new ObjectMapper(),
+            new SimpleMeterRegistry(),
+            io.github.laiwf94.payflow.security.SecretBox.of(
+                "k1:" + io.github.laiwf94.payflow.security.SecretBox.generateKey()));
     MockHttpServletRequest req = new MockHttpServletRequest("POST", "/v1/orders");
     req.addHeader(IdempotencyFilter.HEADER, "k-1");
     req.setAttribute(ApiKeyFilter.MERCHANT_ATTRIBUTE, "acme");

@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.api;
 import io.github.laiwf94.payflow.money.InvalidMoneyException;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.refund.RefundService;
+import io.github.laiwf94.payflow.webhook.WebhookEndpointService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Comparator;
 import java.util.Map;
@@ -76,6 +77,18 @@ class ApiExceptionHandler {
   @ExceptionHandler({OrderService.NotFound.class, OrderController.OrderNotFound.class})
   ResponseEntity<Map<String, Object>> notFound(RuntimeException e, HttpServletRequest req) {
     return error(ApiError.NOT_FOUND, "order not found", req);
+  }
+
+  @ExceptionHandler(WebhookEndpointService.NotFound.class)
+  ResponseEntity<Map<String, Object>> webhookEndpointNotFound(
+      WebhookEndpointService.NotFound e, HttpServletRequest req) {
+    return error(ApiError.NOT_FOUND, e.getMessage(), req);
+  }
+
+  @ExceptionHandler(WebhookEndpointService.LimitReached.class)
+  ResponseEntity<Map<String, Object>> webhookEndpointLimit(
+      WebhookEndpointService.LimitReached e, HttpServletRequest req) {
+    return error(ApiError.WEBHOOK_ENDPOINT_LIMIT_REACHED, e.getMessage(), req);
   }
 
   @ExceptionHandler(NoResourceFoundException.class)

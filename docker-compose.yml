@@ -60,6 +60,8 @@ services:
       PAYFLOW_API_KEYS: acme:da4c799cd4e103221d18a07d2090e355b5aa1d3936add5cbf39afd6449ed320b,globex:79562157538ee17c9b30a09d1b9d192397b3a89d32eb79f8c395309cd3735c50
       # Signs listing cursors; shared by every instance so a cursor survives a restart.
       PAYFLOW_CURSOR_SECRETS: demo_cursor_secret_0123456789abcdef
+      # Seals stored secrets such as webhook signing secrets; shared by every instance.
+      PAYFLOW_SECRET_KEYS: demo1:6SESHIaAXr92bIP1ZBFECEExYXwpKSed9/vzlyeuzGk=
       PAYFLOW_SIMULATOR_ENABLED: "false"
       PAYFLOW_DEPENDENCIES_PAYMENT_BASE_URL: http://simulator:8090/sim/payments
       PAYFLOW_DEPENDENCIES_PAYMENT_API_KEY: sim_demo_key_0123456789abcdef

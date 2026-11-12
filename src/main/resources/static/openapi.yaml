@@ -352,6 +352,178 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/webhook_endpoints:
+    post:
+      operationId: createWebhookEndpoint
+      summary: Register a webhook endpoint
+      description: |
+        Registers a URL to receive the merchant's events, enabled at once. `enabled_events` is
+        `["*"]` for every event type, including ones added later, or a list of types.
+
+        The answer carries the endpoint's signing `secret`. It is shown this once and never
+        again: store it to verify deliveries. payflow keeps it encrypted at rest. A merchant can
+        have at most 16 endpoints (`webhook_endpoint_limit_reached`).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookEndpoint'
+      responses:
+        '201':
+          description: Registered. The only answer that shows the secret.
+          headers:
+            Location:
+              required: true
+              description: The endpoint's path.
+              schema:
+                type: string
+                pattern: '^/v1/webhook_endpoints/[0-9a-f-]{36}$'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedWebhookEndpoint'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '409':
+          $ref: '#/components/responses/WebhookCreateConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/KeyReused'
+    get:
+      operationId: listWebhookEndpoints
+      summary: List the merchant's webhook endpoints, oldest first
+      description: Every endpoint the merchant has, at most 16, so there are no pages.
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The endpoints, without their secrets.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    maxItems: 16
+                    items:
+                      $ref: '#/components/schemas/WebhookEndpoint'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /v1/webhook_endpoints/{id}:
+    get:
+      operationId: getWebhookEndpoint
+      summary: Get a webhook endpoint
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The endpoint, without its secret.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookEndpointNotFound'
+    post:
+      operationId: updateWebhookEndpoint
+      summary: Change a webhook endpoint
+      description: |
+        Each field given replaces the stored one; at least one is needed. An empty `description`
+        clears it. A `DISABLED` endpoint keeps its settings but receives nothing until it is
+        enabled again. The secret doesn't change.
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookEndpoint'
+      responses:
+        '200':
+          description: The endpoint as it now is.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookEndpointNotFound'
+        '409':
+          $ref: '#/components/responses/KeyInUse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/KeyReused'
+    delete:
+      operationId: deleteWebhookEndpoint
+      summary: Delete a webhook endpoint
+      description: |
+        The endpoint receives nothing more and its secret is erased. Deleting it again answers
+        404.
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Deleted.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [id, deleted]
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  deleted:
+                    type: boolean
+                    description: Always `true`.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookEndpointNotFound'
 components:
   securitySchemes:
     apiKey:
@@ -360,6 +532,13 @@ components:
       description: A merchant API key from `payflow keygen`.
   parameters:
     OrderId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WebhookEndpointId:
       name: id
       in: path
       required: true
@@ -512,6 +691,43 @@ components:
           $ref: '#/components/headers/RequestId'
         Idempotent-Replayed:
           $ref: '#/components/headers/IdempotentReplayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    WebhookCreateConflict:
+      description: |
+        The merchant already has 16 webhook endpoints (`webhook_endpoint_limit_reached`; delete
+        one first), or a request with this Idempotency-Key is still running
+        (`idempotency_key_in_use`).
+      x-error-codes: [webhook_endpoint_limit_reached, idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    WebhookEndpointNotFound:
+      description: No such webhook endpoint for this merchant, or it was deleted (`not_found`).
+      x-error-codes: [not_found]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    KeyInUse:
+      description: A request with this Idempotency-Key is still running (`idempotency_key_in_use`).
+      x-error-codes: [idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
       content:
         application/json:
           schema:
@@ -841,6 +1057,119 @@ components:
         occurred_at:
           type: string
           format: date-time
+    WebhookEventType:
+      type: string
+      description: |
+        An event type an endpoint can subscribe to, or `*` for every type. Each is an event the
+        order's stream carries: `order.created`, `order.cancel_requested`, one per state the
+        order can move to, and one per refund change.
+      enum:
+        ['*', order.created, order.cancel_requested, order.inventory_reserved,
+         order.payment_authorized, order.payment_captured, order.completed,
+         order.cancelling_shipment, order.reversing_payment, order.releasing_inventory,
+         order.failed, order.cancelled, order.partially_refunded, order.refunded,
+         refund.created, refund.succeeded, refund.failed]
+    CreateWebhookEndpoint:
+      type: object
+      additionalProperties: false
+      required: [url, enabled_events]
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          description: |
+            An absolute `https` (or `http`) URL with a host, without a user name, password or
+            fragment. Scheme and host are stored lowercase.
+        enabled_events:
+          type: array
+          minItems: 1
+          maxItems: 32
+          description: '`["*"]` alone, or event types; repeats are dropped.'
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        description:
+          type: string
+          maxLength: 256
+    UpdateWebhookEndpoint:
+      type: object
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+        enabled_events:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        description:
+          type: string
+          maxLength: 256
+          description: An empty string clears it.
+        state:
+          type: string
+          enum: [ENABLED, DISABLED]
+    WebhookEndpoint:
+      type: object
+      additionalProperties: false
+      required: [id, url, enabled_events, state, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+        description:
+          type: string
+          description: Present when one was given.
+        enabled_events:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        state:
+          type: string
+          enum: [ENABLED, DISABLED]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreatedWebhookEndpoint:
+      type: object
+      additionalProperties: false
+      required: [id, url, enabled_events, state, secret, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+        description:
+          type: string
+          description: Present when one was given.
+        enabled_events:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/WebhookEventType'
+        state:
+          type: string
+          enum: [ENABLED, DISABLED]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        secret:
+          type: string
+          pattern: '^whsec_[A-Za-z0-9_-]{43}$'
+          description: The signing secret. Shown only in this answer.
     Error:
       type: object
       additionalProperties: false
@@ -858,7 +1187,7 @@ components:
                 [invalid_argument, invalid_cursor, unauthenticated, not_found, method_not_allowed,
                  not_acceptable, order_not_cancellable, order_not_refundable,
                  order_reference_in_use, refund_exceeds_captured, refund_exceeds_purchased,
-                 idempotency_key_in_use, payload_too_large,
+                 webhook_endpoint_limit_reached, idempotency_key_in_use, payload_too_large,
                  unsupported_media_type, idempotency_key_reused, internal, unavailable]
             message:
               type: string

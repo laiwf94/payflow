@@ -23,6 +23,7 @@ public enum ApiError {
   ORDER_REFERENCE_IN_USE(409, "order_reference_in_use"),
   REFUND_EXCEEDS_CAPTURED(409, "refund_exceeds_captured"),
   REFUND_EXCEEDS_PURCHASED(409, "refund_exceeds_purchased"),
+  WEBHOOK_ENDPOINT_LIMIT_REACHED(409, "webhook_endpoint_limit_reached"),
   IDEMPOTENCY_KEY_IN_USE(409, "idempotency_key_in_use"),
   PAYLOAD_TOO_LARGE(413, "payload_too_large"),
   UNSUPPORTED_MEDIA_TYPE(415, "unsupported_media_type"),
