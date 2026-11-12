@@ -5,6 +5,7 @@ import static org.awaitility.Awaitility.await;
 
 import io.github.laiwf94.payflow.sim.FaultPlan;
 import io.github.laiwf94.payflow.sim.Faults;
+import io.github.laiwf94.payflow.sim.InventorySimulator;
 import io.github.laiwf94.payflow.support.Api;
 import io.github.laiwf94.payflow.support.TestKeys;
 import java.net.URI;
@@ -38,6 +39,7 @@ class OrderApiTest {
 
   @LocalServerPort int port;
   @Autowired Faults faults;
+  @Autowired InventorySimulator inventory;
 
   private Api api;
 
@@ -103,6 +105,10 @@ class OrderApiTest {
   void cancelBeforeCaptureAndConflictsAfter() {
     faults.set("inventory.reserve", new FaultPlan(0, 0, 0, Duration.ofMillis(800), List.of()));
     String id = create(Api.orderBody());
+    // The simulator applies the reservation and then holds its answer, so from here the saga is
+    // waiting on the call for 800 ms. Cancelling sooner could find the order not yet claimed and
+    // let the worker cancel it outright, before the repeat arrives (#83).
+    await().atMost(Duration.ofSeconds(10)).until(() -> inventory.reservation(id).isPresent());
     Api.Response c = api.post("/v1/orders/" + id + "/cancel", null);
     assertThat(c.status()).isEqualTo(202);
     assertThat(c.json().get("cancel_requested").asBoolean()).isTrue();
