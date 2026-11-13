@@ -31,6 +31,7 @@ public class OutboxConfig {
       OutboxSignal signal,
       Clock clock,
       ObjectProvider<CrashPoints> crash,
+      ObjectProvider<RelayListener> listener,
       MeterRegistry meters) {
     return new OutboxRelay(
         jdbc,
@@ -40,6 +41,7 @@ public class OutboxConfig {
         signal,
         clock,
         crash.getIfAvailable(() -> CrashPoints.NONE),
+        listener.getIfAvailable(() -> RelayListener.NONE),
         meters);
   }
 }

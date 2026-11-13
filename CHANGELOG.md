@@ -83,7 +83,7 @@ notes on GitHub link here.
   one, `POST /v1/webhook_endpoints/{id}` changes `url`, `enabled_events`, `description` or
   `state` (`ENABLED`, `DISABLED`), and `DELETE` removes one. A merchant has at most 16; one more
   is the new `409 webhook_endpoint_limit_reached`. Migration V18 adds `webhook_endpoints`,
-  `webhook_deliveries` and `webhook_attempts`. Delivery itself follows later in the week.
+  `webhook_deliveries` and `webhook_attempts`.
 - Webhooks go to public addresses only (#25). A URL whose host is, or resolves to, a loopback,
   private, link-local, cloud metadata, CGNAT, multicast, documentation or reserved address,
   including one wrapped in IPv6 (`::ffff:169.254.169.254`, NAT64, 6to4), is a `400` at
@@ -93,6 +93,15 @@ notes on GitHub link here.
   SNI, follows no redirects, and caps an attempt at 10 s, 16 KiB of head and 1 KiB of body
   (`payflow.webhooks.*`). `PAYFLOW_WEBHOOK_ALLOWED_NETWORKS` lets listed networks through for a
   development stack.
+- Webhook delivery (#25). The outbox relay creates a delivery of each event it publishes to every
+  enabled endpoint whose filter takes it, in the same transaction, once per event and endpoint.
+  `WebhookDispatcher` POSTs the event's JSON signed in `Payflow-Signature: t=...,v1=...`
+  (HMAC-SHA256 over the timestamp, `.` and the raw body), with `Payflow-Event-Id`,
+  `Payflow-Event-Type`, `Payflow-Delivery-Id` and `Payflow-Delivery-Attempt`. A 2xx settles it;
+  anything else retries with full-jitter backoff (5 s doubling to 1 h) for 3 days, every attempt
+  recorded in `webhook_attempts`. One order's events reach each endpoint in order; other orders
+  and endpoints don't wait, and one instance sends at most 8 deliveries to an endpoint at once.
+  Deleting an endpoint gives up its pending deliveries. New settings under `payflow.webhooks.*`.
 - Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
   rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
   idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each

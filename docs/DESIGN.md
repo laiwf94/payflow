@@ -553,8 +553,9 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 ## Merchant webhooks
 
 Merchants learn about their orders without polling by registering webhook endpoints. This part is
-being built over the week of #25; so far it has the endpoints themselves, the tables that
-deliveries and their attempts will be recorded in, and the sender that will make every attempt.
+being built over the week of #25; so far it has the endpoints themselves, the sender that makes
+every attempt, and the dispatcher that turns each relayed event into signed, retried, ordered
+deliveries.
 
 ### Endpoints
 
@@ -602,14 +603,69 @@ endpoint and the same secret, byte for byte; the database holds neither in the c
 
 ### Deliveries and attempts
 
-`webhook_deliveries` will hold one row per event and endpoint (unique on the pair, so an event the
-relay hands over twice is delivered once), with the event's payload, because the outbox row it
-came from is deleted after relaying and a delivery must stay replayable; its order and place in
-the order's stream, so one order's events can be kept in order per endpoint; and the schedule a
-dispatcher needs. `webhook_attempts` will record every try: when, how long, the status and the
-first 1 KiB of the body, or why there was no HTTP answer. The CHECK constraints refuse a pending
-delivery with no schedule, a settled one with one, and an attempt with both or neither of a
-status and an error; `WebhookSchemaTest` tries each with raw SQL.
+The outbox relay is what feeds webhooks. In the transaction that marks a batch of events
+published, after Kafka has acknowledged it, a `RelayListener` inserts one `webhook_deliveries` row
+per event and per live, `ENABLED` endpoint of the event's merchant whose filter takes its type,
+due at once. So a delivery exists exactly when its event was published: a batch whose commit fails
+is published and fanned out again, and the unique (endpoint, event) pair drops the second copy, so
+an event the relay hands over twice is delivered once. An endpoint registered after an event was
+relayed doesn't get it, and neither does one that was disabled at the time. The row carries the
+event's payload, because the outbox row it came from is deleted after its retention and a
+delivery must stay replayable; and its order and place in the order's stream (`order_seq`, the
+order's version), for ordering. `webhook_attempts` records every try: when it started, how long it
+took, the status and the first 1 KiB of the body, or why there was no HTTP answer. The CHECK
+constraints refuse a pending delivery with no schedule, a settled one with one, and an attempt
+with both or neither of a status and an error; `WebhookSchemaTest` tries each with raw SQL.
+
+### Delivering
+
+`WebhookDispatcher` is a claim loop like the saga's. A dispatcher thread claims due deliveries,
+oldest due first, with `FOR UPDATE SKIP LOCKED`, and leases each by bumping its `attempts` and
+pushing `next_attempt_at` out by `payflow.webhooks.lease` (60 s, at least the attempt timeout plus
+5 s). The attempt number is the fence: an outcome is written only while the delivery is still
+pending at the number its claim took, so an instance whose lease ran out can't overwrite the
+attempt of the instance that claimed it next. Each claim goes to a virtual thread, at most
+`concurrency` (64) at once.
+
+- **Signed.** Each attempt opens the endpoint's sealed secret and sends the stored payload with
+  `Payflow-Signature: t=<unix seconds>,v1=<hex>`, where the hex is HMAC-SHA256, keyed with the
+  whole `whsec_...` secret, over the timestamp, a full stop and the raw body. Signing the
+  timestamp lets a receiver refuse an old request replayed at it (`WebhookSignature.verify`
+  accepts five minutes either way); signing the bytes means the receiver checks what arrived
+  before parsing it. A header can carry several `v1` values, for rotating secrets. Alongside
+  it go `Payflow-Event-Id` (what a receiver deduplicates by), `Payflow-Event-Type`,
+  `Payflow-Delivery-Id` and `Payflow-Delivery-Attempt`.
+- **Settled by a 2xx.** Anything else (a 3xx, which is never followed, a 4xx, a 5xx) and no answer
+  at all (refused address, DNS, connect, TLS, timeout) is a failed attempt, recorded with its
+  status or reason, and the delivery is retried.
+- **Retried for three days.** The wait before attempt *n* is uniform in [0, min(1 h, 5 s × 2^n)]
+  (full jitter, the saga's `Backoff`), so a fleet of instances doesn't retry an endpoint that
+  was down in lockstep when it comes back. Retries go on until `retry-window` (3 days) after the
+  event; a retry that would land past the window lands on its edge instead, and an attempt that
+  fails at or after it gives the delivery up as `FAILED`. At the 1 h cap that is about 150
+  attempts for an endpoint that never answers; `WebhookDispatcherTest` drives one through the
+  whole window (at a 10-minute cap, several hundred attempts) and checks that every attempt is
+  logged and the last is exactly on the edge.
+- **In order per order and endpoint.** A delivery is due only when no earlier event of the same
+  order is still pending for the same endpoint, whether being sent or waiting to retry, so each
+  endpoint sees one order's events in the order they happened. The check is a `NOT EXISTS` on
+  the (endpoint, order, seq) index inside the claim; since a delivery in flight stays `PENDING`,
+  two instances can't send one order's events to an endpoint out of order either. Other orders
+  aren't held up, and neither are other endpoints: a failing endpoint holds back only its own
+  copies. A delivery that was given up no longer holds back the ones after it.
+- **Fair between endpoints.** One instance sends at most `per-endpoint` (8) deliveries to an
+  endpoint at once. The claim skips endpoints already at that number, and what a batch brings
+  past it is handed straight back with its attempt returned. An endpoint that hangs until every
+  attempt times out therefore holds 8 of the 64 slots; `WebhookDispatcherTest` has a slow
+  endpoint at its limit of 2 while a second endpoint's six deliveries all land.
+- **Disabled and deleted endpoints.** A disabled endpoint's pending deliveries wait, and go out
+  once it is enabled again; while disabled it gets no new ones. Deleting an endpoint gives up
+  its pending deliveries in the same transaction.
+- **Stopping.** `stop()` stops claiming and gives attempts in flight `shutdown-grace` (3 s) to
+  finish. One still waiting for its answer then is recorded as an attempt cut short
+  (`shutdown: payflow stopped before the answer arrived`) and made due at once, so the next
+  instance sends it on its first poll. The merchant may get that event twice, which the
+  at-least-once contract allows; a crash instead leaves the lease to run out (60 s).
 
 ### Sending without reaching inside
 
@@ -720,6 +776,8 @@ response without the other fails the build.
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
 | Malformed event on the topic | Moved to the dead-letter topic | Consumer continues |
+| Merchant's webhook endpoint down, slow or answering non-2xx | Attempt logged; that order's later events wait for that endpoint | Retried with backoff for 3 days, then given up; other orders and endpoints carry on |
+| payflow killed mid-webhook | Delivery lease left behind | Lease expires (60 s); the next instance sends it again, and the receiver deduplicates by event id |
 | Postgres down | API requests get 503 `unavailable` (a POST before doing anything, or rolled back if the connection drops mid-request); workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
 | Client retries a POST | Replay of the first response | Idempotency key |
 | Wrong credentials for a provider | Retried as transient, error logged | Fix configuration; orders resume |
@@ -741,6 +799,9 @@ response without the other fails the build.
 | Webhook endpoints per merchant | 16 | `WebhookEndpointService.MAX_ENDPOINTS` |
 | Webhook endpoint URL / description / event types | 2,048 / 256 characters / 1-32 | `WebhookUrls`, `WebhookEndpointService`, `WebhookEvents` |
 | Webhook attempt: whole / connect / head / body kept | 10 s / 3 s / 16 KiB / 1 KiB | `payflow.webhooks.*`, `SafeHttpSender` |
+| Webhook retries | full jitter from 5 s, capped at 1 h, for 3 days after the event | `payflow.webhooks.retry-*` |
+| Webhook attempts in flight per instance: all / per endpoint | 64 / 8 | `payflow.webhooks.concurrency`, `per-endpoint` |
+| Webhook lease / shutdown grace | 60 s / 3 s | `payflow.webhooks.lease`, `shutdown-grace` |
 | Secret sealing keys | 32 bytes each, ids of 1-32 `a-z 0-9 _ -` | `payflow.secret-keys`, `SecretBox` |
 | Idempotency lock timeout / retention | 60 s / 24 h | `payflow.idempotency.*` |
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |

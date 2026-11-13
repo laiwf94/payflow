@@ -58,14 +58,20 @@ public class WebhookEndpointService {
   }
 
   private final WebhookEndpointRepository repo;
+  private final WebhookDeliveryRepository deliveries;
   private final SecretBox box;
   private final Clock clock;
   private final SafeHttpSender sender;
   private final SecureRandom random = new SecureRandom();
 
   public WebhookEndpointService(
-      WebhookEndpointRepository repo, SecretBox box, Clock clock, SafeHttpSender sender) {
+      WebhookEndpointRepository repo,
+      WebhookDeliveryRepository deliveries,
+      SecretBox box,
+      Clock clock,
+      SafeHttpSender sender) {
     this.repo = repo;
+    this.deliveries = deliveries;
     this.box = box;
     this.clock = clock;
     this.sender = sender;
@@ -158,9 +164,12 @@ public class WebhookEndpointService {
    */
   @Transactional(noRollbackFor = NotFound.class)
   public void delete(String merchant, UUID id) {
-    if (!repo.delete(merchant, id, clock.instant())) {
+    Instant now = clock.instant();
+    if (!repo.delete(merchant, id, now)) {
       throw new NotFound();
     }
+    // Nothing more goes to it, so nothing should wait to.
+    deliveries.failPending(id, now);
   }
 
   /**

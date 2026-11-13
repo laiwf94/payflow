@@ -91,6 +91,12 @@ private, link-local, metadata or CGNAT address is refused at registration and on
 a development stack whose merchant server is on a private network, list that network in
 `PAYFLOW_WEBHOOK_ALLOWED_NETWORKS` (CIDR, comma-separated).
 
+Each event goes to every enabled endpoint whose filter takes it, as a `POST` of the event's JSON
+signed in `Payflow-Signature: t=<unix seconds>,v1=<hex>`: HMAC-SHA256, keyed with the endpoint's
+secret, over the timestamp, a `.` and the raw body. Answer with a 2xx; anything else is retried
+with backoff for 3 days. One order's events reach an endpoint in order, and delivery is at least
+once, so deduplicate by `Payflow-Event-Id`.
+
 Configuration is environment variables; the main ones are listed in
 [application.yml](src/main/resources/application.yml) and the limits in
 [docs/DESIGN.md](docs/DESIGN.md#limits).
@@ -191,13 +197,14 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Rolling restart | Outside the gate, against the compose stack: `examples/rolling-restart.py` pages 10,000 orders of two merchants across two instances while each is stopped with `SIGTERM` and started again under load, and checks every listing and every provider ledger. |
 | Webhook endpoints | Over HTTP: the secret is in the `201` and nowhere else, neither in any read nor in the database (the endpoint's row and the stored idempotent answer are scanned for it), yet it opens again to sign; a retry replays the same endpoint and secret; changes, deletion, merchant isolation, and ten racing creates against twelve endpoints make exactly four. Raw SQL can't store a bad state, URL, event filter, secret, delivery schedule or attempt. Every bit of a sealed secret is covered by its tag, and a secret moved to another row doesn't open. Loopback, private, metadata, CGNAT, IPv4-mapped and other non-public hosts are refused at registration and on update. |
 | Webhook sender | Real sockets on loopback: a resolver that rebinds after the first answer is looked up once per send and the connection goes to the checked address; one bad address among several refuses the send; mapped, NAT64 and 6to4 literals are judged by the IPv4 address inside; a redirect is an answer, not followed; a head or body sent a byte at a time is cut off at the deadline; a 4 MiB body by length, until close and chunked is read only to 1 KiB; TLS carries the host in SNI and refuses a certificate for another name. Every address range is tested on its own. |
+| Webhook delivery | Real Postgres and a stand-in merchant server on loopback: the relay fans each event out to every enabled endpoint whose filter takes it, once even when handed over twice; the signature checks out over the exact bytes sent; 500, 302 and 429 retry with full-jitter backoff and every attempt is logged; a delivery that never succeeds is retried to the edge of its window and given up; one order's events arrive in order while other orders and endpoints carry on; a slow endpoint holds only its own slots; a claim that outlived its lease is fenced; addresses are checked again on every send; a stop hands back an attempt still waiting for its answer. |
 | Contract | The OpenAPI document and Spring's routes must match both ways. Every documented response and every error code it lists is produced by a real request and checked against its schema and headers, nothing undocumented comes back, and the spec's codes are exactly the ones the code can send. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 446 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 463 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 
@@ -239,7 +246,8 @@ src/main/java/io/github/laiwf94/payflow/
   timeline    idempotent consumer and the order timeline
   idempotency Idempotency-Key filter and store
   security    API keys, and the box that seals secrets at rest
-  webhook     merchant webhook endpoints, event types, URL rules and the SSRF-safe sender
+  webhook     merchant webhook endpoints, event types, URL rules, the SSRF-safe sender, signing
+              and the delivery dispatcher
   api         controllers, request ids, errors, body limit
   sim         the fake providers and their control API
 src/main/resources/db/migration   Flyway migrations

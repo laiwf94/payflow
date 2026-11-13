@@ -36,6 +36,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <p>The row locks are held while Kafka acknowledges, bounded by {@code sendTimeout}. If the send
  * or the commit fails the rows stay unpublished and go out again: duplicates are possible, gaps are
  * not. Consumers deduplicate by event id.
+ *
+ * <p>A {@link RelayListener} hears about each batch in the same transaction; that is how merchant
+ * webhooks get their deliveries.
  */
 public class OutboxRelay implements SmartLifecycle {
 
@@ -61,6 +64,7 @@ public class OutboxRelay implements SmartLifecycle {
   private final OutboxSignal signal;
   private final Clock clock;
   private final CrashPoints crash;
+  private final RelayListener listener;
   private final Counter published;
   private final AtomicLong pending = new AtomicLong();
   private final AtomicLong oldestAgeSeconds = new AtomicLong();
@@ -77,6 +81,7 @@ public class OutboxRelay implements SmartLifecycle {
       OutboxSignal signal,
       Clock clock,
       CrashPoints crash,
+      RelayListener listener,
       MeterRegistry meters) {
     this.jdbc = jdbc;
     this.tx = tx;
@@ -85,6 +90,7 @@ public class OutboxRelay implements SmartLifecycle {
     this.signal = signal;
     this.clock = clock;
     this.crash = crash;
+    this.listener = listener;
     this.published = meters.counter("payflow.outbox.published");
     // Read by the scrape; refreshed by the relay loop so a scrape never queries the database.
     Gauge.builder("payflow.outbox.pending", pending, AtomicLong::get)
@@ -163,10 +169,13 @@ public class OutboxRelay implements SmartLifecycle {
       throw new IllegalStateException("Kafka did not acknowledge the batch", e);
     }
     crash.at("relay:sent");
+    Instant now = clock.instant();
+    List<Long> ids = rows.stream().map(Row::id).toList();
     jdbc.sql("UPDATE outbox SET published_at = :now WHERE id = ANY(:ids)")
-        .param("now", clock.instant().atOffset(ZoneOffset.UTC))
-        .param("ids", rows.stream().map(Row::id).toArray(Long[]::new))
+        .param("now", now.atOffset(ZoneOffset.UTC))
+        .param("ids", ids.toArray(Long[]::new))
         .update();
+    listener.relayed(ids, now);
     published.increment(rows.size());
     return rows.size();
   }

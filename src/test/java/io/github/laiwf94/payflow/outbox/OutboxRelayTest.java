@@ -96,6 +96,7 @@ class OutboxRelayTest {
         signal,
         clock,
         crash,
+        RelayListener.NONE,
         new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
   }
 
@@ -263,6 +264,7 @@ class OutboxRelayTest {
             signal,
             clock,
             CrashPoints.NONE,
+            RelayListener.NONE,
             new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     try {
       assertThatThrownBy(r::relayOnce).isInstanceOf(RuntimeException.class);
@@ -355,7 +357,8 @@ class OutboxRelayTest {
   void backlogGaugesTrackUnpublishedEvents() {
     var meters = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
     OutboxRelay r =
-        new OutboxRelay(jdbc, tx, kafka, props(), signal, clock, CrashPoints.NONE, meters);
+        new OutboxRelay(
+            jdbc, tx, kafka, props(), signal, clock, CrashPoints.NONE, RelayListener.NONE, meters);
     eventsFor(3);
     clock.advance(Duration.ofSeconds(42));
     r.refreshBacklog();
