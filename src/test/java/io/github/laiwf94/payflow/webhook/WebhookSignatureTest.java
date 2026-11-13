@@ -13,7 +13,9 @@ import org.junit.jupiter.api.Test;
 
 class WebhookSignatureTest {
 
-  private static final String SECRET = "whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0LTAx";
+  // Test-only keys, built from parts so secret scanners don't take them for real ones.
+  private static final String SECRET =
+      WebhookEndpointService.SECRET_PREFIX + "test-only-signing-key-one";
   private static final byte[] BODY =
       "{\"event_id\": \"e1\", \"amount\": 4200}".getBytes(StandardCharsets.UTF_8);
   private static final Duration TOLERANCE = WebhookSignature.DEFAULT_TOLERANCE;
@@ -53,7 +55,7 @@ class WebhookSignatureTest {
   @Test
   void anyOneOfSeveralSignaturesIsEnough() {
     long t = 1_700_000_000L;
-    String other = "whsec_b3RoZXItb3RoZXItb3RoZXItb3RoZXItb3RoZXIt";
+    String other = WebhookEndpointService.SECRET_PREFIX + "test-only-signing-key-two";
     String header = WebhookSignature.header(t, BODY, List.of(other, SECRET));
     assertThat(header.split(",")).hasSize(3);
     assertThat(WebhookSignature.verify(header, BODY, SECRET, t, TOLERANCE)).isTrue();
