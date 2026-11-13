@@ -84,6 +84,15 @@ notes on GitHub link here.
   `state` (`ENABLED`, `DISABLED`), and `DELETE` removes one. A merchant has at most 16; one more
   is the new `409 webhook_endpoint_limit_reached`. Migration V18 adds `webhook_endpoints`,
   `webhook_deliveries` and `webhook_attempts`. Delivery itself follows later in the week.
+- Webhooks go to public addresses only (#25). A URL whose host is, or resolves to, a loopback,
+  private, link-local, cloud metadata, CGNAT, multicast, documentation or reserved address,
+  including one wrapped in IPv6 (`::ffff:169.254.169.254`, NAT64, 6to4), is a `400` at
+  registration and on update. A host written as a number in any other form than `a.b.c.d`
+  (`2130706433`, `0177.0.0.1`) is a `400` too. The new sender (`SafeHttpSender`) resolves once
+  per attempt, checks every address, connects to a checked one with the URL's host in `Host` and
+  SNI, follows no redirects, and caps an attempt at 10 s, 16 KiB of head and 1 KiB of body
+  (`payflow.webhooks.*`). `PAYFLOW_WEBHOOK_ALLOWED_NETWORKS` lets listed networks through for a
+  development stack.
 - Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
   rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
   idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each

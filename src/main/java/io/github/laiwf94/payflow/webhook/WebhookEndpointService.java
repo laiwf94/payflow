@@ -60,12 +60,15 @@ public class WebhookEndpointService {
   private final WebhookEndpointRepository repo;
   private final SecretBox box;
   private final Clock clock;
+  private final SafeHttpSender sender;
   private final SecureRandom random = new SecureRandom();
 
-  public WebhookEndpointService(WebhookEndpointRepository repo, SecretBox box, Clock clock) {
+  public WebhookEndpointService(
+      WebhookEndpointRepository repo, SecretBox box, Clock clock, SafeHttpSender sender) {
     this.repo = repo;
     this.box = box;
     this.clock = clock;
+    this.sender = sender;
   }
 
   /**
@@ -77,7 +80,7 @@ public class WebhookEndpointService {
   @Transactional(noRollbackFor = {IllegalArgumentException.class, LimitReached.class})
   public Created create(
       String merchant, String url, List<String> enabledEvents, String description) {
-    String normalUrl = WebhookUrls.normalize(url);
+    String normalUrl = checkedUrl(url);
     List<String> events = WebhookEvents.normalize(enabledEvents);
     String desc = description(description);
     repo.lockMerchant(merchant);
@@ -127,7 +130,7 @@ public class WebhookEndpointService {
       throw new IllegalArgumentException(
           "give at least one of url, enabled_events, description or state");
     }
-    String url = changes.url() == null ? null : WebhookUrls.normalize(changes.url());
+    String url = changes.url() == null ? null : checkedUrl(changes.url());
     List<String> events =
         changes.enabledEvents() == null ? null : WebhookEvents.normalize(changes.enabledEvents());
     WebhookEndpoint before = repo.find(merchant, id).orElseThrow(NotFound::new);
@@ -170,6 +173,21 @@ public class WebhookEndpointService {
   public String signingSecret(String merchant, UUID id) {
     SecretBox.Sealed sealed = repo.secret(merchant, id).orElseThrow(NotFound::new);
     return box.open(sealed, WebhookEndpointRepository.secretContext(merchant, id));
+  }
+
+  /**
+   * The URL as stored, refused if its host is an address webhooks may not go to or resolves to one
+   * now. A host that doesn't resolve yet is accepted; every send checks again.
+   */
+  private String checkedUrl(String url) {
+    String normal = WebhookUrls.normalize(url);
+    sender
+        .refusal(normal)
+        .ifPresent(
+            why -> {
+              throw new IllegalArgumentException("url: " + why);
+            });
+    return normal;
   }
 
   /** Null for no description; empty clears one; otherwise 1-256 characters, no control chars. */

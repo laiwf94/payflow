@@ -71,6 +71,10 @@ class WebhookRulesTest {
         .isEqualTo("https://hooks.example.com/Path/To?Key=A%20B&x=1");
     assertThat(WebhookUrls.normalize("http://hooks.example.com:8443/in"))
         .isEqualTo("http://hooks.example.com:8443/in");
+    assertThat(WebhookUrls.normalize("http://93.184.215.14:8080/in"))
+        .isEqualTo("http://93.184.215.14:8080/in");
+    assertThat(WebhookUrls.normalize("https://1st.example.com"))
+        .isEqualTo("https://1st.example.com");
     assertThat(WebhookUrls.normalize("https://[2001:DB8::1]:9000/x"))
         .isEqualTo("https://[2001:db8::1]:9000/x");
     String longest = "https://h.example/" + "a".repeat(WebhookUrls.MAX_LENGTH - 18);
@@ -99,6 +103,14 @@ class WebhookRulesTest {
             "https://hooks.example.com/é",
             "https://hooks.example.com/\n",
             "https://hooks.example.com/%zz",
+            "http://2130706433/",
+            "http://0177.0.0.1/",
+            "http://0x7f.1/",
+            "http://0x7f000001/",
+            "http://127.1/",
+            "http://1.2.3.256/",
+            "http://01.2.3.4/",
+            "http://hooks.example.123/",
             "https://h.example/" + "a".repeat(WebhookUrls.MAX_LENGTH - 17))) {
       assertThatThrownBy(() -> WebhookUrls.normalize(bad))
           .as(bad)

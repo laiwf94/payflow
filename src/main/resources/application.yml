@@ -66,6 +66,11 @@ payflow:
   # open). Every instance needs the same list. Unset means a random per-process key, and those
   # secrets are unreadable after a restart.
   secret-keys: ${PAYFLOW_SECRET_KEYS:}
+  webhooks:
+    # Networks webhooks may go to although they aren't public, as a comma-separated CIDR list
+    # (172.18.0.0/16,::1/128); only for a development stack whose merchant server is on a private
+    # network. Empty means public addresses only.
+    allowed-networks: ${PAYFLOW_WEBHOOK_ALLOWED_NETWORKS:}
   simulator:
     enabled: ${PAYFLOW_SIMULATOR_ENABLED:true}
     key: ${PAYFLOW_SIMULATOR_KEY:}

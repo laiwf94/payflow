@@ -346,4 +346,45 @@ class WebhookEndpointApiTest {
     assertThat(repeated.json().get("enabled_events").size()).isEqualTo(1);
     assertThat(create(body("https://h.example", "[\"*\"]")).json().has("description")).isFalse();
   }
+
+  @Test
+  void registrationRefusesHostsThatAreNotPublic() {
+    Map<String, String> refused =
+        Map.of(
+            "http://127.0.0.1:8080/in", "a loopback address",
+            "http://localhost/in", "a loopback address",
+            "http://169.254.169.254/latest/meta-data", "the cloud metadata address",
+            "http://10.1.2.3/", "a private address",
+            "http://100.64.0.1/", "a shared (CGNAT) address",
+            "http://[::1]/", "a loopback address",
+            "http://[::ffff:192.168.1.1]/", "a private address",
+            "http://[fd00::1]/", "a private (unique local) address",
+            "http://[fe80::1]/", "a link-local address",
+            "http://0.0.0.0/", "an unspecified address");
+    refused.forEach(
+        (url, why) -> {
+          Api.Response r = create(body(url, "[\"*\"]"));
+          assertThat(r.status()).as(url + " -> " + r.body()).isEqualTo(400);
+          assertThat(r.errorCode()).isEqualTo("invalid_argument");
+          assertThat(r.json().get("error").get("message").asString())
+              .as(url)
+              .startsWith("url: ")
+              .contains(why)
+              .endsWith("webhooks go to public addresses only");
+        });
+    assertThat(jdbc.sql("SELECT count(*) FROM webhook_endpoints").query(Integer.class).single())
+        .isZero();
+
+    // A changed URL is checked the same way, and a refused change leaves the endpoint as it was.
+    String id = create(BODY).json().get("id").asString();
+    Api.Response r = api.post(HOOKS + "/" + id, "{\"url\":\"http://192.168.0.10/hook\"}");
+    assertThat(r.status()).as(r.body()).isEqualTo(400);
+    assertThat(r.json().get("error").get("message").asString()).contains("a private address");
+    assertThat(api.get(HOOKS + "/" + id).json().get("url").asString())
+        .isEqualTo("https://hooks.example.com/payflow");
+
+    // A public literal is fine, and so is a name that doesn't resolve yet: each send checks again.
+    assertThat(create(body("http://93.184.215.14/in", "[\"*\"]")).status()).isEqualTo(201);
+    assertThat(create(body("https://not-yet.invalid/in", "[\"*\"]")).status()).isEqualTo(201);
+  }
 }

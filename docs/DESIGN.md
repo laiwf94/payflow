@@ -553,8 +553,8 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 ## Merchant webhooks
 
 Merchants learn about their orders without polling by registering webhook endpoints. This part is
-being built over the week of #25; so far it has the endpoints themselves and the tables that
-deliveries and their attempts will be recorded in.
+being built over the week of #25; so far it has the endpoints themselves, the tables that
+deliveries and their attempts will be recorded in, and the sender that will make every attempt.
 
 ### Endpoints
 
@@ -566,8 +566,12 @@ the same constants and `OrderState` that the outbox uses, so a new state can't b
 also becoming subscribable, and `OpenApiContractTest` holds the spec's enum to it. Unknown types,
 `*` mixed with others and empty filters are 400s; repeats are dropped. The URL must be an
 absolute `http` or `https` URL with a host and no user info or fragment, at most 2,048
-characters; scheme and host are lowercased. Which addresses that host may resolve to is the
-sender's check, at registration and again on every send, and comes with it. Changes are a `POST`
+characters; scheme and host are lowercased, and an IPv4 host must be four decimal numbers
+(`2130706433`, `0177.0.0.1` and `0x7f.1` are refused, since clients disagree on what they mean).
+Which addresses that host may resolve to is [the sender's check](#sending-without-reaching-inside),
+made at registration and again on every send: an address the sender would refuse, or a name
+that resolves to one now, is a 400 that says which address and why. A name that doesn't resolve
+yet is accepted, since every send checks again. Changes are a `POST`
 to the endpoint (as on Stripe, so they go through idempotency keys like every other write): any of
 `url`, `enabled_events`, `description` and `state` (`ENABLED` or `DISABLED`). `DELETE` removes
 it, and a second `DELETE` is a 404.
@@ -606,6 +610,52 @@ dispatcher needs. `webhook_attempts` will record every try: when, how long, the 
 first 1 KiB of the body, or why there was no HTTP answer. The CHECK constraints refuse a pending
 delivery with no schedule, a settled one with one, and an attempt with both or neither of a
 status and an error; `WebhookSchemaTest` tries each with raw SQL.
+
+### Sending without reaching inside
+
+A webhook URL is chosen by the merchant, and payflow runs next to its database, its providers and
+often a cloud metadata service, so the sender must never become a way to reach them (server-side
+request forgery). `SafeHttpSender` is a small HTTP/1.1 client over a plain socket, because
+off-the-shelf clients look the host up themselves, after any check, and may follow redirects or
+go through a proxy that looks it up again:
+
+- **One lookup, every address checked.** Each send resolves the host once and checks every address
+  it gets against `AddressPolicy`. One refused address refuses the send, so a name that mixes a
+  public and a private answer gets nothing. The connection then goes to one of those checked
+  addresses (in order, the next if one refuses the connection), so a name that answers
+  differently on a second lookup (DNS rebinding) never gets one. The next send looks up afresh
+  and is checked afresh. No proxy is ever used.
+- **What is refused.** Public unicast only. In IPv4: `0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`,
+  `169.254/16` (link-local, which holds the metadata address `169.254.169.254`), `172.16/12`,
+  `192.0.0/24`, the documentation and benchmarking ranges, `192.88.99/24`, `192.168/16`,
+  multicast, `240/4` and broadcast. In IPv6, an address that carries an IPv4 address (IPv4-mapped
+  `::ffff:0:0/96`, IPv4-translated, NAT64 `64:ff9b::/96`, IPv4-compatible `::/96` and 6to4
+  `2002::/16`) is judged by the IPv4 address inside, so `::ffff:169.254.169.254` is the metadata
+  address; anything else must be global unicast (`2000::/3`) outside its special-purpose blocks
+  (`2001::/23`, documentation, local NAT64), and `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10` and
+  multicast are refused. `PAYFLOW_WEBHOOK_ALLOWED_NETWORKS` (empty by default) lets listed CIDR
+  networks through for a development stack; it is logged as a warning at startup.
+- **The URL's own host.** The request carries the URL's host in `Host`, and over TLS in SNI; the
+  certificate is verified against that host (TLS 1.2 or 1.3), never against the address
+  connected to. An `https` URL with an IP literal needs a certificate for that address.
+- **No redirects.** A 3xx is an answer like any other, and since it isn't a 2xx the delivery has
+  failed; following one would send the event, and its signature, to a URL nobody checked.
+- **One deadline.** From the lookup to the last byte read, an attempt has
+  `payflow.webhooks.timeout` (10 s), and connecting to one address `connect-timeout` (3 s). A
+  lookup that hangs is abandoned at the deadline, and a watchdog closes the socket when it
+  passes, so a server that sends one byte a second can't hold a thread. A status and headers
+  that arrive in time count, even if the body is still coming: the body is only for the log.
+- **A capped answer.** At most 16 KiB of status line and headers, and the first 1 KiB of the body
+  (de-chunked), which is what `webhook_attempts` keeps; the rest is never read. Callers can't set
+  `Host`, `Content-Length`, `Transfer-Encoding` or `Connection`, and a header containing a line
+  break is refused, so a header value can't smuggle a second request.
+
+An attempt ends as an HTTP status, or as one of `address_refused`, `dns`, `connect`, `tls`,
+`timeout`, `protocol` or `io` with a detail, which is the `error` an attempt row records.
+`SafeHttpSenderTest` runs it against real sockets: a rebinding resolver, a mixed answer, mapped and
+NAT64 literals, a redirect, a head and a body sent a byte at a time, a 4 MiB body (by length,
+until close and chunked), an oversized head, a non-HTTP answer, and TLS with SNI checked on the
+server and a certificate for the wrong name. `AddressPolicyTest` covers every range.
 
 ## Idempotency keys
 
@@ -690,6 +740,7 @@ response without the other fails the build.
 | Listing cursor secret | at least 32 characters each | `payflow.cursor-secrets`, `OrderCursors` |
 | Webhook endpoints per merchant | 16 | `WebhookEndpointService.MAX_ENDPOINTS` |
 | Webhook endpoint URL / description / event types | 2,048 / 256 characters / 1-32 | `WebhookUrls`, `WebhookEndpointService`, `WebhookEvents` |
+| Webhook attempt: whole / connect / head / body kept | 10 s / 3 s / 16 KiB / 1 KiB | `payflow.webhooks.*`, `SafeHttpSender` |
 | Secret sealing keys | 32 bytes each, ids of 1-32 `a-z 0-9 _ -` | `payflow.secret-keys`, `SecretBox` |
 | Idempotency lock timeout / retention | 60 s / 24 h | `payflow.idempotency.*` |
 | `X-Request-Id` accepted | 1-64 of `A-Z a-z 0-9 . _ -`, else replaced | `RequestIds` |
