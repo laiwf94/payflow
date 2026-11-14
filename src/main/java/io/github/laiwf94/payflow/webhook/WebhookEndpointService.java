@@ -117,9 +117,10 @@ public class WebhookEndpointService {
   /**
    * One of the merchant's endpoints.
    *
-   * @throws NotFound when the merchant has no such endpoint
+   * @throws NotFound when the merchant has no such endpoint; it doesn't roll back a transaction
+   *     this joins, so a caller's answer can still be stored with it
    */
-  @Transactional(readOnly = true)
+  @Transactional(readOnly = true, noRollbackFor = NotFound.class)
   public WebhookEndpoint get(String merchant, UUID id) {
     return repo.find(merchant, id).orElseThrow(NotFound::new);
   }

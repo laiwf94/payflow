@@ -83,7 +83,7 @@ record OrderListRequest(OrderFilter filter, int limit, String cursor) {
         cursor);
   }
 
-  private static String single(Map<String, String[]> params, String name) {
+  static String single(Map<String, String[]> params, String name) {
     String[] values = params.get(name);
     if (values == null) {
       return null;
@@ -94,16 +94,17 @@ record OrderListRequest(OrderFilter filter, int limit, String cursor) {
     return values[0];
   }
 
+  private static Instant instant(Map<String, String[]> params, String name) {
+    String text = single(params, name);
+    return text == null ? null : time(name, text);
+  }
+
   /**
    * An RFC 3339 time with an offset, rounded up to the microsecond the database stores. Rounding up
    * keeps both bounds exact: for whole microseconds, {@code t >= 1.5} is {@code t >= 2} and {@code
    * t < 1.5} is {@code t < 2}.
    */
-  private static Instant instant(Map<String, String[]> params, String name) {
-    String text = single(params, name);
-    if (text == null) {
-      return null;
-    }
+  static Instant time(String name, String text) {
     Instant t;
     try {
       t = OffsetDateTime.parse(text, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
@@ -116,7 +117,7 @@ record OrderListRequest(OrderFilter filter, int limit, String cursor) {
   }
 
   /** Echoes client text in an error message only after replacing anything unprintable. */
-  private static String printable(String s) {
+  static String printable(String s) {
     String cut = s.length() > 64 ? s.substring(0, 64) + "..." : s;
     return "'" + cut.replaceAll("[^ -~]", "?") + "'";
   }

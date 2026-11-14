@@ -163,6 +163,44 @@ class WebhookSchemaTest {
         .isEqualTo(2);
   }
 
+  @Test
+  void onlyAPingBelongsToNoOrder() {
+    UUID hook = valid();
+    deliveryOf(hook, "'ping'", "NULL", "NULL");
+    deliveryOf(hook, "'order.created'", "gen_random_uuid()", "1");
+    refused("webhook_deliveries_order", () -> deliveryOf(hook, "'order.created'", "NULL", "NULL"));
+    refused(
+        "webhook_deliveries_order",
+        () -> deliveryOf(hook, "'order.created'", "gen_random_uuid()", "NULL"));
+    refused("webhook_deliveries_order", () -> deliveryOf(hook, "'ping'", "gen_random_uuid()", "1"));
+    refused("webhook_deliveries_order", () -> deliveryOf(hook, "'ping'", "NULL", "1"));
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT convalidated FROM pg_constraint
+                    WHERE conname = 'webhook_deliveries_order'
+                    """)
+                .query(Boolean.class)
+                .single())
+        .as("V20 validated it")
+        .isTrue();
+  }
+
+  private void deliveryOf(UUID endpoint, String type, String order, String seq) {
+    jdbc.sql(
+            "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, event_type, order_id,"
+                + " order_seq, payload, state, next_attempt_at, created_at, updated_at)"
+                + " VALUES (gen_random_uuid(), :endpoint, gen_random_uuid(), "
+                + type
+                + ", "
+                + order
+                + ", "
+                + seq
+                + ", '{}'::jsonb, 'PENDING', now(), now(), now())")
+        .param("endpoint", endpoint)
+        .update();
+  }
+
   private UUID delivery(UUID endpoint, UUID event, String state, String next) {
     UUID id = UUID.randomUUID();
     jdbc.sql(

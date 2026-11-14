@@ -524,6 +524,205 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/WebhookEndpointNotFound'
+  /v1/webhook_endpoints/{id}/deliveries:
+    get:
+      operationId: listWebhookDeliveries
+      summary: The endpoint's delivery log, newest first
+      description: |
+        Every event sent, or still to be sent, to the endpoint, with the outcome of its latest
+        attempt: the HTTP status, how long it took and the first 1,024 characters of the
+        answer's body, or why there was no answer (`connect`, `timeout`, `address_refused` and
+        so on). Pages and cursors work as on `GET /v1/orders`; the cursor is also bound to this
+        endpoint. Time bounds are on when the delivery was created, which is when payflow
+        published the event.
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/RequestId'
+        - name: limit
+          in: query
+          description: Deliveries per page, 1-100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: The `next_cursor` of the previous page.
+          schema:
+            type: string
+        - name: state
+          in: query
+          description: |
+            Only deliveries in these states. Repeat the parameter or separate states with commas.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/WebhookDeliveryState'
+        - name: event_id
+          in: query
+          description: Only the delivery of this event.
+          schema:
+            type: string
+            format: uuid
+        - name: created_gte
+          in: query
+          description: Only deliveries created at or after this RFC 3339 time.
+          schema:
+            type: string
+            format: date-time
+        - name: created_lt
+          in: query
+          description: Only deliveries created before this RFC 3339 time.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: One page of the log.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryList'
+        '400':
+          $ref: '#/components/responses/ListInvalid'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookLogNotFound'
+  /v1/webhook_endpoints/{id}/deliveries/{delivery_id}:
+    get:
+      operationId: getWebhookDelivery
+      summary: One delivery, with the event it carries and every attempt
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/WebhookDeliveryId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The delivery.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryDetail'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookLogNotFound'
+  /v1/webhook_endpoints/{id}/replay:
+    post:
+      operationId: replayWebhookDeliveries
+      summary: Send deliveries to the endpoint again
+      description: |
+        Makes the endpoint's settled deliveries (`SUCCEEDED` or `FAILED`) due again at once: the
+        one for `event_id`, or those created in `[created_gte, created_lt)`, optionally only in
+        the given states. Each is sent with the same body, a new signature and the next attempt
+        number, and retried as a new event would be, for 3 days from the replay. Deliveries
+        still `PENDING` are left alone and counted in `already_pending`, since they will be sent
+        anyway. One replay covers at most 1,000 deliveries; a range with more is refused with
+        `invalid_argument` and nothing is replayed, so narrow it. A disabled endpoint's
+        replayed deliveries wait until it is enabled again.
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayWebhookDeliveries'
+      responses:
+        '200':
+          description: What was replayed.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [replayed, already_pending]
+                properties:
+                  replayed:
+                    type: integer
+                    minimum: 0
+                    maximum: 1000
+                    description: Settled deliveries made due again.
+                  already_pending:
+                    type: integer
+                    minimum: 0
+                    description: Matching deliveries that were pending and were left alone.
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookLogNotFound'
+        '409':
+          $ref: '#/components/responses/KeyInUse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/KeyReused'
+  /v1/webhook_endpoints/{id}/ping:
+    post:
+      operationId: pingWebhookEndpoint
+      summary: Send the endpoint a test ping
+      description: |
+        Queues a `ping` event to the endpoint, whatever event types it subscribes to. It is sent
+        in the background within a moment, signed like every event, with
+        `Payflow-Event-Type: ping`. It is tried once, not retried, and appears in the delivery
+        log; `Location` points to it, so poll that for the answer. Its body is
+        `{"event_id","event_type":"ping","merchant_id","endpoint_id","created_at"}` and it has no
+        `order_id`. A disabled endpoint can't be pinged (`invalid_argument`).
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '202':
+          description: Queued.
+          headers:
+            Location:
+              required: true
+              description: The ping's delivery.
+              schema:
+                type: string
+                pattern: '^/v1/webhook_endpoints/[0-9a-f-]{36}/deliveries/[0-9a-f-]{36}$'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDelivery'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookLogNotFound'
+        '409':
+          $ref: '#/components/responses/KeyInUse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/KeyReused'
 components:
   securitySchemes:
     apiKey:
@@ -540,6 +739,13 @@ components:
         format: uuid
     WebhookEndpointId:
       name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WebhookDeliveryId:
+      name: delivery_id
       in: path
       required: true
       schema:
@@ -712,6 +918,20 @@ components:
             $ref: '#/components/schemas/Error'
     WebhookEndpointNotFound:
       description: No such webhook endpoint for this merchant, or it was deleted (`not_found`).
+      x-error-codes: [not_found]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    WebhookLogNotFound:
+      description: |
+        No such webhook endpoint for this merchant, or it was deleted; or the endpoint has no
+        such delivery, or no delivery of the `event_id` to replay (`not_found`).
       x-error-codes: [not_found]
       headers:
         X-Request-Id:
@@ -1170,6 +1390,172 @@ components:
           type: string
           pattern: '^whsec_[A-Za-z0-9_-]{43}$'
           description: The signing secret. Shown only in this answer.
+    WebhookDeliveryState:
+      type: string
+      enum: [PENDING, SUCCEEDED, FAILED]
+      description: >-
+        `PENDING` until a 2xx answer (`SUCCEEDED`) or until its retries run out (`FAILED`), 3
+        days after it was created or replayed. A ping is `FAILED` after one attempt without a
+        2xx.
+    WebhookAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempted_at, latency_ms]
+      description: Exactly one of `response_status` and `error` is present.
+      properties:
+        attempted_at:
+          type: string
+          format: date-time
+        latency_ms:
+          type: integer
+          minimum: 0
+          description: From the address lookup to the end of the answer, or to the failure.
+        response_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        response_body:
+          type: string
+          maxLength: 1024
+          description: The start of the answer's body, at most 1,024 characters.
+        error:
+          type: string
+          maxLength: 512
+          description: |
+            Why there was no answer, as `<code>: <detail>`; the code is one of `address_refused`,
+            `dns`, `connect`, `tls`, `timeout`, `protocol`, `io`, `secret`, `internal` or
+            `shutdown`.
+    WebhookDelivery:
+      type: object
+      additionalProperties: false
+      required: [id, endpoint_id, event_id, event_type, state, attempts, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        endpoint_id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+          description: The event's id, also sent as `Payflow-Event-Id`.
+        event_type:
+          type: string
+          description: One of the `WebhookEventType`s other than `*`, or `ping`.
+        order_id:
+          type: string
+          format: uuid
+          description: The order the event belongs to; absent on a ping.
+        state:
+          $ref: '#/components/schemas/WebhookDeliveryState'
+        attempts:
+          type: integer
+          minimum: 0
+          description: Attempts made so far, the one in flight included.
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: |
+            Present while `PENDING`: when it is next tried, or, while an attempt is in flight,
+            until when that attempt holds it.
+        created_at:
+          type: string
+          format: date-time
+        replayed_at:
+          type: string
+          format: date-time
+          description: When it was last replayed, if it was.
+        last_attempt:
+          $ref: '#/components/schemas/WebhookAttempt'
+    WebhookDeliveryDetail:
+      type: object
+      additionalProperties: false
+      required:
+        [id, endpoint_id, event_id, event_type, state, attempts, created_at, payload,
+         attempt_log]
+      properties:
+        id:
+          type: string
+          format: uuid
+        endpoint_id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+          description: The event's id, also sent as `Payflow-Event-Id`.
+        event_type:
+          type: string
+          description: One of the `WebhookEventType`s other than `*`, or `ping`.
+        order_id:
+          type: string
+          format: uuid
+          description: The order the event belongs to; absent on a ping.
+        state:
+          $ref: '#/components/schemas/WebhookDeliveryState'
+        attempts:
+          type: integer
+          minimum: 0
+          description: Attempts made so far, the one in flight included.
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: |
+            Present while `PENDING`: when it is next tried, or, while an attempt is in flight,
+            until when that attempt holds it.
+        created_at:
+          type: string
+          format: date-time
+        replayed_at:
+          type: string
+          format: date-time
+          description: When it was last replayed, if it was.
+        last_attempt:
+          $ref: '#/components/schemas/WebhookAttempt'
+        payload:
+          type: object
+          description: The event, as the body of every attempt carries it.
+        attempt_log:
+          type: array
+          description: Every attempt, oldest first.
+          items:
+            $ref: '#/components/schemas/WebhookAttempt'
+    WebhookDeliveryList:
+      type: object
+      additionalProperties: false
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookDelivery'
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          description: Present exactly when `has_more` is true.
+    ReplayWebhookDeliveries:
+      type: object
+      additionalProperties: false
+      description: |
+        `event_id`, or a range with at least `created_gte`; not both.
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        created_gte:
+          type: string
+          format: date-time
+        created_lt:
+          type: string
+          format: date-time
+        state:
+          type: array
+          description: Only deliveries in these states; both when absent.
+          items:
+            type: string
+            enum: [SUCCEEDED, FAILED]
     Error:
       type: object
       additionalProperties: false

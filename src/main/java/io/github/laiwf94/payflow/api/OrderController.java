@@ -36,14 +36,14 @@ class OrderController {
   private final OrderViews views;
   private final RefundService refunds;
   private final TimelineProjection timeline;
-  private final OrderCursors cursors;
+  private final ListCursors cursors;
 
   OrderController(
       OrderService orders,
       OrderViews views,
       RefundService refunds,
       TimelineProjection timeline,
-      OrderCursors cursors) {
+      ListCursors cursors) {
     this.orders = orders;
     this.views = views;
     this.refunds = refunds;

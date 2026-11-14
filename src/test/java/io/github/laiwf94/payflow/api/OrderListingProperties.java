@@ -97,7 +97,7 @@ class OrderListingProperties {
     JdbcClient jdbc = context().getBean(JdbcClient.class);
     OrderRepository repo = context().getBean(OrderRepository.class);
     OrderService service = context().getBean(OrderService.class);
-    OrderCursors cursors = OrderCursors.of("listing-property-secret-0123456789");
+    ListCursors cursors = ListCursors.of("listing-property-secret-0123456789");
     Db.truncateAll(jdbc);
     SplittableRandom r = new SplittableRandom(seed);
 

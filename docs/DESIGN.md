@@ -554,8 +554,8 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 
 Merchants learn about their orders without polling by registering webhook endpoints. This part is
 being built over the week of #25; so far it has the endpoints themselves, the sender that makes
-every attempt, and the dispatcher that turns each relayed event into signed, retried, ordered
-deliveries.
+every attempt, the dispatcher that turns each relayed event into signed, retried, ordered
+deliveries, and the delivery log with replays and test pings.
 
 ### Endpoints
 
@@ -666,6 +666,45 @@ attempt of the instance that claimed it next. Each claim goes to a virtual threa
   (`shutdown: payflow stopped before the answer arrived`) and made due at once, so the next
   instance sends it on its first poll. The merchant may get that event twice, which the
   at-least-once contract allows; a crash instead leaves the lease to run out (60 s).
+
+### The delivery log, replays and pings
+
+A merchant sees what happened to every event at `GET /v1/webhook_endpoints/{id}/deliveries`:
+each delivery, newest first, with its state, attempt count, next attempt and its latest
+attempt's status, latency and the first 1,024 characters of the body, or the reason there was
+none. `GET .../deliveries/{delivery_id}` adds the event exactly as sent and every attempt, oldest
+first. The listing pages like the order listing: keyset on `(created_at, id)` over the
+(endpoint, created_at, id) index V18 already built, with the latest attempt joined `LATERAL` on
+(delivery, id), so a deep page costs what the first does. Filters are `state`, `event_id` and a
+creation range. The cursor is the order listing's, generalised as `ListCursors`: the same 55
+characters, signed with a context string per listing, so a delivery-log cursor is refused by the
+order listing and the other way round, and over the endpoint id as well as the merchant and
+filters, so it can't continue another endpoint's log. The order listing's context, and so every
+order cursor already handed out, is unchanged; `ListCursorsTest` recomputes one independently.
+
+`POST .../replay` sends deliveries again, named by `event_id` or by a creation range
+(`created_gte`, optionally `created_lt`), optionally only `SUCCEEDED` or `FAILED` ones. A replay
+doesn't create a new delivery: it makes the settled one `PENDING` and due now, and stamps
+`replayed_at`. The attempt count and the attempt log carry on, so the merchant sees one history
+per event and endpoint, and the receiver gets the same body with a new signature and the next
+`Payflow-Delivery-Attempt`. The retry window counts from `replayed_at` when there is one, so a
+replay of a week-old event still gets its three days. Pending deliveries are left alone and
+counted as `already_pending`: they will be sent anyway, and one may be in flight under a lease a
+reset would break. The replay locks the matching settled rows before it changes any, and one
+replay covers at most 1,000 (`WebhookDeliveryLog.MAX_REPLAY`): more is a 400 that changes
+nothing, rather than a replay of an arbitrary first thousand. A replayed delivery waits behind an
+earlier pending event of the same order, like any other, and holds back the later ones until it
+settles; that is the ordering rule, applied to what is pending now.
+
+`POST .../ping` queues a `ping` event to the endpoint, whatever its filter says. It is a delivery
+like any other, signed, logged and answered `202` with a `Location` to poll, rather than a
+request that waits for the merchant's answer: every POST runs inside the idempotency filter's
+transaction, and holding a pooled connection for a 10-second outbound call is how a few slow
+endpoints would starve the API. A ping belongs to no order, so V19 makes `order_id` and
+`order_seq` optional, with a CHECK (validated by V20 under a weaker lock) that only a `ping` may
+leave them empty; it waits for nothing and nothing waits for it. It is tried once: its one
+answer is the answer, and a ping retried for three days would only fill the log. A disabled
+endpoint receives nothing, pings included, so pinging one is a 400.
 
 ### Sending without reaching inside
 
@@ -795,11 +834,13 @@ response without the other fails the build.
 | `merchant_reference` | 1-128 printable ASCII, no spaces; unique per merchant | `CreateOrderRequest`, `orders_merchant_reference_format` |
 | `Idempotency-Key` | 1-255 printable ASCII, no spaces | `IdempotencyFilter` |
 | Orders per listing page | 1-100, default 20 | `OrderListRequest` |
-| Listing cursor secret | at least 32 characters each | `payflow.cursor-secrets`, `OrderCursors` |
+| Listing cursor secret | at least 32 characters each | `payflow.cursor-secrets`, `ListCursors` |
 | Webhook endpoints per merchant | 16 | `WebhookEndpointService.MAX_ENDPOINTS` |
 | Webhook endpoint URL / description / event types | 2,048 / 256 characters / 1-32 | `WebhookUrls`, `WebhookEndpointService`, `WebhookEvents` |
 | Webhook attempt: whole / connect / head / body kept | 10 s / 3 s / 16 KiB / 1 KiB | `payflow.webhooks.*`, `SafeHttpSender` |
-| Webhook retries | full jitter from 5 s, capped at 1 h, for 3 days after the event | `payflow.webhooks.retry-*` |
+| Webhook retries | full jitter from 5 s, capped at 1 h, for 3 days after the event or its replay | `payflow.webhooks.retry-*` |
+| Webhook deliveries per replay | 1,000 | `WebhookDeliveryLog.MAX_REPLAY` |
+| Webhook delivery log page | 1-100, default 20 | `WebhookDeliveryListRequest` |
 | Webhook attempts in flight per instance: all / per endpoint | 64 / 8 | `payflow.webhooks.concurrency`, `per-endpoint` |
 | Webhook lease / shutdown grace | 60 s / 3 s | `payflow.webhooks.lease`, `shutdown-grace` |
 | Secret sealing keys | 32 bytes each, ids of 1-32 `a-z 0-9 _ -` | `payflow.secret-keys`, `SecretBox` |
@@ -878,7 +919,7 @@ restart. Nothing else needs it: API keys and listing cursors are hashed and sign
 
 ### Secrets in logs
 
-Keys are never logged; `SimulatorKey`, `ApiKeys`, `OrderCursors` and `SecretBox` override
+Keys are never logged; `SimulatorKey`, `ApiKeys`, `ListCursors` and `SecretBox` override
 `toString`.
 `ObservabilityTest` runs a full order and checks no API key, provider key or `Bearer` string
 appears in any log line.

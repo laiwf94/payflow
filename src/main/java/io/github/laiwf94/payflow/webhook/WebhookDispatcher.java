@@ -41,13 +41,17 @@ import org.springframework.context.SmartLifecycle;
  * attempt times out holds a few slots, not all of them. Each attempt signs the stored payload with
  * the endpoint's secret ({@link WebhookSignature}), posts it through the {@link SafeHttpSender} and
  * records the attempt. A 2xx settles the delivery; anything else, or no answer at all, retries it
- * with full-jitter backoff until {@link WebhookProperties#retryWindow()} after the event, when the
- * last attempt is made at the edge of the window and the delivery is given up.
+ * with full-jitter backoff until {@link WebhookProperties#retryWindow()} after the event (or after
+ * its replay), when the last attempt is made at the edge of the window and the delivery is given
+ * up.
  *
  * <p>One order's events reach each endpoint in the order they happened: a later event waits while
  * an earlier one to the same endpoint is still pending, even across retries. Other orders, and
  * other endpoints, don't wait. Delivery is at least once; a receiver deduplicates by {@code
  * Payflow-Event-Id}.
+ *
+ * <p>A test ping ({@link WebhookEvents#PING}) belongs to no order and is tried once: whatever its
+ * one attempt gets is the answer to whether the endpoint works.
  */
 public class WebhookDispatcher implements SmartLifecycle {
 
@@ -159,7 +163,9 @@ public class WebhookDispatcher implements SmartLifecycle {
     Claim c = f.claim;
     MDC.put("delivery_id", c.id().toString());
     MDC.put("event_id", c.eventId().toString());
-    MDC.put("order_id", c.orderId().toString());
+    if (c.orderId() != null) {
+      MDC.put("order_id", c.orderId().toString());
+    }
     try {
       Instant started = clock.instant();
       long t0 = System.nanoTime();
@@ -236,8 +242,12 @@ public class WebhookDispatcher implements SmartLifecycle {
       held = deliveries.succeed(c, a, now);
       settled = "succeeded";
     } else {
-      Instant deadline = c.createdAt().plus(props.retryWindow());
-      if (!now.isBefore(deadline)) {
+      Instant deadline = c.windowStart().plus(props.retryWindow());
+      if (WebhookEvents.PING.equals(c.eventType())) {
+        // A ping asks whether the endpoint works now; its one answer is the answer.
+        held = deliveries.giveUp(c, a, now);
+        settled = "failed";
+      } else if (!now.isBefore(deadline)) {
         held = deliveries.giveUp(c, a, now);
         settled = "failed";
         if (held) {

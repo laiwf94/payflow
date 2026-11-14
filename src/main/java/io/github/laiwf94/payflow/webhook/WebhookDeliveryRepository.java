@@ -1,12 +1,17 @@
 package io.github.laiwf94.payflow.webhook;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -23,7 +28,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class WebhookDeliveryRepository {
 
-  /** A claimed delivery, with what sending it needs. */
+  /**
+   * A claimed delivery, with what sending it needs. A ping has no order: {@code orderId} is null
+   * and {@code orderSeq} 0.
+   *
+   * @param windowStart when its retry window began: when it was created or last replayed
+   */
   public record Claim(
       UUID id,
       UUID endpointId,
@@ -35,7 +45,8 @@ public class WebhookDeliveryRepository {
       long orderSeq,
       String payload,
       int attempt,
-      Instant createdAt) {}
+      Instant createdAt,
+      Instant windowStart) {}
 
   /**
    * One attempt as the log keeps it.
@@ -60,6 +71,50 @@ public class WebhookDeliveryRepository {
     private static String clean(String s, int max) {
       String t = s.replace('\0', '�');
       return t.length() <= max ? t : t.substring(0, max);
+    }
+  }
+
+  /**
+   * A delivery as the log shows it.
+   *
+   * @param nextAttemptAt when a pending delivery is next tried, or until when the attempt in flight
+   *     holds it; null once it is settled
+   * @param replayedAt when it was last replayed, or null
+   * @param lastAttempt the latest attempt, or null before the first
+   */
+  public record Delivery(
+      UUID id,
+      UUID endpointId,
+      UUID eventId,
+      String eventType,
+      UUID orderId,
+      DeliveryFilter.DeliveryState state,
+      int attempts,
+      Instant nextAttemptAt,
+      Instant createdAt,
+      Instant replayedAt,
+      Attempt lastAttempt) {}
+
+  /** A delivery with the event it carries and every attempt, oldest first. */
+  public record Detail(Delivery delivery, String payload, List<Attempt> attempts) {}
+
+  /**
+   * What a replay did: how many settled deliveries it made due again, and how many it left alone
+   * because they were still pending and will be sent anyway.
+   */
+  public record Replayed(int replayed, int alreadyPending) {}
+
+  /** A replay covers more deliveries than one replay may; nothing was changed. */
+  public static final class TooManyToReplay extends IllegalArgumentException {
+    private static final long serialVersionUID = 1L;
+
+    TooManyToReplay(int max) {
+      super(
+          "more than "
+              + max
+              + " deliveries match; replay at most "
+              + max
+              + " at a time by narrowing created_gte and created_lt");
     }
   }
 
@@ -100,6 +155,30 @@ public class WebhookDeliveryRepository {
   }
 
   /**
+   * Creates a ping to one endpoint, due now, carrying {@code payload}. It belongs to no order, so
+   * it waits for nothing and nothing waits for it. Returns its id.
+   */
+  @Transactional
+  public UUID enqueuePing(UUID endpointId, UUID eventId, String payload, Instant now) {
+    UUID id = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO webhook_deliveries (id, endpoint_id, event_id, event_type, payload, state,
+                attempts, next_attempt_at, created_at, updated_at)
+            VALUES (:id, :endpoint, :event, :type, CAST(:payload AS jsonb), 'PENDING', 0, :now,
+                :now, :now)
+            """)
+        .param("id", id)
+        .param("endpoint", endpointId)
+        .param("event", eventId)
+        .param("type", WebhookEvents.PING)
+        .param("payload", payload)
+        .param("now", ts(now))
+        .update();
+    return id;
+  }
+
+  /**
    * Claims up to {@code limit} due deliveries, oldest due first, leasing each until {@code now +
    * lease}. A delivery is due only when its endpoint is live and enabled and no earlier event of
    * the same order is still pending for the same endpoint, being sent or waiting to retry, so each
@@ -129,7 +208,8 @@ public class WebhookDeliveryRepository {
             FROM due, webhook_endpoints e
             WHERE d.id = due.id AND e.id = d.endpoint_id
             RETURNING d.id, d.endpoint_id, e.merchant_id, e.url, d.event_id, d.event_type,
-                d.order_id, d.order_seq, d.payload::text AS payload, d.attempts, d.created_at
+                d.order_id, d.order_seq, d.payload::text AS payload, d.attempts, d.created_at,
+                COALESCE(d.replayed_at, d.created_at) AS window_start
             """)
         .param("now", ts(now))
         .param("leaseUntil", ts(now.plus(lease)))
@@ -148,13 +228,14 @@ public class WebhookDeliveryRepository {
                     rs.getLong("order_seq"),
                     rs.getString("payload"),
                     rs.getInt("attempts"),
-                    rs.getObject("created_at", OffsetDateTime.class).toInstant()))
+                    rs.getObject("created_at", OffsetDateTime.class).toInstant(),
+                    rs.getObject("window_start", OffsetDateTime.class).toInstant()))
         .list()
         .stream()
         // RETURNING comes back in no particular order; hand them out oldest event first.
         .sorted(
             Comparator.comparing(Claim::createdAt)
-                .thenComparing(Claim::orderId)
+                .thenComparing(Claim::orderId, Comparator.nullsFirst(Comparator.naturalOrder()))
                 .thenComparingLong(Claim::orderSeq))
         .toList();
   }
@@ -241,6 +322,183 @@ public class WebhookDeliveryRepository {
         .param("id", endpointId)
         .param("now", ts(now))
         .update();
+  }
+
+  /**
+   * One page of an endpoint's deliveries, newest first by {@code (created_at, id)}, after the given
+   * position when there is one. Each carries its latest attempt. The keyset condition and the order
+   * match the {@code (endpoint_id, created_at, id)} index, so a deep page costs what the first
+   * does.
+   */
+  @Transactional(readOnly = true)
+  public List<Delivery> list(
+      UUID endpointId, DeliveryFilter filter, Instant afterCreatedAt, UUID afterId, int limit) {
+    if (limit < 1) {
+      throw new IllegalArgumentException("limit must be positive: " + limit);
+    }
+    Map<String, Object> params = new HashMap<>();
+    StringBuilder where = new StringBuilder("d.endpoint_id = :endpoint");
+    params.put("endpoint", endpointId);
+    filter(filter, where, params);
+    if (afterCreatedAt != null) {
+      where.append(" AND (d.created_at, d.id) < (:afterCreated, :afterId)");
+      params.put("afterCreated", ts(afterCreatedAt));
+      params.put("afterId", afterId);
+    }
+    params.put("limit", limit);
+    return jdbc.sql(
+            """
+            SELECT d.id, d.endpoint_id, d.event_id, d.event_type, d.order_id, d.state,
+                d.attempts, d.next_attempt_at, d.created_at, d.replayed_at,
+                a.attempted_at, a.latency_ms, a.response_status, a.response_body, a.error
+            FROM (SELECT * FROM webhook_deliveries d WHERE %s
+                  ORDER BY d.created_at DESC, d.id DESC LIMIT :limit) d
+            LEFT JOIN LATERAL (
+                SELECT * FROM webhook_attempts a WHERE a.delivery_id = d.id
+                ORDER BY a.id DESC LIMIT 1) a ON true
+            ORDER BY d.created_at DESC, d.id DESC
+            """
+                .formatted(where))
+        .params(params)
+        .query((rs, n) -> delivery(rs))
+        .list();
+  }
+
+  /** One of an endpoint's deliveries, with its payload and every attempt, oldest first. */
+  @Transactional(readOnly = true)
+  public Optional<Detail> find(UUID endpointId, UUID deliveryId) {
+    return jdbc.sql(
+            """
+            SELECT d.id, d.endpoint_id, d.event_id, d.event_type, d.order_id, d.state,
+                d.attempts, d.next_attempt_at, d.created_at, d.replayed_at,
+                d.payload::text AS payload,
+                a.attempted_at, a.latency_ms, a.response_status, a.response_body, a.error
+            FROM webhook_deliveries d
+            LEFT JOIN LATERAL (
+                SELECT * FROM webhook_attempts a WHERE a.delivery_id = d.id
+                ORDER BY a.id DESC LIMIT 1) a ON true
+            WHERE d.id = :id AND d.endpoint_id = :endpoint
+            """)
+        .param("id", deliveryId)
+        .param("endpoint", endpointId)
+        .query((rs, n) -> new Detail(delivery(rs), rs.getString("payload"), List.of()))
+        .optional()
+        .map(
+            d ->
+                new Detail(
+                    d.delivery(),
+                    d.payload(),
+                    jdbc.sql(
+                            """
+                            SELECT * FROM webhook_attempts WHERE delivery_id = :id ORDER BY id
+                            """)
+                        .param("id", deliveryId)
+                        .query((rs, n) -> attempt(rs))
+                        .list()));
+  }
+
+  /**
+   * Makes the endpoint's settled deliveries that match {@code filter} due again at once, each with
+   * a new retry window starting now. Pending ones are left alone: they will be sent anyway, and one
+   * may be in flight. Refuses, changing nothing, when more than {@code max} settled deliveries
+   * match.
+   *
+   * @throws TooManyToReplay when more than {@code max} match
+   */
+  @Transactional(noRollbackFor = TooManyToReplay.class)
+  public Replayed replay(UUID endpointId, DeliveryFilter filter, int max, Instant now) {
+    Map<String, Object> params = new HashMap<>();
+    StringBuilder where = new StringBuilder("d.endpoint_id = :endpoint");
+    params.put("endpoint", endpointId);
+    filter(filter, where, params);
+    // Lock the settled rows first, so a count and an update can't disagree with a concurrent
+    // replay; max + 1 rows are enough to know there are too many.
+    List<UUID> settled =
+        jdbc.sql(
+                """
+                SELECT d.id FROM webhook_deliveries d
+                WHERE %s AND d.state <> 'PENDING'
+                ORDER BY d.created_at, d.id
+                LIMIT :max FOR UPDATE
+                """
+                    .formatted(where))
+            .params(params)
+            .param("max", max + 1)
+            .query(UUID.class)
+            .list();
+    if (settled.size() > max) {
+      throw new TooManyToReplay(max);
+    }
+    int pending =
+        jdbc.sql(
+                "SELECT count(*) FROM webhook_deliveries d WHERE %s AND d.state = 'PENDING'"
+                    .formatted(where))
+            .params(params)
+            .query(Integer.class)
+            .single();
+    if (settled.isEmpty()) {
+      return new Replayed(0, pending);
+    }
+    int replayed =
+        jdbc.sql(
+                """
+                UPDATE webhook_deliveries
+                SET state = 'PENDING', next_attempt_at = :now, replayed_at = :now,
+                    updated_at = :now
+                WHERE id = ANY (:ids) AND state <> 'PENDING'
+                """)
+            .param("ids", settled.toArray(UUID[]::new))
+            .param("now", ts(now))
+            .update();
+    return new Replayed(replayed, pending);
+  }
+
+  private static void filter(DeliveryFilter f, StringBuilder where, Map<String, Object> params) {
+    if (!f.states().isEmpty()) {
+      where.append(" AND d.state = ANY (:states)");
+      params.put("states", f.stateNames());
+    }
+    if (f.eventId() != null) {
+      where.append(" AND d.event_id = :eventId");
+      params.put("eventId", f.eventId());
+    }
+    if (f.createdGte() != null) {
+      where.append(" AND d.created_at >= :createdGte");
+      params.put("createdGte", ts(f.createdGte()));
+    }
+    if (f.createdLt() != null) {
+      where.append(" AND d.created_at < :createdLt");
+      params.put("createdLt", ts(f.createdLt()));
+    }
+  }
+
+  private static Delivery delivery(ResultSet rs) throws SQLException {
+    return new Delivery(
+        rs.getObject("id", UUID.class),
+        rs.getObject("endpoint_id", UUID.class),
+        rs.getObject("event_id", UUID.class),
+        rs.getString("event_type"),
+        rs.getObject("order_id", UUID.class),
+        DeliveryFilter.DeliveryState.valueOf(rs.getString("state")),
+        rs.getInt("attempts"),
+        instant(rs, "next_attempt_at"),
+        instant(rs, "created_at"),
+        instant(rs, "replayed_at"),
+        rs.getObject("attempted_at") == null ? null : attempt(rs));
+  }
+
+  private static Attempt attempt(ResultSet rs) throws SQLException {
+    return new Attempt(
+        instant(rs, "attempted_at"),
+        rs.getInt("latency_ms"),
+        rs.getObject("response_status", Integer.class),
+        rs.getString("response_body"),
+        rs.getString("error"));
+  }
+
+  private static Instant instant(ResultSet rs, String column) throws SQLException {
+    OffsetDateTime t = rs.getObject(column, OffsetDateTime.class);
+    return t == null ? null : t.toInstant();
   }
 
   private static OffsetDateTime ts(Instant i) {

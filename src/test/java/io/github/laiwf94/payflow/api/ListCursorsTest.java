@@ -12,7 +12,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
-class OrderCursorsTest {
+class ListCursorsTest {
 
   private static final String SECRET = "cursor-secret-for-tests-0123456789";
   private static final String OTHER_SECRET = "another-cursor-secret-0123456789ab";
@@ -20,14 +20,14 @@ class OrderCursorsTest {
       new OrderPosition(Instant.parse("2026-11-02T09:30:00.123456Z"), UUID.randomUUID());
   private static final OrderFilter EUR = new OrderFilter(Set.of(), null, null, "EUR", null);
 
-  private final OrderCursors cursors = OrderCursors.of(SECRET);
+  private final ListCursors cursors = ListCursors.of(SECRET);
 
   @Test
   void roundTripsAPositionAsAnOpaqueUrlSafeString() {
     String cursor = cursors.encode("acme", EUR, AT);
     assertThat(cursor).hasSize(55).matches("[A-Za-z0-9_-]+");
     assertThat(cursors.decode("acme", EUR, cursor)).isEqualTo(AT);
-    assertThat(OrderCursors.of(SECRET).decode("acme", EUR, cursor))
+    assertThat(ListCursors.of(SECRET).decode("acme", EUR, cursor))
         .as("another instance with the same secret")
         .isEqualTo(AT);
   }
@@ -52,10 +52,10 @@ class OrderCursorsTest {
     String cursor = cursors.encode("acme", EUR, AT);
     assertThatThrownBy(() -> cursors.decode("globex", EUR, cursor))
         .as("another merchant")
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
+        .isInstanceOf(ListCursors.InvalidCursor.class);
     assertThatThrownBy(() -> cursors.decode("acme", OrderFilter.ALL, cursor))
         .as("filter dropped")
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
+        .isInstanceOf(ListCursors.InvalidCursor.class);
     assertThatThrownBy(
             () ->
                 cursors.decode(
@@ -63,10 +63,57 @@ class OrderCursorsTest {
                     new OrderFilter(Set.of(OrderState.FAILED), null, null, "EUR", null),
                     cursor))
         .as("filter added")
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
-    assertThatThrownBy(() -> OrderCursors.of(OTHER_SECRET).decode("acme", EUR, cursor))
+        .isInstanceOf(ListCursors.InvalidCursor.class);
+    assertThatThrownBy(() -> ListCursors.of(OTHER_SECRET).decode("acme", EUR, cursor))
         .as("another secret")
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
+        .isInstanceOf(ListCursors.InvalidCursor.class);
+  }
+
+  @Test
+  void orderCursorsAreSignedAsBeforeTheListingsWereSplit() throws Exception {
+    // The tag computed independently, the way the order listing has signed since it shipped, so
+    // cursors handed out before an upgrade still work after it.
+    String cursor = cursors.encode("acme", EUR, AT);
+    byte[] raw = java.util.Base64.getUrlDecoder().decode(cursor);
+    javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+    mac.init(
+        new javax.crypto.spec.SecretKeySpec(
+            SECRET.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+    mac.update(
+        ("payflow orders cursor\nacme\n" + EUR.canonical() + "\n")
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    byte[] tag = mac.doFinal(java.util.Arrays.copyOf(raw, 25));
+    assertThat(java.util.Arrays.copyOfRange(raw, 25, 41))
+        .isEqualTo(java.util.Arrays.copyOf(tag, 16));
+  }
+
+  @Test
+  void aCursorBelongsToOneListingAndScope() {
+    UUID endpoint = UUID.randomUUID();
+    ListCursors.Position at = new ListCursors.Position(AT.createdAt(), AT.id());
+    String scope = endpoint + "\nstates=FAILED";
+    String deliveries = cursors.encode(ListCursors.Listing.WEBHOOK_DELIVERIES, "acme", scope, at);
+    assertThat(cursors.decode(ListCursors.Listing.WEBHOOK_DELIVERIES, "acme", scope, deliveries))
+        .isEqualTo(at);
+    assertThatThrownBy(() -> cursors.decode(ListCursors.Listing.ORDERS, "acme", scope, deliveries))
+        .as("the same bytes in another listing")
+        .isInstanceOf(ListCursors.InvalidCursor.class);
+    assertThatThrownBy(
+            () ->
+                cursors.decode(
+                    ListCursors.Listing.WEBHOOK_DELIVERIES,
+                    "acme",
+                    UUID.randomUUID() + "\nstates=FAILED",
+                    deliveries))
+        .as("another endpoint")
+        .isInstanceOf(ListCursors.InvalidCursor.class);
+    String orders = cursors.encode("acme", EUR, AT);
+    assertThatThrownBy(
+            () ->
+                cursors.decode(
+                    ListCursors.Listing.WEBHOOK_DELIVERIES, "acme", EUR.canonical(), orders))
+        .as("an order cursor in the delivery log")
+        .isInstanceOf(ListCursors.InvalidCursor.class);
   }
 
   @Test
@@ -88,7 +135,7 @@ class OrderCursorsTest {
         String cursor = Base64.getUrlEncoder().withoutPadding().encodeToString(forged);
         assertThatThrownBy(() -> cursors.decode("acme", EUR, cursor))
             .as("byte %d bit %d", i, bit)
-            .isInstanceOf(OrderCursors.InvalidCursor.class);
+            .isInstanceOf(ListCursors.InvalidCursor.class);
       }
     }
   }
@@ -110,40 +157,40 @@ class OrderCursorsTest {
         }) {
       assertThatThrownBy(() -> cursors.decode("acme", EUR, bad))
           .as(bad)
-          .isInstanceOf(OrderCursors.InvalidCursor.class)
+          .isInstanceOf(ListCursors.InvalidCursor.class)
           .hasMessageContaining("start again without one");
     }
   }
 
   @Test
   void aSecondSecretVerifiesButOnlyTheFirstSigns() {
-    String oldCursor = OrderCursors.of(OTHER_SECRET).encode("acme", EUR, AT);
-    OrderCursors rotating = OrderCursors.of(SECRET + " , " + OTHER_SECRET);
+    String oldCursor = ListCursors.of(OTHER_SECRET).encode("acme", EUR, AT);
+    ListCursors rotating = ListCursors.of(SECRET + " , " + OTHER_SECRET);
     assertThat(rotating.decode("acme", EUR, oldCursor)).isEqualTo(AT);
     String newCursor = rotating.encode("acme", EUR, AT);
     assertThat(cursors.decode("acme", EUR, newCursor)).as("signed with the first").isEqualTo(AT);
-    assertThatThrownBy(() -> OrderCursors.of(OTHER_SECRET).decode("acme", EUR, newCursor))
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
+    assertThatThrownBy(() -> ListCursors.of(OTHER_SECRET).decode("acme", EUR, newCursor))
+        .isInstanceOf(ListCursors.InvalidCursor.class);
   }
 
   @Test
   void shortSecretsAreRefusedAtStartup() {
-    assertThatThrownBy(() -> OrderCursors.of("too-short"))
+    assertThatThrownBy(() -> ListCursors.of("too-short"))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("at least 32");
-    assertThatThrownBy(() -> OrderCursors.of(SECRET + ","))
+    assertThatThrownBy(() -> ListCursors.of(SECRET + ","))
         .as("an empty entry")
         .isInstanceOf(IllegalArgumentException.class);
   }
 
   @Test
   void withoutASecretEachInstanceSignsWithItsOwn() {
-    OrderCursors a = OrderCursors.of("");
-    OrderCursors b = OrderCursors.of(null);
+    ListCursors a = ListCursors.of("");
+    ListCursors b = ListCursors.of(null);
     String cursor = a.encode("acme", EUR, AT);
     assertThat(a.decode("acme", EUR, cursor)).isEqualTo(AT);
     assertThatThrownBy(() -> b.decode("acme", EUR, cursor))
-        .isInstanceOf(OrderCursors.InvalidCursor.class);
+        .isInstanceOf(ListCursors.InvalidCursor.class);
   }
 
   @Test
@@ -156,7 +203,7 @@ class OrderCursorsTest {
 
   @Test
   void theSecretsStayOutOfToString() {
-    assertThat(OrderCursors.of(SECRET + "," + OTHER_SECRET).toString())
+    assertThat(ListCursors.of(SECRET + "," + OTHER_SECRET).toString())
         .doesNotContain(SECRET)
         .doesNotContain(OTHER_SECRET)
         .contains("2 secrets");

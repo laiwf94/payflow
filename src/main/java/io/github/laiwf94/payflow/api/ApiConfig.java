@@ -44,10 +44,10 @@ public class ApiConfig {
         .build();
   }
 
-  /** Signs and checks the order listing's cursors; see {@link OrderCursors}. */
+  /** Signs and checks the listings' cursors; see {@link ListCursors}. */
   @Bean
-  OrderCursors orderCursors(@Value("${payflow.cursor-secrets:}") String secrets) {
-    return OrderCursors.of(secrets);
+  ListCursors listCursors(@Value("${payflow.cursor-secrets:}") String secrets) {
+    return ListCursors.of(secrets);
   }
 
   /** Authentication runs first, so an anonymous client can't make us read a large body. */

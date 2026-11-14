@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.api;
 import io.github.laiwf94.payflow.money.InvalidMoneyException;
 import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.refund.RefundService;
+import io.github.laiwf94.payflow.webhook.WebhookDeliveryLog;
 import io.github.laiwf94.payflow.webhook.WebhookEndpointService;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.Comparator;
@@ -68,9 +69,9 @@ class ApiExceptionHandler {
     return error(ApiError.INVALID_ARGUMENT, e.getMessage(), req);
   }
 
-  @ExceptionHandler(OrderCursors.InvalidCursor.class)
+  @ExceptionHandler(ListCursors.InvalidCursor.class)
   ResponseEntity<Map<String, Object>> invalidCursor(
-      OrderCursors.InvalidCursor e, HttpServletRequest req) {
+      ListCursors.InvalidCursor e, HttpServletRequest req) {
     return error(ApiError.INVALID_CURSOR, e.getMessage(), req);
   }
 
@@ -82,6 +83,12 @@ class ApiExceptionHandler {
   @ExceptionHandler(WebhookEndpointService.NotFound.class)
   ResponseEntity<Map<String, Object>> webhookEndpointNotFound(
       WebhookEndpointService.NotFound e, HttpServletRequest req) {
+    return error(ApiError.NOT_FOUND, e.getMessage(), req);
+  }
+
+  @ExceptionHandler(WebhookDeliveryLog.DeliveryNotFound.class)
+  ResponseEntity<Map<String, Object>> webhookDeliveryNotFound(
+      WebhookDeliveryLog.DeliveryNotFound e, HttpServletRequest req) {
     return error(ApiError.NOT_FOUND, e.getMessage(), req);
   }
 

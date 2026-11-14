@@ -168,6 +168,10 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 | `GET /v1/webhook_endpoints`, `GET /v1/webhook_endpoints/{id}` | The merchant's endpoints, oldest first, or one of them; never the secret. |
 | `POST /v1/webhook_endpoints/{id}` | Change `url`, `enabled_events`, `description` or `state` (`ENABLED`, `DISABLED`). |
 | `DELETE /v1/webhook_endpoints/{id}` | Delete the endpoint; its secret is erased. |
+| `GET /v1/webhook_endpoints/{id}/deliveries` | The delivery log, newest first, with each delivery's latest attempt (status, latency, the first 1,024 characters of the body, or why there was no answer). Paged like `/v1/orders`; filters `state`, `event_id`, `created_gte`, `created_lt`. |
+| `GET /v1/webhook_endpoints/{id}/deliveries/{delivery_id}` | One delivery with the event as sent and every attempt. |
+| `POST /v1/webhook_endpoints/{id}/replay` | Send settled deliveries again, by `event_id` or by `created_gte`/`created_lt` (optionally only `SUCCEEDED` or `FAILED`), each with a fresh 3-day retry window. At most 1,000 per replay. |
+| `POST /v1/webhook_endpoints/{id}/ping` | Queue a signed `ping` to the endpoint, tried once; `202` with a `Location` to its delivery. |
 | `GET /livez`, `GET /readyz` | Liveness, and readiness (database only; Kafka being down doesn't stop orders). |
 | `GET :8081/actuator/prometheus` | Metrics, on the loopback management port. |
 
@@ -198,13 +202,14 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Webhook endpoints | Over HTTP: the secret is in the `201` and nowhere else, neither in any read nor in the database (the endpoint's row and the stored idempotent answer are scanned for it), yet it opens again to sign; a retry replays the same endpoint and secret; changes, deletion, merchant isolation, and ten racing creates against twelve endpoints make exactly four. Raw SQL can't store a bad state, URL, event filter, secret, delivery schedule or attempt. Every bit of a sealed secret is covered by its tag, and a secret moved to another row doesn't open. Loopback, private, metadata, CGNAT, IPv4-mapped and other non-public hosts are refused at registration and on update. |
 | Webhook sender | Real sockets on loopback: a resolver that rebinds after the first answer is looked up once per send and the connection goes to the checked address; one bad address among several refuses the send; mapped, NAT64 and 6to4 literals are judged by the IPv4 address inside; a redirect is an answer, not followed; a head or body sent a byte at a time is cut off at the deadline; a 4 MiB body by length, until close and chunked is read only to 1 KiB; TLS carries the host in SNI and refuses a certificate for another name. Every address range is tested on its own. |
 | Webhook delivery | Real Postgres and a stand-in merchant server on loopback: the relay fans each event out to every enabled endpoint whose filter takes it, once even when handed over twice; the signature checks out over the exact bytes sent; 500, 302 and 429 retry with full-jitter backoff and every attempt is logged; a delivery that never succeeds is retried to the edge of its window and given up; one order's events arrive in order while other orders and endpoints carry on; a slow endpoint holds only its own slots; a claim that outlived its lease is fenced; addresses are checked again on every send; a stop hands back an attempt still waiting for its answer. |
+| Webhook delivery log | Over HTTP with the dispatcher sending to a loopback server: the log shows each delivery's latest attempt and the detail every attempt, with bodies cut to 1,024 characters; 25 deliveries in ties page with no repeats or gaps while more arrive, and a cursor is refused on another endpoint, with other filters or in the order listing; a given-up delivery four days old is replayed with a window of its own and retried; a range replay touches only settled deliveries of that endpoint, and 1,001 matches are refused without a change; a ping is signed, logged, tried once and refused on a disabled endpoint. |
 | Contract | The OpenAPI document and Spring's routes must match both ways. Every documented response and every error code it lists is produced by a real request and checked against its schema and headers, nothing undocumented comes back, and the spec's codes are exactly the ones the code can send. |
 | Observability | One correlation id followed from the request through the saga worker to the Kafka consumer in the JSON logs; no API key, provider key or `Bearer` token appears in any log line. |
 
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 463 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 474 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

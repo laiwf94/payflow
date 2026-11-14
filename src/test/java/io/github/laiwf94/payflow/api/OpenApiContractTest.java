@@ -45,6 +45,7 @@ class OpenApiContractTest {
   @Autowired FilterRegistrationBean<IdempotencyFilter> idempotency;
   @Autowired JdbcClient jdbc;
   @Autowired io.github.laiwf94.payflow.sim.Faults faults;
+  @Autowired io.github.laiwf94.payflow.webhook.WebhookDispatcher dispatcher;
 
   private Map<String, Object> spec;
   private SchemaValidator validator;
@@ -209,6 +210,7 @@ class OpenApiContractTest {
         .containsExactly(100L, 500L, 100L);
 
     webhookEndpoints(anonymous, missing, tooLarge);
+    webhookLog(anonymous, missing, tooLarge);
 
     assertThat(exercised).isEqualTo(documentedResponses());
   }
@@ -270,6 +272,72 @@ class OpenApiContractTest {
     record("DELETE " + one, anonymous.send("DELETE", path, null));
     record("DELETE " + one, api.send("DELETE", path, null));
     record("DELETE " + one, api.send("DELETE", path, null));
+  }
+
+  /** Every documented answer of an endpoint's delivery log, replay and ping routes. */
+  private void webhookLog(Api anonymous, String missing, String tooLarge) {
+    String hooks = "/v1/webhook_endpoints";
+    // A name that never resolves: registration accepts it, and the ping fails fast on DNS.
+    Api.Response created =
+        api.post(hooks, "{\"url\":\"https://hooks.invalid/payflow\",\"enabled_events\":[\"*\"]}");
+    assertThat(created.status()).as(created.body()).isEqualTo(201);
+    String hook = hooks + "/" + created.json().get("id").asString();
+    String gone = hooks + "/" + missing;
+
+    String ping = "POST " + hooks + "/{id}/ping";
+    Api.Response pinged = api.post(hook + "/ping", null);
+    record(ping, pinged);
+    replayed(ping, 202, hook + "/ping", null);
+    record(ping, api.post(hook + "/ping", null, "Idempotency-Key", "has space"));
+    record(ping, anonymous.post(hook + "/ping", null));
+    record(ping, api.post(gone + "/ping", null));
+    replayed(ping, 404, gone + "/ping", null);
+    busyKey("busy-ping", hook + "/ping", null);
+    record(ping, api.post(hook + "/ping", null, "Idempotency-Key", "busy-ping"));
+    record(ping, api.post(hook + "/ping", tooLarge));
+    api.post(hook + "/ping", null, "Idempotency-Key", "reused-ping");
+    record(ping, api.post(gone + "/ping", null, "Idempotency-Key", "reused-ping"));
+    // Sends the pings: each fails on DNS, and the attempt is logged with its reason.
+    while (dispatcher.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+
+    String list = "GET " + hooks + "/{id}/deliveries";
+    Api.Response page = api.get(hook + "/deliveries?limit=1");
+    record(list, page);
+    assertThat(page.json().get("data").get(0).get("last_attempt").get("error").asString())
+        .startsWith("dns");
+    record(
+        list,
+        api.get(hook + "/deliveries?limit=1&cursor=" + page.json().get("next_cursor").asString()));
+    record(list, api.get(hook + "/deliveries?limit=0"));
+    record(list, api.get(hook + "/deliveries?cursor=forged"));
+    record(list, anonymous.get(hook + "/deliveries"));
+    record(list, api.get(gone + "/deliveries"));
+
+    String one = "GET " + hooks + "/{id}/deliveries/{delivery_id}";
+    String delivery = hook + "/deliveries/" + pinged.json().get("id").asString();
+    record(one, api.get(delivery));
+    record(one, anonymous.get(delivery));
+    record(one, api.get(hook + "/deliveries/" + missing));
+
+    String replay = "POST " + hooks + "/{id}/replay";
+    String byEvent = "{\"event_id\":\"" + pinged.json().get("event_id").asString() + "\"}";
+    String byRange = "{\"created_gte\":\"2026-01-01T00:00:00Z\"}";
+    record(replay, api.post(hook + "/replay", byEvent));
+    replayed(replay, 200, hook + "/replay", byRange);
+    record(replay, api.post(hook + "/replay", "{}"));
+    replayed(replay, 400, hook + "/replay", "{}");
+    record(replay, anonymous.post(hook + "/replay", byRange));
+    record(replay, api.post(gone + "/replay", byRange));
+    replayed(replay, 404, hook + "/replay", "{\"event_id\":\"" + missing + "\"}");
+    busyKey("busy-replay", hook + "/replay", byRange);
+    record(replay, api.post(hook + "/replay", byRange, "Idempotency-Key", "busy-replay"));
+    record(replay, api.post(hook + "/replay", tooLarge));
+    record(replay, api.post(hook + "/replay", "<replay/>", "Content-Type", "application/xml"));
+    replayed(replay, 415, hook + "/replay", "<replay/>", "Content-Type", "application/xml");
+    api.post(hook + "/replay", byRange, "Idempotency-Key", "reused-replay");
+    record(replay, api.post(hook + "/replay", byEvent, "Idempotency-Key", "reused-replay"));
   }
 
   @Test

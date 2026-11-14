@@ -102,6 +102,14 @@ notes on GitHub link here.
   recorded in `webhook_attempts`. One order's events reach each endpoint in order; other orders
   and endpoints don't wait, and one instance sends at most 8 deliveries to an endpoint at once.
   Deleting an endpoint gives up its pending deliveries. New settings under `payflow.webhooks.*`.
+- Webhook delivery log, replay and ping (#25). `GET /v1/webhook_endpoints/{id}/deliveries`
+  pages an endpoint's deliveries newest first with each one's latest attempt (status, latency,
+  the first 1,024 characters of the body, or the reason there was no answer), filtered by
+  `state`, `event_id` and creation time; `GET .../deliveries/{delivery_id}` adds the event as
+  sent and every attempt. `POST .../replay` sends settled deliveries again by `event_id` or time
+  range, at most 1,000 at a time, each with a new 3-day retry window. `POST .../ping` queues a
+  signed `ping` event, tried once and shown in the log. Migrations V19 and V20 add
+  `replayed_at` and let a ping's delivery have no order.
 - Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
   rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
   idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each

@@ -17,6 +17,12 @@ public final class WebhookEvents {
 
   public static final String ALL = "*";
 
+  /**
+   * The type of a test ping, which goes to the one endpoint it was asked for whatever its filter
+   * says, so it is not one of the {@link #TYPES} a filter can name.
+   */
+  public static final String PING = "ping";
+
   /** At most this many types in one endpoint's filter. */
   public static final int MAX_FILTER = 32;
 
