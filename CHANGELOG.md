@@ -110,6 +110,16 @@ notes on GitHub link here.
   range, at most 1,000 at a time, each with a new 3-day retry window. `POST .../ping` queues a
   signed `ping` event, tried once and shown in the log. Migrations V19 and V20 add
   `replayed_at` and let a ping's delivery have no order.
+- Webhook secret rotation and automatic disabling (#25). `POST
+  /v1/webhook_endpoints/{id}/rotate_secret` returns a new signing secret, shown once; the old one
+  keeps signing beside it for `previous_secret_expires_in` seconds (a day by default, 0 to 7
+  days), so `Payflow-Signature` carries two `v1` values during the overlap, and at most two ever
+  sign. An endpoint whose every attempt fails for 3 days (`payflow.webhooks.disable-after`) is
+  disabled with `disabled_reason: failing` and sent one final `webhook_endpoint.disabled`
+  notice, which also goes to the merchant's other endpoints that subscribe to that new event
+  type. Endpoints now show `disabled_reason`, `failing_since` and `previous_secret_expires_at`.
+  Enabling a disabled endpoint again gives it a fresh three days. Migrations V21 and V22 add the
+  columns and let the notice's delivery have no order.
 - Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
   rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
   idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each

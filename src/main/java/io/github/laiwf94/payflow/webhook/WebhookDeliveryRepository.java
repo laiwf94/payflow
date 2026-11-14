@@ -29,10 +29,12 @@ import org.springframework.transaction.annotation.Transactional;
 public class WebhookDeliveryRepository {
 
   /**
-   * A claimed delivery, with what sending it needs. A ping has no order: {@code orderId} is null
-   * and {@code orderSeq} 0.
+   * A claimed delivery, with what sending it needs. A ping and an endpoint's disabled notice have
+   * no order: {@code orderId} is null and {@code orderSeq} 0.
    *
    * @param windowStart when its retry window began: when it was created or last replayed
+   * @param once tried once and not retried: a ping, or the final notice to an endpoint payflow
+   *     disabled
    */
   public record Claim(
       UUID id,
@@ -46,7 +48,8 @@ public class WebhookDeliveryRepository {
       String payload,
       int attempt,
       Instant createdAt,
-      Instant windowStart) {}
+      Instant windowStart,
+      boolean once) {}
 
   /**
    * One attempt as the log keeps it.
@@ -179,11 +182,51 @@ public class WebhookDeliveryRepository {
   }
 
   /**
+   * Queues the final notice that payflow disabled {@code endpointId}: to the endpoint itself,
+   * although it is now disabled and whatever its filter says, and to each of the merchant's other
+   * live, enabled endpoints whose filter takes {@value WebhookEvents#ENDPOINT_DISABLED}. Returns
+   * the number of deliveries queued.
+   */
+  @Transactional
+  public int enqueueDisabledNotice(
+      String merchant, UUID endpointId, UUID eventId, String payload, Instant now) {
+    return jdbc.sql(
+            """
+            INSERT INTO webhook_deliveries (id, endpoint_id, event_id, event_type, payload, state,
+                attempts, next_attempt_at, created_at, updated_at)
+            SELECT gen_random_uuid(), e.id, :event, :type, CAST(:payload AS jsonb), 'PENDING', 0,
+                :now, :now, :now
+            FROM webhook_endpoints e
+            WHERE e.merchant_id = :m AND e.deleted_at IS NULL
+              AND (e.id = :endpoint
+                   OR (e.state = 'ENABLED'
+                       AND ('*' = ANY (e.enabled_events) OR :type = ANY (e.enabled_events))))
+            ON CONFLICT (endpoint_id, event_id) DO NOTHING
+            """)
+        .param("m", merchant)
+        .param("endpoint", endpointId)
+        .param("event", eventId)
+        .param("type", WebhookEvents.ENDPOINT_DISABLED)
+        .param("payload", payload)
+        .param("now", ts(now))
+        .update();
+  }
+
+  /** The disabled notice to the endpoint it is about, which is sent although it is disabled. */
+  private static final String OWN_NOTICE =
+      "(d.event_type = 'webhook_endpoint.disabled'"
+          + " AND d.payload->>'endpoint_id' = d.endpoint_id::text)";
+
+  /** A delivery tried once: a ping, or an endpoint's own disabled notice. */
+  private static final String ONCE = "(d.event_type = 'ping' OR " + OWN_NOTICE + ")";
+
+  /**
    * Claims up to {@code limit} due deliveries, oldest due first, leasing each until {@code now +
-   * lease}. A delivery is due only when its endpoint is live and enabled and no earlier event of
-   * the same order is still pending for the same endpoint, being sent or waiting to retry, so each
-   * endpoint sees one order's events in the order they happened. Endpoints in {@code skip} are
-   * passed over: this instance already has as many of their deliveries in flight as it allows.
+   * lease}. A delivery is due only when its endpoint is live and enabled (or it is the final notice
+   * to an endpoint payflow disabled, not replayed since) and no earlier event of the same order is
+   * still pending for the same endpoint, being sent or waiting to retry, so each endpoint sees one
+   * order's events in the order they happened. Endpoints in {@code skip} are passed over: this
+   * instance already has as many of their deliveries in flight as it allows.
    */
   @Transactional
   public List<Claim> claimDue(Instant now, Duration lease, int limit, Collection<UUID> skip) {
@@ -194,7 +237,8 @@ public class WebhookDeliveryRepository {
                 SELECT d.id FROM webhook_deliveries d
                 JOIN webhook_endpoints e ON e.id = d.endpoint_id
                 WHERE d.state = 'PENDING' AND d.next_attempt_at <= :now
-                  AND e.state = 'ENABLED' AND e.deleted_at IS NULL
+                  AND (e.state = 'ENABLED' OR (%1$s AND d.replayed_at IS NULL))
+                  AND e.deleted_at IS NULL
                   AND d.endpoint_id <> ALL (:skip)
                   AND NOT EXISTS (
                       SELECT 1 FROM webhook_deliveries p
@@ -209,8 +253,9 @@ public class WebhookDeliveryRepository {
             WHERE d.id = due.id AND e.id = d.endpoint_id
             RETURNING d.id, d.endpoint_id, e.merchant_id, e.url, d.event_id, d.event_type,
                 d.order_id, d.order_seq, d.payload::text AS payload, d.attempts, d.created_at,
-                COALESCE(d.replayed_at, d.created_at) AS window_start
-            """)
+                COALESCE(d.replayed_at, d.created_at) AS window_start, %2$s AS once
+            """
+                .formatted(OWN_NOTICE, ONCE))
         .param("now", ts(now))
         .param("leaseUntil", ts(now.plus(lease)))
         .param("limit", limit)
@@ -229,7 +274,8 @@ public class WebhookDeliveryRepository {
                     rs.getString("payload"),
                     rs.getInt("attempts"),
                     rs.getObject("created_at", OffsetDateTime.class).toInstant(),
-                    rs.getObject("window_start", OffsetDateTime.class).toInstant()))
+                    rs.getObject("window_start", OffsetDateTime.class).toInstant(),
+                    rs.getBoolean("once")))
         .list()
         .stream()
         // RETURNING comes back in no particular order; hand them out oldest event first.

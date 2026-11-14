@@ -104,7 +104,8 @@ class WebhookEndpointApiTest {
         .startsWith("sealed:v1:test1:");
 
     // The sealed copy opens to sign deliveries.
-    assertThat(service.signingSecret("acme", UUID.fromString(id))).isEqualTo(secret);
+    assertThat(service.signingSecrets("acme", UUID.fromString(id), java.time.Instant.now()))
+        .containsExactly(secret);
   }
 
   @Test
@@ -176,9 +177,11 @@ class WebhookEndpointApiTest {
     assertThat(c.has("description")).as("an empty description clears it").isFalse();
     assertThat(c.get("state").asString()).isEqualTo("ENABLED");
     assertThat(api.get(path).json()).isEqualTo(c);
-    assertThat(service.signingSecret("acme", UUID.fromString(c.get("id").asString())))
+    assertThat(
+            service.signingSecrets(
+                "acme", UUID.fromString(c.get("id").asString()), java.time.Instant.now()))
         .as("the secret doesn't change")
-        .isEqualTo(secret);
+        .containsExactly(secret);
 
     for (String bad :
         List.of(

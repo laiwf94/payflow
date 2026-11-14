@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -176,7 +177,8 @@ class WebhookDispatcherTest {
         Duration.ofSeconds(5),
         Duration.ofMinutes(10),
         window,
-        grace);
+        grace,
+        Duration.ofDays(3));
   }
 
   private static WebhookProperties props() {
@@ -217,15 +219,7 @@ class WebhookDispatcherTest {
   private UUID endpoint(String merchantId, String url, List<String> events) {
     Instant now = clock.instant();
     WebhookEndpoint e =
-        new WebhookEndpoint(
-            UUID.randomUUID(),
-            merchantId,
-            url,
-            null,
-            events,
-            WebhookEndpoint.State.ENABLED,
-            now,
-            now);
+        WebhookEndpoint.created(UUID.randomUUID(), merchantId, url, null, events, now);
     String secret = "whsec_test_" + UUID.randomUUID();
     endpointRepo.insert(
         e, box.seal(secret, WebhookEndpointRepository.secretContext(merchantId, e.id())));
@@ -288,6 +282,36 @@ class WebhookDispatcherTest {
 
   private UUID onlyDelivery() {
     return jdbc.sql("SELECT id FROM webhook_deliveries").query(UUID.class).single();
+  }
+
+  private WebhookEndpoint stored(UUID endpoint) {
+    return endpointRepo.find("acme", endpoint).orElseThrow();
+  }
+
+  /** Runs the dispatcher until nothing is due, moving the clock to each next attempt. */
+  private int drive(WebhookDispatcher d, Instant until) {
+    int attempts = 0;
+    while (true) {
+      int n = d.runOnce();
+      attempts += n;
+      if (n > 0) {
+        continue;
+      }
+      OffsetDateTime next =
+          jdbc.sql(
+                  """
+                  SELECT min(d.next_attempt_at) FROM webhook_deliveries d
+                  JOIN webhook_endpoints e ON e.id = d.endpoint_id
+                  WHERE d.state = 'PENDING' AND e.state = 'ENABLED'
+                  """)
+              .query(OffsetDateTime.class)
+              .optional()
+              .orElse(null);
+      if (next == null || next.toInstant().isAfter(until)) {
+        return attempts;
+      }
+      clock.advance(Duration.between(clock.instant(), next.toInstant()));
+    }
   }
 
   private List<Map<String, Object>> attempts(UUID delivery) {
@@ -471,12 +495,11 @@ class WebhookDispatcherTest {
     Duration window = Duration.ofDays(3);
     WebhookDispatcher d =
         dispatcher(props(Duration.ofSeconds(3), 8, 8, window, Duration.ofSeconds(1)));
-    UUID delivery = null;
+    UUID delivery = onlyDelivery();
     int runs = 0;
     while (runs < 2_000) {
       assertThat(d.runOnce()).isEqualTo(1);
       runs++;
-      delivery = onlyDelivery();
       Instant next = nextAttempt(delivery);
       if (next == null) {
         break;
@@ -493,6 +516,12 @@ class WebhookDispatcherTest {
         .isEqualTo(created.plus(window));
     // Backed off: three days at a 10-minute cap is a few hundred attempts, not thousands.
     assertThat(runs).isBetween(300, 1_200);
+    // Three days of nothing but failures: the endpoint is disabled, and its final notice is the
+    // one thing still sent to it, once.
+    assertThat(merchant.received).hasSize(runs);
+    assertThat(d.runOnce()).isEqualTo(1);
+    assertThat(merchant.received.getLast().header(WebhookDispatcher.HEADER_EVENT_TYPE))
+        .isEqualTo(WebhookEvents.ENDPOINT_DISABLED);
     assertThat(d.runOnce()).isZero();
   }
 
@@ -684,6 +713,247 @@ class WebhookDispatcherTest {
         new WebhookEndpointService.Changes(null, null, null, WebhookEndpoint.State.ENABLED));
     assertThat(d.runOnce()).isEqualTo(1);
     assertThat(merchant.received).extracting(Received::path).containsExactly("/paused");
+  }
+
+  @Test
+  void duringARotationEveryDeliveryCarriesBothSignaturesUntilTheOldSecretExpires()
+      throws Exception {
+    UUID ep = endpoint(merchant.url("/rotating"));
+    String old = secrets.get(ep);
+    String fresh = endpointService.rotateSecret("acme", ep, Duration.ofHours(1)).secret();
+    WebhookDispatcher d = dispatcher(props());
+
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    assertThat(d.runOnce()).isEqualTo(1);
+    Received during = merchant.received.getLast();
+    String sig = during.header(WebhookSignature.HEADER);
+    long now = clock.instant().getEpochSecond();
+    assertThat(sig).matches("t=" + now + ",v1=[0-9a-f]{64},v1=[0-9a-f]{64}");
+    byte[] body = during.body().getBytes(StandardCharsets.UTF_8);
+    // A receiver still on the old secret and one already on the new one both accept it, and the
+    // first v1 is the new secret's.
+    for (String s : List.of(old, fresh)) {
+      assertThat(WebhookSignature.verify(sig, body, s, now, WebhookSignature.DEFAULT_TOLERANCE))
+          .as("signed with " + (s.equals(old) ? "the old" : "the new") + " secret")
+          .isTrue();
+    }
+    String firstOnly = sig.substring(0, sig.lastIndexOf(",v1="));
+    assertThat(
+            WebhookSignature.verify(
+                firstOnly, body, fresh, now, WebhookSignature.DEFAULT_TOLERANCE))
+        .isTrue();
+
+    // Once it expires the old secret signs nothing more.
+    clock.advance(Duration.ofHours(2));
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    assertThat(d.runOnce()).isEqualTo(1);
+    Received after = merchant.received.getLast();
+    String sig2 = after.header(WebhookSignature.HEADER);
+    long later = clock.instant().getEpochSecond();
+    assertThat(sig2).matches("t=" + later + ",v1=[0-9a-f]{64}");
+    byte[] body2 = after.body().getBytes(StandardCharsets.UTF_8);
+    assertThat(
+            WebhookSignature.verify(sig2, body2, fresh, later, WebhookSignature.DEFAULT_TOLERANCE))
+        .isTrue();
+    assertThat(WebhookSignature.verify(sig2, body2, old, later, WebhookSignature.DEFAULT_TOLERANCE))
+        .isFalse();
+  }
+
+  @Test
+  void anEndpointFailingForThreeDaysIsDisabledWithOneFinalNotice() throws Exception {
+    UUID down = endpoint("acme", merchant.url("/down"), List.of("*"));
+    UUID watcher =
+        endpoint("acme", merchant.url("/watcher"), List.of(WebhookEvents.ENDPOINT_DISABLED));
+    UUID orders = endpoint("acme", merchant.url("/orders"), List.of("order.created"));
+    UUID all = endpoint("acme", merchant.url("/all"), List.of("*"));
+    UUID globex = endpoint("globex", merchant.url("/globex"), List.of("*"));
+    AtomicBoolean downWorks = new AtomicBoolean();
+    merchant.answer = r -> Reply.of(r.path().equals("/down") && !downWorks.get() ? 503 : 200);
+    WebhookDispatcher d = dispatcher(props());
+
+    // The first failure starts the run.
+    Instant t0 = clock.instant();
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    d.runOnce();
+    assertThat(stored(down).failingSince()).isEqualTo(t0.truncatedTo(ChronoUnit.MICROS));
+    assertThat(stored(all).failingSince()).isNull();
+
+    // A day of failures later, one 2xx ends the run.
+    drive(d, t0.plus(Duration.ofDays(1)));
+    clock.advance(Duration.between(clock.instant(), t0.plus(Duration.ofDays(1))));
+    assertThat(stored(down).failingSince()).isEqualTo(t0.truncatedTo(ChronoUnit.MICROS));
+    downWorks.set(true);
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    drive(d, clock.instant());
+    assertThat(stored(down).failingSince()).isNull();
+    assertThat(stored(down).state()).isEqualTo(WebhookEndpoint.State.ENABLED);
+
+    // It fails again. Just short of three days the endpoint is still enabled and retried.
+    downWorks.set(false);
+    Instant t1 = clock.instant();
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    d.runOnce();
+    assertThat(stored(down).failingSince()).isEqualTo(t1.truncatedTo(ChronoUnit.MICROS));
+    drive(d, t1.plus(Duration.ofDays(3)).minusSeconds(1));
+    assertThat(stored(down).state()).isEqualTo(WebhookEndpoint.State.ENABLED);
+
+    // The first failure three days into the run disables it.
+    clock.advance(Duration.between(clock.instant(), t1.plus(Duration.ofDays(3))));
+    long sentBefore = merchant.received.stream().filter(r -> r.path().equals("/down")).count();
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    while (stored(down).state() == WebhookEndpoint.State.ENABLED) {
+      assertThat(d.runOnce()).isPositive();
+    }
+    WebhookEndpoint off = stored(down);
+    assertThat(off.disabledReason()).isEqualTo(WebhookEndpoint.DisabledReason.FAILING);
+    assertThat(off.failingSince()).isEqualTo(t1.truncatedTo(ChronoUnit.MICROS));
+    assertThat(merchant.received.stream().filter(r -> r.path().equals("/down")).count())
+        .isGreaterThan(sentBefore);
+
+    // The notice goes, signed, to the endpoint itself and to the endpoints that subscribe to it;
+    // the one that takes only orders, and the other merchant, get nothing.
+    merchant.received.clear();
+    while (d.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+    List<Received> notices =
+        merchant.received.stream()
+            .filter(
+                r ->
+                    WebhookEvents.ENDPOINT_DISABLED.equals(
+                        r.header(WebhookDispatcher.HEADER_EVENT_TYPE)))
+            .toList();
+    assertThat(notices)
+        .extracting(Received::path)
+        .containsExactlyInAnyOrder("/down", "/watcher", "/all");
+    Received own = notices.stream().filter(r -> r.path().equals("/down")).findFirst().orElseThrow();
+    assertThat(
+            WebhookSignature.verify(
+                own.header(WebhookSignature.HEADER),
+                own.body().getBytes(StandardCharsets.UTF_8),
+                secrets.get(down),
+                clock.instant().getEpochSecond(),
+                WebhookSignature.DEFAULT_TOLERANCE))
+        .isTrue();
+    JsonNode n = json.readTree(own.body());
+    assertThat(n.get("event_type").asString()).isEqualTo(WebhookEvents.ENDPOINT_DISABLED);
+    assertThat(n.get("merchant_id").asString()).isEqualTo("acme");
+    assertThat(n.get("endpoint_id").asString()).isEqualTo(down.toString());
+    assertThat(n.get("url").asString()).isEqualTo(merchant.url("/down"));
+    assertThat(n.get("reason").asString()).isEqualTo("failing");
+    assertThat(Instant.parse(n.get("failing_since").asString())).isEqualTo(off.failingSince());
+    assertThat(n.has("order_id")).isFalse();
+    assertThat(notices).extracting(Received::body).containsOnly(own.body());
+    // Everything else to the disabled endpoint waits; its notice, refused, is not retried.
+    assertThat(merchant.received).extracting(Received::path).doesNotContain("/orders", "/globex");
+    assertThat(merchant.received.stream().filter(r -> r.path().equals("/down"))).hasSize(1);
+    UUID ownNotice =
+        jdbc.sql("SELECT id FROM webhook_deliveries WHERE endpoint_id = :e AND event_type = :t")
+            .param("e", down)
+            .param("t", WebhookEvents.ENDPOINT_DISABLED)
+            .query(UUID.class)
+            .single();
+    assertThat(state(ownNotice)).isEqualTo("FAILED");
+    assertThat(attempts(ownNotice)).hasSize(1);
+    clock.advance(Duration.ofHours(6));
+    assertThat(d.runOnce()).isZero();
+    int waiting =
+        jdbc.sql(
+                "SELECT count(*) FROM webhook_deliveries WHERE endpoint_id = :e"
+                    + " AND state = 'PENDING'")
+            .param("e", down)
+            .query(Integer.class)
+            .single();
+    assertThat(waiting).isPositive();
+    assertThat(stored(watcher).state()).isEqualTo(WebhookEndpoint.State.ENABLED);
+    assertThat(stored(orders).failingSince()).isNull();
+    assertThat(endpointRepo.find("globex", globex)).isPresent();
+
+    // The merchant fixes it and enables it again: a fresh start, and what waited goes out.
+    downWorks.set(true);
+    WebhookEndpoint on =
+        endpointService.update(
+            "acme",
+            down,
+            new WebhookEndpointService.Changes(null, null, null, WebhookEndpoint.State.ENABLED));
+    assertThat(on.disabledReason()).isNull();
+    assertThat(on.failingSince()).isNull();
+    merchant.received.clear();
+    while (d.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+    assertThat(merchant.received.stream().filter(r -> r.path().equals("/down")).count())
+        .isEqualTo(waiting);
+  }
+
+  @Test
+  void aDeliveryThatFailsItsWholeWindowDisablesTheEndpointEvenIfItsFirstTryWasLate()
+      throws Exception {
+    UUID ep = endpoint(merchant.url("/late"));
+    merchant.answer = r -> Reply.of(500);
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    Instant created = clock.instant();
+    // payflow was down for 40 minutes: the first try is that far into the window, so the
+    // endpoint has failed for less than three days when the window ends.
+    clock.advance(Duration.ofMinutes(40));
+    WebhookDispatcher d = dispatcher(props());
+    drive(d, created.plus(Duration.ofDays(3)).minusMillis(1));
+    assertThat(stored(ep).state()).isEqualTo(WebhookEndpoint.State.ENABLED);
+    drive(d, created.plus(Duration.ofDays(3)));
+    WebhookEndpoint off = stored(ep);
+    assertThat(off.state()).isEqualTo(WebhookEndpoint.State.DISABLED);
+    assertThat(off.disabledReason()).isEqualTo(WebhookEndpoint.DisabledReason.FAILING);
+    assertThat(Duration.between(off.failingSince(), clock.instant()))
+        .isLessThan(Duration.ofDays(3));
+  }
+
+  @Test
+  void aDeliveryFirstTriedLongAfterItsEventDoesNotDisableTheEndpoint() throws Exception {
+    UUID ep = endpoint(merchant.url("/fresh"));
+    merchant.answer = r -> Reply.of(500);
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    // payflow was down for four days: the delivery's window is spent on its first try, but the
+    // endpoint has failed once, not for three days.
+    clock.advance(Duration.ofDays(4));
+    WebhookDispatcher d = dispatcher(props());
+    assertThat(d.runOnce()).isEqualTo(1);
+    assertThat(state(onlyDelivery())).isEqualTo("FAILED");
+    assertThat(stored(ep).state()).isEqualTo(WebhookEndpoint.State.ENABLED);
+    assertThat(stored(ep).failingSince()).isNotNull();
+    assertThat(d.runOnce()).isZero();
+  }
+
+  @Test
+  void onlyTheEndpointsOwnFailuresCount() throws Exception {
+    UUID broken = endpoint(merchant.url("/fine"));
+    // Its secret was sealed with a key this instance doesn't have: payflow's fault, not the
+    // endpoint's. Nothing is sent and the endpoint is not counted as failing.
+    jdbc.sql("UPDATE webhook_endpoints SET secret_key_id = 'gone' WHERE id = :id")
+        .param("id", broken)
+        .update();
+    relayed(event(UUID.randomUUID(), 1, "order.created", "acme"));
+    WebhookDispatcher d = dispatcher(props());
+    assertThat(d.runOnce()).isEqualTo(1);
+    assertThat(merchant.received).isEmpty();
+    assertThat(attempts(onlyDelivery()).getFirst().get("error").toString()).startsWith("secret");
+    assertThat(stored(broken).failingSince()).isNull();
+
+    // A failed ping counts, and a successful one ends the run.
+    UUID pinged = endpoint(merchant.url("/ping"));
+    merchant.answer = r -> Reply.of(502);
+    tx.executeWithoutResult(
+        s ->
+            deliveries.enqueuePing(
+                pinged, UUID.randomUUID(), "{\"event_type\":\"ping\"}", clock.instant()));
+    assertThat(d.runOnce()).isEqualTo(1);
+    assertThat(stored(pinged).failingSince()).isNotNull();
+    merchant.answer = r -> Reply.of(204);
+    tx.executeWithoutResult(
+        s ->
+            deliveries.enqueuePing(
+                pinged, UUID.randomUUID(), "{\"event_type\":\"ping\"}", clock.instant()));
+    assertThat(d.runOnce()).isEqualTo(1);
+    assertThat(stored(pinged).failingSince()).isNull();
   }
 
   @Test

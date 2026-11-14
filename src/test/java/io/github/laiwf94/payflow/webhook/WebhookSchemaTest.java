@@ -164,9 +164,70 @@ class WebhookSchemaTest {
   }
 
   @Test
-  void onlyAPingBelongsToNoOrder() {
+  void aPreviousSecretIsWholeOrAbsentAndAReasonIsKnown() {
+    UUID hook = valid();
+    String whole =
+        "previous_secret_key_id = 'test1', previous_secret_nonce = secret_nonce,"
+            + " previous_secret_ciphertext = secret_ciphertext,"
+            + " previous_secret_expires_at = now() + interval '1 day'";
+    jdbc.sql("UPDATE webhook_endpoints SET " + whole + " WHERE id = :id")
+        .param("id", hook)
+        .update();
+    for (String broken :
+        new String[] {
+          "previous_secret_expires_at = NULL",
+          "previous_secret_key_id = NULL",
+          "previous_secret_nonce = '\\x00'::bytea",
+          "previous_secret_ciphertext = '\\x00'::bytea",
+        }) {
+      refused(
+          "webhook_endpoints_previous_secret",
+          () ->
+              jdbc.sql("UPDATE webhook_endpoints SET " + broken + " WHERE id = :id")
+                  .param("id", hook)
+                  .update());
+    }
+    jdbc.sql(
+            "UPDATE webhook_endpoints SET previous_secret_key_id = NULL,"
+                + " previous_secret_nonce = NULL, previous_secret_ciphertext = NULL,"
+                + " previous_secret_expires_at = NULL WHERE id = :id")
+        .param("id", hook)
+        .update();
+
+    for (String reason : new String[] {"merchant", "failing"}) {
+      jdbc.sql(
+              "UPDATE webhook_endpoints SET state = 'DISABLED', disabled_reason = :r"
+                  + " WHERE id = :id")
+          .param("r", reason)
+          .param("id", hook)
+          .update();
+    }
+    refused(
+        "webhook_endpoints_disabled_reason",
+        () ->
+            jdbc.sql("UPDATE webhook_endpoints SET disabled_reason = 'bored' WHERE id = :id")
+                .param("id", hook)
+                .update());
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT bool_and(convalidated) FROM pg_constraint
+                    WHERE conname IN ('webhook_endpoints_previous_secret',
+                        'webhook_endpoints_disabled_reason')
+                    """)
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+  }
+
+  @Test
+  void onlyAPingOrADisabledNoticeBelongsToNoOrder() {
     UUID hook = valid();
     deliveryOf(hook, "'ping'", "NULL", "NULL");
+    deliveryOf(hook, "'webhook_endpoint.disabled'", "NULL", "NULL");
+    refused(
+        "webhook_deliveries_order",
+        () -> deliveryOf(hook, "'webhook_endpoint.disabled'", "gen_random_uuid()", "1"));
     deliveryOf(hook, "'order.created'", "gen_random_uuid()", "1");
     refused("webhook_deliveries_order", () -> deliveryOf(hook, "'order.created'", "NULL", "NULL"));
     refused(
@@ -182,7 +243,7 @@ class WebhookSchemaTest {
                     """)
                 .query(Boolean.class)
                 .single())
-        .as("V20 validated it")
+        .as("V22 validated it")
         .isTrue();
   }
 

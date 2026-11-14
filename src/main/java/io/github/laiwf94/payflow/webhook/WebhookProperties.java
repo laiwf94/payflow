@@ -26,6 +26,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param retryCap the most the backoff ceiling grows to
  * @param retryWindow how long after it was created a delivery is retried before it is given up
  * @param shutdownGrace how long a stop waits for attempts in flight before handing them back
+ * @param disableAfter how long an endpoint may fail every attempt before payflow disables it and
+ *     sends it a final notice; it is also disabled when a delivery fails every attempt of its retry
+ *     window, if that window is at least this long
  */
 @ConfigurationProperties("payflow.webhooks")
 public record WebhookProperties(
@@ -42,7 +45,8 @@ public record WebhookProperties(
     @DefaultValue("5s") Duration retryBase,
     @DefaultValue("1h") Duration retryCap,
     @DefaultValue("3d") Duration retryWindow,
-    @DefaultValue("3s") Duration shutdownGrace) {
+    @DefaultValue("3s") Duration shutdownGrace,
+    @DefaultValue("3d") Duration disableAfter) {
 
   public WebhookProperties {
     allowedNetworks = List.copyOf(allowedNetworks);
@@ -75,6 +79,11 @@ public record WebhookProperties(
     }
     if (shutdownGrace.isNegative() || shutdownGrace.compareTo(Duration.ofMinutes(1)) > 0) {
       throw new IllegalArgumentException("webhook shutdown grace must be 0-60 s");
+    }
+    if (disableAfter.compareTo(Duration.ofHours(1)) < 0
+        || disableAfter.compareTo(Duration.ofDays(30)) > 0) {
+      throw new IllegalArgumentException(
+          "webhook disable-after must be 1 h to 30 d, so a brief outage never disables an endpoint");
     }
   }
 }

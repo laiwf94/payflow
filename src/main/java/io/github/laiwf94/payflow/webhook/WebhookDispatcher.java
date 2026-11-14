@@ -52,10 +52,20 @@ import org.springframework.context.SmartLifecycle;
  *
  * <p>A test ping ({@link WebhookEvents#PING}) belongs to no order and is tried once: whatever its
  * one attempt gets is the answer to whether the endpoint works.
+ *
+ * <p>Every delivery is signed with each of the endpoint's secrets that still signs: during a
+ * rotation the header carries the new secret's signature and the old one's. Each answer also feeds
+ * the endpoint's health (see {@link WebhookEndpointService#failed}): an endpoint that fails every
+ * attempt for {@link WebhookProperties#disableAfter()} is disabled and sent a final notice, which
+ * goes out once although the endpoint is now disabled. Once a minute the dispatcher also wipes the
+ * secrets rotations left behind once they stop signing.
  */
 public class WebhookDispatcher implements SmartLifecycle {
 
   private static final Logger log = LoggerFactory.getLogger(WebhookDispatcher.class);
+
+  /** How often expired previous secrets are wiped. */
+  private static final long SWEEP_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
 
   public static final String HEADER_EVENT_ID = "Payflow-Event-Id";
   public static final String HEADER_EVENT_TYPE = "Payflow-Event-Type";
@@ -86,6 +96,7 @@ public class WebhookDispatcher implements SmartLifecycle {
   private final Map<UUID, InFlight> inFlight = new ConcurrentHashMap<>();
 
   private boolean woken;
+  private long lastSweep = System.nanoTime() - SWEEP_INTERVAL_NANOS;
   private volatile boolean running;
   private Thread dispatcher;
 
@@ -172,9 +183,9 @@ public class WebhookDispatcher implements SmartLifecycle {
       Outcome outcome = null;
       String error = null;
       try {
-        String secret = endpoints.signingSecret(c.merchantId(), c.endpointId());
+        List<String> secrets = endpoints.signingSecrets(c.merchantId(), c.endpointId(), started);
         f.started = started;
-        outcome = send(c, secret, started);
+        outcome = send(c, secrets, started);
       } catch (WebhookEndpointService.NotFound e) {
         // Deleted since the claim: the delete gave its pending deliveries up already.
         return;
@@ -212,12 +223,11 @@ public class WebhookDispatcher implements SmartLifecycle {
     }
   }
 
-  private Outcome send(Claim c, String secret, Instant at) {
+  private Outcome send(Claim c, List<String> secrets, Instant at) {
     byte[] body = c.payload().getBytes(StandardCharsets.UTF_8);
     Map<String, String> headers = new LinkedHashMap<>();
     headers.put(
-        WebhookSignature.HEADER,
-        WebhookSignature.header(at.getEpochSecond(), body, List.of(secret)));
+        WebhookSignature.HEADER, WebhookSignature.header(at.getEpochSecond(), body, secrets));
     headers.put(HEADER_EVENT_ID, c.eventId().toString());
     headers.put(HEADER_EVENT_TYPE, c.eventType());
     headers.put(HEADER_DELIVERY_ID, c.id().toString());
@@ -233,22 +243,29 @@ public class WebhookDispatcher implements SmartLifecycle {
     };
   }
 
-  /** Settles on a 2xx, otherwise schedules the next attempt or gives up past the window. */
+  /**
+   * Settles on a 2xx, otherwise schedules the next attempt or gives up past the window; then tells
+   * the endpoint's health what the endpoint answered, when it answered anything.
+   */
   private void record(Claim c, Attempt a, Outcome outcome) {
     Instant now = clock.instant();
     boolean held;
+    boolean success = outcome instanceof Answered ans && ans.isSuccess();
+    boolean windowSpent = false;
     String settled = null;
-    if (outcome instanceof Answered ans && ans.isSuccess()) {
+    if (success) {
       held = deliveries.succeed(c, a, now);
       settled = "succeeded";
     } else {
       Instant deadline = c.windowStart().plus(props.retryWindow());
-      if (WebhookEvents.PING.equals(c.eventType())) {
-        // A ping asks whether the endpoint works now; its one answer is the answer.
+      if (c.once()) {
+        // A ping asks whether the endpoint works now; its one answer is the answer. A disabled
+        // endpoint's final notice is a courtesy, not something to keep at for days.
         held = deliveries.giveUp(c, a, now);
         settled = "failed";
       } else if (!now.isBefore(deadline)) {
         held = deliveries.giveUp(c, a, now);
+        windowSpent = true;
         settled = "failed";
         if (held) {
           log.warn(
@@ -271,6 +288,60 @@ public class WebhookDispatcher implements SmartLifecycle {
     if (settled != null) {
       meters.counter("payflow.webhooks.deliveries", "state", settled).increment();
     }
+    // Only what the endpoint did counts: an attempt that never got as far as sending (a secret
+    // that can't be opened, a fault of payflow's) says nothing about it, and neither does the
+    // notice to an endpoint that is already disabled.
+    if (outcome != null && !(c.once() && WebhookEvents.ENDPOINT_DISABLED.equals(c.eventType()))) {
+      health(c, a, success, windowSpent);
+    }
+  }
+
+  private void health(Claim c, Attempt a, boolean success, boolean windowSpent) {
+    try {
+      if (success) {
+        endpoints.succeeded(c.endpointId());
+        return;
+      }
+      // A delivery that failed its whole window counts, with slack for a late first attempt,
+      // when that window is at least as long as an endpoint may fail.
+      boolean spentCounts = windowSpent && props.retryWindow().compareTo(props.disableAfter()) >= 0;
+      endpoints
+          .failed(c, a.attemptedAt(), spentCounts, props.disableAfter(), clock.instant())
+          .ifPresent(
+              d -> {
+                meters.counter("payflow.webhooks.endpoints_disabled").increment();
+                log.atWarn()
+                    .addKeyValue("endpoint_id", d.endpoint().id())
+                    .addKeyValue("merchant_id", d.endpoint().merchantId())
+                    .log(
+                        "disabled webhook endpoint {}: every attempt has failed since {}; sent"
+                            + " {} final notice(s)",
+                        d.endpoint().id(),
+                        d.endpoint().failingSince(),
+                        d.notices());
+                wakeUp();
+              });
+    } catch (RuntimeException e) {
+      // Health is bookkeeping; the attempt itself is already recorded.
+      log.error("could not record webhook endpoint health", e);
+    }
+  }
+
+  /** Wipes expired previous secrets, at most once per {@link #SWEEP_INTERVAL_NANOS}. */
+  private void sweep() {
+    long now = System.nanoTime();
+    if (now - lastSweep < SWEEP_INTERVAL_NANOS) {
+      return;
+    }
+    lastSweep = now;
+    try {
+      int wiped = endpoints.wipeExpiredSecrets();
+      if (wiped > 0) {
+        log.info("wiped {} webhook signing secret(s) that rotations left behind", wiped);
+      }
+    } catch (RuntimeException e) {
+      log.error("could not wipe expired webhook secrets", e);
+    }
   }
 
   private static String tag(Outcome o) {
@@ -282,6 +353,7 @@ public class WebhookDispatcher implements SmartLifecycle {
 
   private void dispatch() {
     while (running) {
+      sweep();
       try {
         int free = Math.min(permits.availablePermits(), props.batchSize());
         List<Claim> claims = free == 0 ? List.of() : claim(free);

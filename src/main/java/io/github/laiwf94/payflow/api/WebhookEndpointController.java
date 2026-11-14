@@ -87,6 +87,23 @@ class WebhookEndpointController {
                 req.url(), req.enabledEvents(), req.description(), req.state())));
   }
 
+  /**
+   * Gives the endpoint a new signing secret, shown in this answer only. The secret it replaces
+   * keeps signing beside it for a while, so deliveries carry both signatures as the merchant
+   * deploys the new one. The body is optional.
+   */
+  @PostMapping("/{id}/rotate_secret")
+  WebhookEndpointResponse rotateSecret(
+      @PathVariable String id,
+      @RequestBody(required = false) WebhookEndpointRequests.RotateSecret req,
+      HttpServletRequest http) {
+    WebhookEndpointService.Rotated r =
+        endpoints.rotateSecret(merchant(http), parse(id), req == null ? null : req.previousTtl());
+    // As on creation: the answer shows the secret, so its stored copy for replays is sealed.
+    IdempotencyFilter.sealStoredAnswer(http);
+    return WebhookEndpointResponse.of(r.endpoint(), r.secret());
+  }
+
   /** Deleting twice finds nothing the second time: 404. */
   @DeleteMapping("/{id}")
   Deleted delete(@PathVariable String id, HttpServletRequest http) {

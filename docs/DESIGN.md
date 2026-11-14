@@ -601,6 +601,26 @@ merchant and the key, and opens it on replay. A retry after a lost `201` still g
 endpoint and the same secret, byte for byte; the database holds neither in the clear, which
 `WebhookEndpointApiTest` checks by scanning both tables' rows for the secret.
 
+### Rotating the signing secret
+
+`POST /v1/webhook_endpoints/{id}/rotate_secret` gives the endpoint a new secret, shown in that
+answer only and stored sealed like the first (and sealed in the idempotency store, so a retry
+replays the same rotation instead of making a third secret). The secret it replaces doesn't stop
+at once: it moves into the `previous_secret_*` columns with `previous_secret_expires_at`, a day
+later by default, `previous_secret_expires_in` seconds when given (0 to 7 days; 0 stops it at
+once). Until then every delivery's `Payflow-Signature` carries two `v1` values, the new secret's
+first, so a receiver that checks either secret accepts it, and a merchant can deploy the new
+secret to each of its servers in turn without dropping an event. Both are sealed bound to the same
+endpoint and merchant, so the rotation moves the old ciphertext between columns in SQL without
+opening it. Rotating again while a previous secret still signs drops that one: at most two ever
+sign, which keeps the header and the receiver's work bounded. Reads show
+`previous_secret_expires_at` while the old secret still signs, never a secret. Once a minute the
+dispatcher wipes previous secrets that have expired (and any an older instance's delete left on a
+deleted endpoint, since that delete doesn't know the columns); `WebhookSecretRotationTest` covers
+the overlap, the expiry, the limit of two, the validation and the wipe, and
+`WebhookDispatcherTest` checks a delivery during a rotation verifies with either secret and one
+after it only with the new.
+
 ### Deliveries and attempts
 
 The outbox relay is what feeds webhooks. In the transaction that marks a batch of events
@@ -632,7 +652,8 @@ attempt of the instance that claimed it next. Each claim goes to a virtual threa
   whole `whsec_...` secret, over the timestamp, a full stop and the raw body. Signing the
   timestamp lets a receiver refuse an old request replayed at it (`WebhookSignature.verify`
   accepts five minutes either way); signing the bytes means the receiver checks what arrived
-  before parsing it. A header can carry several `v1` values, for rotating secrets. Alongside
+  before parsing it. A header carries one `v1` per secret that signs: two during a rotation,
+  one otherwise. Alongside
   it go `Payflow-Event-Id` (what a receiver deduplicates by), `Payflow-Event-Type`,
   `Payflow-Delivery-Id` and `Payflow-Delivery-Attempt`.
 - **Settled by a 2xx.** Anything else (a 3xx, which is never followed, a 4xx, a 5xx) and no answer
@@ -661,6 +682,28 @@ attempt of the instance that claimed it next. Each claim goes to a virtual threa
 - **Disabled and deleted endpoints.** A disabled endpoint's pending deliveries wait, and go out
   once it is enabled again; while disabled it gets no new ones. Deleting an endpoint gives up
   its pending deliveries in the same transaction.
+- **Disabled after three days of failures.** Every answer feeds the endpoint's health. The first
+  failed attempt sets `failing_since` (written once, so an endpoint that keeps failing doesn't
+  become a row every attempt updates) and a 2xx clears it. A failed attempt with `failing_since`
+  at least `disable-after` (3 days) ago disables the endpoint, `disabled_reason: failing`; so
+  does a delivery given up at the end of its retry window when the run is within an hour of
+  three days (`WebhookEndpointService.WINDOW_SLACK`): a delivery's first attempt can come a
+  little after its event, and without the slack an endpoint with a single event would never be
+  disabled. A delivery first tried days late, because payflow was down, spends its window on one
+  attempt and doesn't count. Only the endpoint's own failures count: an attempt
+  payflow cut short at shutdown, or one that never got as far as sending (a secret sealed with a
+  key this instance lacks), leaves its health alone. Disabling queues a final
+  `webhook_endpoint.disabled` notice, `{event_id, event_type, merchant_id, endpoint_id, url,
+  reason, failing_since, created_at}`: once to the endpoint itself, sent although it is now
+  disabled and whatever its filter says, and to each of the merchant's other enabled endpoints
+  that subscribe to it, since the failing endpoint will most likely not hear it. Like a ping it
+  belongs to no order (V21 widens V19's CHECK, validated by V22). Disabling is a conditional
+  `UPDATE ... WHERE state = 'ENABLED'`, so only one instance can do it and queue the notice. It
+  runs in its own transaction after the attempt is recorded: it locks the endpoint row, and
+  taking that lock while holding the delivery row would deadlock with a delete, which locks them
+  the other way round. The rest of the endpoint's deliveries wait, as for any disabled endpoint;
+  enabling it again clears the reason and the run, so it gets the full three days once more, and
+  what waited goes out.
 - **Stopping.** `stop()` stops claiming and gives attempts in flight `shutdown-grace` (3 s) to
   finish. One still waiting for its answer then is recorded as an attempt cut short
   (`shutdown: payflow stopped before the answer arrived`) and made due at once, so the next
@@ -816,6 +859,7 @@ response without the other fails the build.
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
 | Malformed event on the topic | Moved to the dead-letter topic | Consumer continues |
 | Merchant's webhook endpoint down, slow or answering non-2xx | Attempt logged; that order's later events wait for that endpoint | Retried with backoff for 3 days, then given up; other orders and endpoints carry on |
+| Merchant's webhook endpoint failing for 3 days | Endpoint disabled (`disabled_reason: failing`) | One final `webhook_endpoint.disabled` notice to it and to the merchant's endpoints that subscribe; its deliveries wait until the merchant enables it again |
 | payflow killed mid-webhook | Delivery lease left behind | Lease expires (60 s); the next instance sends it again, and the receiver deduplicates by event id |
 | Postgres down | API requests get 503 `unavailable` (a POST before doing anything, or rolled back if the connection drops mid-request); workers and relay log and keep polling | Resumes when Postgres returns; nothing is held in memory |
 | Client retries a POST | Replay of the first response | Idempotency key |
@@ -840,6 +884,8 @@ response without the other fails the build.
 | Webhook attempt: whole / connect / head / body kept | 10 s / 3 s / 16 KiB / 1 KiB | `payflow.webhooks.*`, `SafeHttpSender` |
 | Webhook retries | full jitter from 5 s, capped at 1 h, for 3 days after the event or its replay | `payflow.webhooks.retry-*` |
 | Webhook deliveries per replay | 1,000 | `WebhookDeliveryLog.MAX_REPLAY` |
+| Webhook secrets signing at once / previous secret kept | 2 / default 1 day, 0-7 days | `WebhookEndpointService` |
+| Webhook endpoint disabled after failing for | 3 days (1 h to 30 d) | `payflow.webhooks.disable-after` |
 | Webhook delivery log page | 1-100, default 20 | `WebhookDeliveryListRequest` |
 | Webhook attempts in flight per instance: all / per endpoint | 64 / 8 | `payflow.webhooks.concurrency`, `per-endpoint` |
 | Webhook lease / shutdown grace | 60 s / 3 s | `payflow.webhooks.lease`, `shutdown-grace` |

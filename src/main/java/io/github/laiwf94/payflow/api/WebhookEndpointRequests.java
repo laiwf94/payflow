@@ -12,9 +12,10 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * The bodies of {@code POST /v1/webhook_endpoints}, {@code POST /v1/webhook_endpoints/{id}} and
- * {@code POST /v1/webhook_endpoints/{id}/replay}. Bean Validation checks sizes; the URL's shape,
- * the event types and the description are checked by the webhook service, which owns those rules.
+ * The bodies of {@code POST /v1/webhook_endpoints}, {@code POST /v1/webhook_endpoints/{id}}, {@code
+ * POST /v1/webhook_endpoints/{id}/rotate_secret} and {@code POST
+ * /v1/webhook_endpoints/{id}/replay}. Bean Validation checks sizes; the URL's shape, the event
+ * types and the description are checked by the webhook service, which owns those rules.
  */
 final class WebhookEndpointRequests {
 
@@ -32,6 +33,19 @@ final class WebhookEndpointRequests {
       @Size(min = 1, max = WebhookEvents.MAX_FILTER) List<String> enabledEvents,
       String description,
       WebhookEndpoint.State state) {}
+
+  /**
+   * Rotates the signing secret. {@code previous_secret_expires_in} is how many seconds the secret
+   * it replaces keeps signing beside the new one: 0 to 604,800 (7 days), a day when absent.
+   */
+  record RotateSecret(Long previousSecretExpiresIn) {
+
+    java.time.Duration previousTtl() {
+      return previousSecretExpiresIn == null
+          ? null
+          : java.time.Duration.ofSeconds(previousSecretExpiresIn);
+    }
+  }
 
   /**
    * Replays deliveries: one event's ({@code event_id}), or those created in a time range ({@code

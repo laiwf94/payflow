@@ -269,6 +269,29 @@ class OpenApiContractTest {
     record(
         update, api.post(path, "{\"state\":\"ENABLED\"}", "Idempotency-Key", "reused-hook-update"));
 
+    String rotate = "POST " + one + "/rotate_secret";
+    String rotatePath = path + "/rotate_secret";
+    String gone = hooks + "/" + missing + "/rotate_secret";
+    String tooLong = "{\"previous_secret_expires_in\":604801}";
+    Api.Response rotated = api.post(rotatePath, null);
+    record(rotate, rotated);
+    assertThat(rotated.json().get("secret").asString()).startsWith("whsec_");
+    assertThat(rotated.json().has("previous_secret_expires_at")).isTrue();
+    record(rotate, api.post(rotatePath, "{\"previous_secret_expires_in\":0}"));
+    replayed(rotate, 200, rotatePath, "{\"previous_secret_expires_in\":60}");
+    record(rotate, api.post(rotatePath, tooLong));
+    replayed(rotate, 400, rotatePath, tooLong);
+    record(rotate, api.post(rotatePath, null, "Idempotency-Key", "has space"));
+    record(rotate, anonymous.post(rotatePath, null));
+    record(rotate, api.post(gone, null));
+    replayed(rotate, 404, gone, null);
+    busyKey("busy-rotate", rotatePath, null);
+    record(rotate, api.post(rotatePath, null, "Idempotency-Key", "busy-rotate"));
+    record(rotate, api.post(rotatePath, tooLarge));
+    record(rotate, api.post(rotatePath, "<rotate/>", "Content-Type", "application/xml"));
+    api.post(rotatePath, null, "Idempotency-Key", "reused-rotate");
+    record(rotate, api.post(rotatePath, tooLong, "Idempotency-Key", "reused-rotate"));
+
     record("DELETE " + one, anonymous.send("DELETE", path, null));
     record("DELETE " + one, api.send("DELETE", path, null));
     record("DELETE " + one, api.send("DELETE", path, null));

@@ -10,8 +10,8 @@ import java.util.Set;
 
 /**
  * The event types an endpoint can subscribe to: every type the outbox writes, named the way it
- * writes them, so the two can't drift apart. {@value #ALL} subscribes to every type, including ones
- * added later.
+ * writes them, so the two can't drift apart, and {@value #ENDPOINT_DISABLED}. {@value #ALL}
+ * subscribes to every type, including ones added later.
  */
 public final class WebhookEvents {
 
@@ -23,10 +23,17 @@ public final class WebhookEvents {
    */
   public static final String PING = "ping";
 
+  /**
+   * Sent when payflow disables an endpoint that has been failing: once, as a final notice, to the
+   * endpoint itself whatever its filter says, and to each of the merchant's other enabled endpoints
+   * that subscribe to it. Like a ping it belongs to no order.
+   */
+  public static final String ENDPOINT_DISABLED = "webhook_endpoint.disabled";
+
   /** At most this many types in one endpoint's filter. */
   public static final int MAX_FILTER = 32;
 
-  /** Every type, in a stable order: the order's, by state, then the refund's. */
+  /** Every type, in a stable order: the order's, by state, then the refund's, then endpoints'. */
   public static final Set<String> TYPES;
 
   static {
@@ -42,6 +49,7 @@ public final class WebhookEvents {
     types.add(RefundTransitions.CREATED);
     types.add(RefundTransitions.SUCCEEDED);
     types.add(RefundTransitions.FAILED);
+    types.add(ENDPOINT_DISABLED);
     TYPES = java.util.Collections.unmodifiableSet(types);
   }
 

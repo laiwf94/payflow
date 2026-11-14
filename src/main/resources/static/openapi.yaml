@@ -456,6 +456,10 @@ paths:
         Each field given replaces the stored one; at least one is needed. An empty `description`
         clears it. A `DISABLED` endpoint keeps its settings but receives nothing until it is
         enabled again. The secret doesn't change.
+
+        Enabling an endpoint that payflow disabled (`disabled_reason: failing`) clears the reason
+        and its `failing_since`, so it gets the full three days to recover again; deliveries
+        that waited while it was disabled then go out.
       parameters:
         - $ref: '#/components/parameters/WebhookEndpointId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -524,6 +528,54 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/WebhookEndpointNotFound'
+  /v1/webhook_endpoints/{id}/rotate_secret:
+    post:
+      operationId: rotateWebhookSecret
+      summary: Give a webhook endpoint a new signing secret
+      description: |
+        Generates a new signing `secret`, shown in this answer only, and signs every delivery
+        with it from now on. The secret it replaces keeps signing beside it for
+        `previous_secret_expires_in` seconds (a day when absent, at most 7 days, 0 to stop it at
+        once): until `previous_secret_expires_at`, every `Payflow-Signature` header carries two
+        `v1` values, the new secret's first, so a receiver that checks either secret accepts the
+        delivery while the new one is deployed. Rotating again while a previous secret still
+        signs drops that one, so at most two ever sign. The body is optional.
+      parameters:
+        - $ref: '#/components/parameters/WebhookEndpointId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateWebhookSecret'
+      responses:
+        '200':
+          description: Rotated. The only answer that shows the new secret.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedWebhookEndpoint'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/WebhookEndpointNotFound'
+        '409':
+          $ref: '#/components/responses/KeyInUse'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/KeyReused'
   /v1/webhook_endpoints/{id}/deliveries:
     get:
       operationId: listWebhookDeliveries
@@ -1280,15 +1332,17 @@ components:
     WebhookEventType:
       type: string
       description: |
-        An event type an endpoint can subscribe to, or `*` for every type. Each is an event the
+        An event type an endpoint can subscribe to, or `*` for every type. Most are events the
         order's stream carries: `order.created`, `order.cancel_requested`, one per state the
-        order can move to, and one per refund change.
+        order can move to, and one per refund change. `webhook_endpoint.disabled` says payflow
+        disabled one of the merchant's endpoints because every attempt to deliver to it failed
+        for three days; that endpoint gets it once as a final notice whatever its filter says.
       enum:
         ['*', order.created, order.cancel_requested, order.inventory_reserved,
          order.payment_authorized, order.payment_captured, order.completed,
          order.cancelling_shipment, order.reversing_payment, order.releasing_inventory,
          order.failed, order.cancelled, order.partially_refunded, order.refunded,
-         refund.created, refund.succeeded, refund.failed]
+         refund.created, refund.succeeded, refund.failed, webhook_endpoint.disabled]
     CreateWebhookEndpoint:
       type: object
       additionalProperties: false
@@ -1352,6 +1406,24 @@ components:
         state:
           type: string
           enum: [ENABLED, DISABLED]
+        disabled_reason:
+          type: string
+          enum: [merchant, failing]
+          description: |
+            Present while `DISABLED`: `merchant` when it was disabled through the API, `failing`
+            when payflow disabled it because every attempt failed for three days.
+        failing_since:
+          type: string
+          format: date-time
+          description: |
+            Present while its deliveries are failing: when its current run of failed attempts
+            began. A 2xx answer ends the run; three days of it disable the endpoint.
+        previous_secret_expires_at:
+          type: string
+          format: date-time
+          description: |
+            Present while the secret its last rotation replaced still signs deliveries beside
+            the current one: until when it does.
         created_at:
           type: string
           format: date-time
@@ -1380,6 +1452,24 @@ components:
         state:
           type: string
           enum: [ENABLED, DISABLED]
+        disabled_reason:
+          type: string
+          enum: [merchant, failing]
+          description: |
+            Present while `DISABLED`: `merchant` when it was disabled through the API, `failing`
+            when payflow disabled it because every attempt failed for three days.
+        failing_since:
+          type: string
+          format: date-time
+          description: |
+            Present while its deliveries are failing: when its current run of failed attempts
+            began. A 2xx answer ends the run; three days of it disable the endpoint.
+        previous_secret_expires_at:
+          type: string
+          format: date-time
+          description: |
+            Present while the secret its last rotation replaced still signs deliveries beside
+            the current one: until when it does.
         created_at:
           type: string
           format: date-time
@@ -1390,13 +1480,24 @@ components:
           type: string
           pattern: '^whsec_[A-Za-z0-9_-]{43}$'
           description: The signing secret. Shown only in this answer.
+    RotateWebhookSecret:
+      type: object
+      additionalProperties: false
+      properties:
+        previous_secret_expires_in:
+          type: integer
+          minimum: 0
+          maximum: 604800
+          description: |
+            Seconds the replaced secret keeps signing beside the new one; 86400 (a day) when
+            absent, 0 to stop it at once.
     WebhookDeliveryState:
       type: string
       enum: [PENDING, SUCCEEDED, FAILED]
       description: >-
         `PENDING` until a 2xx answer (`SUCCEEDED`) or until its retries run out (`FAILED`), 3
-        days after it was created or replayed. A ping is `FAILED` after one attempt without a
-        2xx.
+        days after it was created or replayed. A ping, and the final `webhook_endpoint.disabled`
+        notice to the endpoint it is about, are `FAILED` after one attempt without a 2xx.
     WebhookAttempt:
       type: object
       additionalProperties: false
@@ -1446,7 +1547,8 @@ components:
         order_id:
           type: string
           format: uuid
-          description: The order the event belongs to; absent on a ping.
+          description: |
+            The order the event belongs to; absent on a ping and on `webhook_endpoint.disabled`.
         state:
           $ref: '#/components/schemas/WebhookDeliveryState'
         attempts:
@@ -1491,7 +1593,8 @@ components:
         order_id:
           type: string
           format: uuid
-          description: The order the event belongs to; absent on a ping.
+          description: |
+            The order the event belongs to; absent on a ping and on `webhook_endpoint.disabled`.
         state:
           $ref: '#/components/schemas/WebhookDeliveryState'
         attempts:
