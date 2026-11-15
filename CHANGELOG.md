@@ -120,6 +120,11 @@ notes on GitHub link here.
   type. Endpoints now show `disabled_reason`, `failing_since` and `previous_secret_expires_at`.
   Enabling a disabled endpoint again gives it a fresh three days. Migrations V21 and V22 add the
   columns and let the notice's delivery have no order.
+- [docs/webhooks.md](docs/webhooks.md), the guide for the receiving end (#25): what arrives, every
+  header and event type, how to check `Payflow-Signature`, with verification code in Python,
+  Node.js and Java and a complete receiver in Python, and how rotation, retries, ordering,
+  replays and disabling look from the merchant's side. The test suite runs the page's code
+  against real signed deliveries, so the page can't drift from what payflow sends.
 - Secrets at rest: `PAYFLOW_SECRET_KEYS` (`id:base64key`, 32-byte keys, comma-separated to
   rotate) seals webhook signing secrets with AES-256-GCM, bound to their row. A stored
   idempotent answer that carries such a secret is sealed too, and replays unchanged. Unset, each

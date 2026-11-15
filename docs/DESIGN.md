@@ -555,7 +555,9 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 Merchants learn about their orders without polling by registering webhook endpoints. This part is
 being built over the week of #25; so far it has the endpoints themselves, the sender that makes
 every attempt, the dispatcher that turns each relayed event into signed, retried, ordered
-deliveries, and the delivery log with replays and test pings.
+deliveries, and the delivery log with replays and test pings. What a merchant's receiver sees,
+and how it checks a signature, is in [webhooks.md](webhooks.md); `WebhookDocsTest` runs that
+page's code against real deliveries, so it describes what is sent rather than what was meant.
 
 ### Endpoints
 
@@ -790,9 +792,21 @@ go through a proxy that looks it up again:
 
 An attempt ends as an HTTP status, or as one of `address_refused`, `dns`, `connect`, `tls`,
 `timeout`, `protocol` or `io` with a detail, which is the `error` an attempt row records.
-`SafeHttpSenderTest` runs it against real sockets: a rebinding resolver, a mixed answer, mapped and
-NAT64 literals, a redirect, a head and a body sent a byte at a time, a 4 MiB body (by length,
-until close and chunked), an oversized head, a non-HTTP answer, and TLS with SNI checked on the
+A head that ends early is told apart from one that is too large: the server hanging up is `io`,
+the deadline `timeout`, and the cap `protocol`. Interim answers count towards the 16 KiB, so a
+server that sends `100 Continue` forever is cut off there. A TLS handshake the server stalls is a
+`timeout`, not a `tls` failure, since nothing was wrong with the certificate. The body's framing
+is read strictly, digits only for `Content-Length` and hex only for a chunk size: a negative,
+signed, non-numeric or overflowing value keeps the status and marks the body cut rather than
+being parsed loosely.
+
+`SafeHttpSenderTest` runs it against real sockets: a rebinding resolver, and one that flips
+between an allowed address and the metadata address on every lookup; a mixed answer; mapped and
+NAT64 literals; fallback to the next checked address when one refuses the connection; every
+redirect status to public, private and relative targets; a head, a body and a chunked body sent
+a byte at a time; a TLS handshake that stalls; a 4 MiB body (by length, until close and
+chunked); an oversized head, endless interim answers and an unending status line; bodies shorter
+than their length and malformed framing; a non-HTTP answer; and TLS with SNI checked on the
 server and a certificate for the wrong name. `AddressPolicyTest` covers every range.
 
 ## Idempotency keys

@@ -548,7 +548,15 @@ class SafeHttpSenderTest {
             false,
             text("HTTP/1.1 200 OK\r\nX-Big: " + "h".repeat(SafeHttpSender.MAX_HEAD) + "\r\n\r\n"));
     Server hangsUp = new Server(false, out -> {});
+    Server cutInHead = new Server(false, text("HTTP/1.1 200 OK\r\nX-Partial: yes\r\n"));
     SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    assertThat(
+            failed(
+                    sender.post("http://hooks.test:" + cutInHead.port(), Map.of(), PAYLOAD),
+                    Failure.IO)
+                .detail())
+        .as("a head cut short is not a head that was too large")
+        .isEqualTo("connection closed inside the response head");
     failed(sender.post("http://hooks.test:" + notHttp.port(), Map.of(), PAYLOAD), Failure.PROTOCOL);
     assertThat(
             failed(
@@ -676,5 +684,237 @@ class SafeHttpSenderTest {
     assertThatThrownBy(
             () -> new SafeHttpSender.Options(Duration.ofSeconds(1), Duration.ofSeconds(1), -1))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Edge cases a merchant's server, or someone pretending to be one, can produce.
+
+  @Test
+  void aServerThatNeverFinishesTheTlsHandshakeTimesOut() throws Exception {
+    // A plain TCP listener on an https URL: it accepts, reads the ClientHello and says nothing.
+    Server silent = new Server(false, out -> Thread.sleep(10_000));
+    // One that answers the ClientHello with the start of a record, a byte at a time, and stops.
+    ServerSocket trickle = new ServerSocket(0, 50, LOOPBACK);
+    Thread.ofVirtual()
+        .start(
+            () -> {
+              while (!trickle.isClosed()) {
+                try {
+                  Socket c = trickle.accept();
+                  Thread.ofVirtual()
+                      .start(
+                          () -> {
+                            try (c) {
+                              OutputStream out = c.getOutputStream();
+                              for (int b : new int[] {0x16, 0x03, 0x03, 0x00, 0x40}) {
+                                out.write(b);
+                                out.flush();
+                                Thread.sleep(100);
+                              }
+                              Thread.sleep(10_000);
+                            } catch (Exception e) {
+                              // the client hung up
+                            }
+                          });
+                } catch (IOException e) {
+                  return;
+                }
+              }
+            });
+    SafeHttpSender sender =
+        sender(
+            Dns.always(LOOPBACK),
+            new SafeHttpSender.Options(Duration.ofSeconds(1), Duration.ofMillis(800), 1024));
+    try (trickle) {
+      for (int port : List.of(silent.port(), trickle.getLocalPort())) {
+        long start = System.nanoTime();
+        Failed f =
+            failed(
+                sender.post("https://hooks.test:" + port + "/", Map.of(), PAYLOAD),
+                Failure.TIMEOUT);
+        assertThat(f.detail()).isEqualTo("TLS handshake took too long");
+        assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start))
+            .isBetween(700L, 2_000L);
+      }
+    }
+  }
+
+  @Test
+  void endlessInterimAnswersOrAnUnendingStatusLineAreAProtocolFailure() throws Exception {
+    Server interim =
+        new Server(
+            false,
+            out -> {
+              byte[] cont = "HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
+              for (int i = 0; i < 100_000; i++) {
+                out.write(cont);
+              }
+            });
+    Server longLine =
+        new Server(
+            false, text("HTTP/1.1 200 " + "O".repeat(SafeHttpSender.MAX_HEAD + 1) + "\r\n\r\n"));
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    for (Server s : List.of(interim, longLine)) {
+      long start = System.nanoTime();
+      Failed f =
+          failed(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD), Failure.PROTOCOL);
+      assertThat(f.detail()).isEqualTo("response head over 16384 bytes");
+      assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isLessThan(2_000L);
+    }
+  }
+
+  @Test
+  void noRedirectIsFollowedWhateverItsCodeOrTarget() throws Exception {
+    Server target = new Server(false, ok("you found me"));
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    for (int code : List.of(301, 302, 303, 307, 308)) {
+      for (String location :
+          List.of(
+              "http://127.0.0.1:" + target.port() + "/",
+              "http://hooks.test:" + target.port() + "/",
+              "http://169.254.169.254/latest/meta-data/",
+              "/elsewhere")) {
+        Server s =
+            new Server(
+                false,
+                text(
+                    "HTTP/1.1 "
+                        + code
+                        + " Moved\r\nLocation: "
+                        + location
+                        + "\r\nContent-Length: 0\r\n\r\n"));
+        Answered a = answered(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD));
+        assertThat(a.status()).isEqualTo(code);
+        assertThat(a.isSuccess()).isFalse();
+        assertThat(s.connections).as("one request, no second to %s", location).hasValue(1);
+      }
+    }
+    assertThat(target.connections).hasValue(0);
+  }
+
+  @Test
+  void aBodyShorterThanPromisedOrMalformedlyFramedKeepsItsStatus() throws Exception {
+    Server shortBody =
+        new Server(false, text("HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nonly this"));
+    Server negativeLength =
+        new Server(false, text("HTTP/1.1 202 Accepted\r\nContent-Length: -1\r\n\r\nabc"));
+    Server badLength =
+        new Server(false, text("HTTP/1.1 400 Bad\r\nContent-Length: lots\r\n\r\nabc"));
+    Server badChunk =
+        new Server(
+            false,
+            text("HTTP/1.1 500 Oops\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\nzz\r\n"));
+    Server negativeChunk =
+        new Server(
+            false,
+            text(
+                "HTTP/1.1 503 Busy\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n-5\r\n"
+                    + "x\r\n".repeat(5_000)));
+    Server hugeChunk =
+        new Server(
+            false,
+            text("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFFFF\r\nab"));
+    Server endsMidChunk =
+        new Server(false, text("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\nhalf"));
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    record Case(Server server, int status, String body) {}
+    for (Case c :
+        List.of(
+            new Case(shortBody, 200, "only this"),
+            new Case(negativeLength, 202, ""),
+            new Case(badLength, 400, ""),
+            new Case(badChunk, 500, "abc"),
+            new Case(negativeChunk, 503, "ab"),
+            new Case(hugeChunk, 200, ""),
+            new Case(endsMidChunk, 200, "half"))) {
+      long start = System.nanoTime();
+      Answered a =
+          answered(sender.post("http://hooks.test:" + c.server().port(), Map.of(), PAYLOAD));
+      assertThat(a.status()).isEqualTo(c.status());
+      assertThat(a.body()).as("status %d", c.status()).isEqualTo(c.body());
+      assertThat(a.truncated()).as("status %d", c.status()).isTrue();
+      assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isLessThan(2_000L);
+    }
+  }
+
+  @Test
+  void aChunkedBodyTrickledOutIsCutOffAtTheDeadline() throws Exception {
+    Server s =
+        new Server(
+            false,
+            out -> {
+              out.write(
+                  "HTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\n\r\n"
+                      .getBytes(StandardCharsets.US_ASCII));
+              out.flush();
+              for (int i = 0; i < 1000; i++) {
+                out.write("1\r\nz\r\n".getBytes(StandardCharsets.US_ASCII));
+                out.flush();
+                Thread.sleep(50);
+              }
+            });
+    SafeHttpSender sender =
+        sender(
+            Dns.always(LOOPBACK),
+            new SafeHttpSender.Options(Duration.ofSeconds(1), Duration.ofMillis(800), 1024));
+    long start = System.nanoTime();
+    Answered a = answered(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD));
+    assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isBetween(700L, 2_000L);
+    assertThat(a.status()).isEqualTo(201);
+    assertThat(a.truncated()).isTrue();
+    assertThat(a.body()).matches("z{1,20}");
+  }
+
+  @Test
+  void aRefusedConnectionFallsBackToTheNextCheckedAddressAndNoOther() throws Exception {
+    Server s = new Server(false, ok("second"));
+    // 127.0.0.3 is allowed here but nothing listens on it; the server is on 127.0.0.1 only.
+    InetAddress first = InetAddress.ofLiteral("127.0.0.3");
+    SafeHttpSender sender =
+        new SafeHttpSender(
+            AddressPolicy.allowing(List.of("127.0.0.0/8")),
+            Dns.always(first, LOOPBACK),
+            clientTls,
+            QUICK,
+            "payflow-webhooks/test");
+    Answered a = answered(sender.post("http://two.test:" + s.port() + "/", Map.of(), PAYLOAD));
+    assertThat(a.address()).isEqualTo(LOOPBACK);
+    assertThat(a.body()).isEqualTo("second");
+
+    // Neither checked address listens: the failure names the last one tried, and nothing else
+    // was tried in between.
+    int closed;
+    try (ServerSocket gone = new ServerSocket(0, 1, LOOPBACK)) {
+      closed = gone.getLocalPort();
+    }
+    Failed f =
+        failed(sender.post("http://two.test:" + closed + "/", Map.of(), PAYLOAD), Failure.CONNECT);
+    assertThat(f.detail()).startsWith("127.0.0.1: ");
+  }
+
+  @Test
+  void everySendIsCheckedAgainstWhatTheNameResolvesToThen() throws Exception {
+    Server s = new Server(false, ok(""));
+    InetAddress metadata = InetAddress.ofLiteral("169.254.169.254");
+    // A name that flips between the allowed address and the metadata address on every lookup,
+    // as a rebinding attacker's DNS server with a TTL of zero would.
+    Dns dns =
+        new Dns(
+            List.of(
+                List.of(LOOPBACK),
+                List.of(metadata),
+                List.of(LOOPBACK),
+                List.of(metadata),
+                List.of(LOOPBACK),
+                List.of(metadata)));
+    SafeHttpSender sender = sender(dns);
+    List<Boolean> reached = new java.util.ArrayList<>();
+    for (int i = 0; i < 6; i++) {
+      reached.add(
+          sender.post("http://flip.test:" + s.port(), Map.of(), PAYLOAD) instanceof Answered);
+    }
+    assertThat(reached).containsExactly(true, false, true, false, true, false);
+    assertThat(dns.lookups).hasValue(6);
+    assertThat(s.connections).hasValue(3);
   }
 }

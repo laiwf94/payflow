@@ -168,6 +168,10 @@ public final class SafeHttpSender {
           "proxy-connection");
   private static final Pattern TOKEN = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
   private static final Pattern HEADER_VALUE = Pattern.compile("[\\x20-\\x7e\\t]*");
+  /** Digits only: no sign, and short enough for a long; a framing value is never parsed loosely. */
+  private static final Pattern CONTENT_LENGTH = Pattern.compile("[0-9]{1,18}");
+
+  private static final Pattern CHUNK_SIZE = Pattern.compile("[0-9A-Fa-f]{1,15}");
   private static final Pattern STATUS_LINE =
       Pattern.compile("HTTP/1\\.[01] ([1-5][0-9]{2})(?: .*)?");
 
@@ -293,7 +297,9 @@ public final class SafeHttpSender {
         try {
           conn = handshake(raw, host, port);
         } catch (IOException | IllegalArgumentException e) {
-          return expired(deadline)
+          // A server that stalls the handshake trips the read timeout, set to the time left,
+          // which can come a fraction of a millisecond before the deadline itself.
+          return expired(deadline) || e instanceof SocketTimeoutException
               ? failed(Failure.TIMEOUT, "TLS handshake took too long", start)
               : failed(Failure.TLS, message(e), start);
         }
@@ -412,9 +418,7 @@ public final class SafeHttpSender {
     while (true) {
       String line = head.line();
       if (line == null) {
-        return expired(deadline)
-            ? failed(Failure.TIMEOUT, "no answer in " + options.timeout().toMillis() + " ms", start)
-            : failed(Failure.IO, "connection closed before a status line", start);
+        return headEnded(head, deadline, start, "connection closed before a status line");
       }
       var m = STATUS_LINE.matcher(line);
       if (!m.matches()) {
@@ -423,7 +427,7 @@ public final class SafeHttpSender {
       status = Integer.parseInt(m.group(1));
       Map<String, String> fields = head.fields();
       if (fields == null) {
-        return failed(Failure.PROTOCOL, "response head over " + MAX_HEAD + " bytes", start);
+        return headEnded(head, deadline, start, "connection closed inside the response head");
       }
       // Interim answers (100 Continue and the like) are skipped; 101 would be a switch, which a
       // POST without Upgrade never asks for, so it is taken as the answer.
@@ -434,6 +438,19 @@ public final class SafeHttpSender {
             status, new String(b.bytes(), StandardCharsets.UTF_8), b.truncated(), from, latency);
       }
     }
+  }
+
+  /**
+   * Why the head stopped short: over the cap (interim answers count towards it, so an endless run
+   * of {@code 100 Continue} ends here too), the deadline, or the server hanging up.
+   */
+  private Failed headEnded(Head head, long deadline, long start, String closed) {
+    if (head.overflowed()) {
+      return failed(Failure.PROTOCOL, "response head over " + MAX_HEAD + " bytes", start);
+    }
+    return expired(deadline)
+        ? failed(Failure.TIMEOUT, "no answer in " + options.timeout().toMillis() + " ms", start)
+        : failed(Failure.IO, closed, start);
   }
 
   private static final class Body {
@@ -471,8 +488,11 @@ public final class SafeHttpSender {
             return new Body(kept.toByteArray(), true);
           }
           int semi = sizeLine.indexOf(';');
-          long size =
-              Long.parseLong((semi < 0 ? sizeLine : sizeLine.substring(0, semi)).strip(), 16);
+          String hex = (semi < 0 ? sizeLine : sizeLine.substring(0, semi)).strip();
+          if (!CHUNK_SIZE.matcher(hex).matches()) {
+            return new Body(kept.toByteArray(), true);
+          }
+          long size = Long.parseLong(hex, 16);
           if (size == 0) {
             return new Body(kept.toByteArray(), false);
           }
@@ -480,12 +500,17 @@ public final class SafeHttpSender {
             copy(in, kept, cap - kept.size());
             return new Body(kept.toByteArray(), true);
           }
-          copy(in, kept, (int) size);
+          if (copy(in, kept, (int) size) < size) {
+            return new Body(kept.toByteArray(), true);
+          }
           lines.line(); // the CRLF after the chunk
         }
       }
       String cl = fields.get("content-length");
       if (cl != null) {
+        if (!CONTENT_LENGTH.matcher(cl.strip()).matches()) {
+          return new Body(kept.toByteArray(), true);
+        }
         long length = Long.parseLong(cl.strip());
         int want = (int) Math.min(length, cap);
         int got = copy(in, kept, want);
@@ -493,7 +518,7 @@ public final class SafeHttpSender {
       }
       int got = copy(in, kept, cap);
       return new Body(kept.toByteArray(), got == cap && in.read() >= 0);
-    } catch (IOException | NumberFormatException e) {
+    } catch (IOException e) {
       return new Body(kept.toByteArray(), true);
     }
   }
@@ -517,9 +542,15 @@ public final class SafeHttpSender {
   private static final class Head {
     private final InputStream in;
     private int used;
+    private boolean overflowed;
 
     Head(InputStream in) {
       this.in = in;
+    }
+
+    /** Whether a {@code null} came from reaching the cap rather than the end of the stream. */
+    boolean overflowed() {
+      return overflowed;
     }
 
     /** The next line without its line end, or null at end of stream or over the cap. */
@@ -527,7 +558,11 @@ public final class SafeHttpSender {
       ByteArrayOutputStream b = new ByteArrayOutputStream();
       while (true) {
         int c = in.read();
-        if (c < 0 || ++used > MAX_HEAD) {
+        if (c < 0) {
+          return null;
+        }
+        if (++used > MAX_HEAD) {
+          overflowed = true;
           return null;
         }
         if (c == '\n') {
