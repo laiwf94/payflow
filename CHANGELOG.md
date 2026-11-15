@@ -92,7 +92,14 @@ notes on GitHub link here.
   per attempt, checks every address, connects to a checked one with the URL's host in `Host` and
   SNI, follows no redirects, and caps an attempt at 10 s, 16 KiB of head and 1 KiB of body
   (`payflow.webhooks.*`). `PAYFLOW_WEBHOOK_ALLOWED_NETWORKS` lets listed networks through for a
-  development stack.
+  development stack. A head that passes 16 KiB through a run of interim answers is a `protocol`
+  failure like any other oversized head, and a chunk size or `Content-Length` that isn't plain
+  unsigned digits ends the logged body there instead of being obeyed.
+- [docs/webhooks.md](docs/webhooks.md), the guide for whoever writes the receiving end (#25): the
+  headers and the event fields, the signature scheme with a test vector, verification in Python,
+  Node.js, Java and with openssl, a complete standard-library receiver, how to answer, duplicates
+  and ordering, retries and replays, and rotating the secret without dropping an event. The test
+  suite runs every example in it against payflow's own signer.
 - Webhook delivery (#25). The outbox relay creates a delivery of each event it publishes to every
   enabled endpoint whose filter takes it, in the same transaction, once per event and endpoint.
   `WebhookDispatcher` POSTs the event's JSON signed in `Payflow-Signature: t=...,v1=...`

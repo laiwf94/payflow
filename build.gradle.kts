@@ -101,6 +101,8 @@ tasks.test {
     systemProperty("payflow.bootJar", tasks.bootJar.get().archiveFile.get().asFile.absolutePath)
     // What build-info, /livez and the startup log must report.
     systemProperty("payflow.version", version.toString())
+    // WebhookGuideTest runs the examples in the receiver's guide, so editing it reruns the tests.
+    inputs.file("docs/webhooks.md")
     maxHeapSize = "1g"
     testLogging {
         events("failed")

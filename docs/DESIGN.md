@@ -552,10 +552,13 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 
 ## Merchant webhooks
 
-Merchants learn about their orders without polling by registering webhook endpoints. This part is
+Merchants learn about their orders without polling by registering webhook endpoints. What a
+receiver sees and how it verifies a delivery is in [webhooks.md](webhooks.md); this section is
+how payflow sends. This part is
 being built over the week of #25; so far it has the endpoints themselves, the sender that makes
 every attempt, the dispatcher that turns each relayed event into signed, retried, ordered
-deliveries, and the delivery log with replays and test pings.
+deliveries, the delivery log with replays and test pings, secret rotation and the disabling of
+failing endpoints.
 
 ### Endpoints
 
@@ -790,10 +793,21 @@ go through a proxy that looks it up again:
 
 An attempt ends as an HTTP status, or as one of `address_refused`, `dns`, `connect`, `tls`,
 `timeout`, `protocol` or `io` with a detail, which is the `error` an attempt row records.
-`SafeHttpSenderTest` runs it against real sockets: a rebinding resolver, a mixed answer, mapped and
-NAT64 literals, a redirect, a head and a body sent a byte at a time, a 4 MiB body (by length,
-until close and chunked), an oversized head, a non-HTTP answer, and TLS with SNI checked on the
-server and a certificate for the wrong name. `AddressPolicyTest` covers every range.
+Framing is read strictly. A chunk size must be plain hex and a `Content-Length` plain decimal
+digits; a sign, a size past 2^60, a repeated length with two values or anything else ends the
+kept body there, marked truncated, because a lenient parse of a bad size is how a response
+smuggles bytes past the cap or makes the reader skip what it should read. The 16 KiB head cap
+counts every interim answer too, so a server that sends `100 Continue` forever is a `protocol`
+failure as soon as the cap is passed, not a wait for the deadline.
+
+`SafeHttpSenderTest` runs it against real sockets: a rebinding resolver, a name that passes
+registration and then resolves to the metadata address, a mixed answer, checked addresses tried
+in order without a second lookup, mapped and NAT64 literals, every 3xx pointing at a live server,
+the metadata address and a relative path, a head and a body sent a byte at a time, a body that
+stalls and one that trickles in chunks, a 4 MiB body (by length, until close and chunked), a
+chunk that claims 2^60 bytes, bad chunk sizes and lengths, a head that never ends (endless
+interim answers, header or status line), a non-HTTP answer, and TLS with SNI checked on the server
+and a certificate for the wrong name. `AddressPolicyTest` covers every range.
 
 ## Idempotency keys
 

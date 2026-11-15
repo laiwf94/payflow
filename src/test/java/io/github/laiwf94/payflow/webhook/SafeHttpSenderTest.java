@@ -619,6 +619,201 @@ class SafeHttpSenderTest {
   }
 
   @Test
+  void noRedirectStatusIsFollowedWhereverItPoints() throws Exception {
+    Server target = new Server(false, ok("you found me"));
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    for (int status : List.of(301, 302, 303, 307, 308)) {
+      for (String location :
+          List.of(
+              "http://127.0.0.1:" + target.port() + "/",
+              "http://hooks.test:" + target.port() + "/",
+              "http://169.254.169.254/latest/meta-data/",
+              "/elsewhere")) {
+        Server s =
+            new Server(
+                false,
+                text(
+                    "HTTP/1.1 "
+                        + status
+                        + " Moved\r\nLocation: "
+                        + location
+                        + "\r\nContent-Length: 2\r\n\r\nno"));
+        Answered a = answered(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD));
+        assertThat(a.status()).as(status + " to " + location).isEqualTo(status);
+        assertThat(a.isSuccess()).isFalse();
+        assertThat(a.body()).isEqualTo("no");
+        assertThat(s.connections).hasValue(1);
+      }
+    }
+    assertThat(target.connections).as("no redirect was followed").hasValue(0);
+  }
+
+  @Test
+  void checkedAddressesAreTriedInOrderWithoutAnotherLookup() throws Exception {
+    Server s = new Server(false, ok("second"));
+    // 127.0.0.2 is allowed here but nothing listens on it; 127.0.0.1 answers.
+    Dns dns = Dns.always(InetAddress.ofLiteral("127.0.0.2"), LOOPBACK);
+    SafeHttpSender sender =
+        new SafeHttpSender(
+            AddressPolicy.allowing(List.of("127.0.0.0/8")),
+            dns,
+            clientTls,
+            QUICK,
+            "payflow-webhooks/test");
+    Answered a = answered(sender.post("http://two.test:" + s.port() + "/", Map.of(), PAYLOAD));
+    assertThat(a.address()).isEqualTo(LOOPBACK);
+    assertThat(a.body()).isEqualTo("second");
+    assertThat(dns.lookups).as("falling through to the next address is no new lookup").hasValue(1);
+  }
+
+  @Test
+  void aNameThatPassedRegistrationIsCheckedAgainAtSendTime() throws Exception {
+    // Registration sees a public address; by the first send the name points at the metadata
+    // service. Registration can't be the only check.
+    Dns dns =
+        new Dns(
+            List.of(
+                List.of(InetAddress.ofLiteral("93.184.215.14")),
+                List.of(InetAddress.ofLiteral("169.254.169.254"))));
+    SafeHttpSender strict =
+        new SafeHttpSender(AddressPolicy.strict(), dns, clientTls, QUICK, "payflow-webhooks/test");
+    assertThat(strict.refusal("http://later.test/in")).isEmpty();
+    Failed f =
+        failed(strict.post("http://later.test/in", Map.of(), PAYLOAD), Failure.ADDRESS_REFUSED);
+    assertThat(f.detail())
+        .isEqualTo(
+            "later.test resolves to 169.254.169.254, the cloud metadata address; webhooks go to"
+                + " public addresses only");
+    assertThat(dns.lookups).hasValue(2);
+  }
+
+  @Test
+  void aBodyThatStallsOrTricklesInChunksIsCutOffAtTheDeadline() throws Exception {
+    Server stalls =
+        new Server(
+            false,
+            out -> {
+              out.write(
+                  "HTTP/1.1 503 Busy\r\nContent-Length: 10\r\n\r\nbu"
+                      .getBytes(StandardCharsets.US_ASCII));
+              out.flush();
+              Thread.sleep(10_000);
+            });
+    Server chunks =
+        new Server(
+            false,
+            out -> {
+              out.write(
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                      .getBytes(StandardCharsets.US_ASCII));
+              for (int i = 0; i < 1000; i++) {
+                out.write("1\r\nz\r\n".getBytes(StandardCharsets.US_ASCII));
+                out.flush();
+                Thread.sleep(50);
+              }
+            });
+    SafeHttpSender sender =
+        sender(
+            Dns.always(LOOPBACK),
+            new SafeHttpSender.Options(Duration.ofSeconds(1), Duration.ofMillis(800), 1024));
+    long start = System.nanoTime();
+    Answered a = answered(sender.post("http://hooks.test:" + stalls.port(), Map.of(), PAYLOAD));
+    assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isBetween(700L, 2_000L);
+    assertThat(a.status()).isEqualTo(503);
+    assertThat(a.body()).isEqualTo("bu");
+    assertThat(a.truncated()).isTrue();
+
+    start = System.nanoTime();
+    Answered b = answered(sender.post("http://hooks.test:" + chunks.port(), Map.of(), PAYLOAD));
+    assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isBetween(700L, 2_000L);
+    assertThat(b.status()).isEqualTo(200);
+    assertThat(b.body()).matches("z{1,20}");
+    assertThat(b.truncated()).isTrue();
+  }
+
+  @Test
+  void anEndlessHeadIsCutAtTheCapHoweverItIsSent() throws Exception {
+    // Interim answers forever: each one is small, together they pass the cap.
+    Server interims =
+        new Server(
+            false,
+            out -> {
+              byte[] interim = "HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII);
+              for (int i = 0; i < 100_000; i++) {
+                out.write(interim);
+              }
+            });
+    // One header line that never ends.
+    Server endlessLine =
+        new Server(
+            false,
+            out -> {
+              out.write("HTTP/1.1 200 OK\r\nX-Long: ".getBytes(StandardCharsets.US_ASCII));
+              out.write("a".repeat(1024 * 1024).getBytes(StandardCharsets.US_ASCII));
+            });
+    // A status line that never ends.
+    Server endlessStatus =
+        new Server(
+            false,
+            out ->
+                out.write(
+                    ("HTTP/1.1 200 " + "o".repeat(1024 * 1024))
+                        .getBytes(StandardCharsets.US_ASCII)));
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    for (Server s : List.of(interims, endlessLine, endlessStatus)) {
+      long start = System.nanoTime();
+      Failed f =
+          failed(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD), Failure.PROTOCOL);
+      assertThat(f.detail()).isEqualTo("response head over 16384 bytes");
+      assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isLessThan(2_000L);
+    }
+  }
+
+  @Test
+  void framingThatCannotBeTrustedEndsTheBodyThere() throws Exception {
+    byte[] big = "q".repeat(2 * 1024 * 1024).getBytes(StandardCharsets.US_ASCII);
+    SafeHttpSender sender = sender(Dns.always(LOOPBACK));
+    // A chunk that claims to be about 2^60 bytes is read to the cap like any other.
+    Server hugeChunk =
+        new Server(
+            false,
+            out -> {
+              out.write(
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nfffffffffffffff\r\n"
+                      .getBytes(StandardCharsets.US_ASCII));
+              out.write(big);
+            });
+    long start = System.nanoTime();
+    Answered a = answered(sender.post("http://hooks.test:" + hugeChunk.port(), Map.of(), PAYLOAD));
+    assertThat(a.body()).hasSize(1024).matches("q+");
+    assertThat(a.truncated()).isTrue();
+    assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)).isLessThan(2_000L);
+
+    // Sizes that are signed, too large for the parser, or not hex are not obeyed: the body
+    // stops there, marked truncated, and nothing after them is taken for body.
+    for (String size : List.of("-1", "+5", "10000000000000000", "zz", "")) {
+      Server s =
+          new Server(
+              false,
+              text(
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n"
+                      + size
+                      + "\r\nsmuggled\r\n0\r\n\r\n"));
+      Answered b = answered(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD));
+      assertThat(b.body()).as("chunk size '%s'", size).isEqualTo("abc");
+      assertThat(b.truncated()).isTrue();
+    }
+    for (String length : List.of("-5", "5, 7", "five", "99999999999999999999")) {
+      Server s =
+          new Server(false, text("HTTP/1.1 200 OK\r\nContent-Length: " + length + "\r\n\r\nhello"));
+      Answered c = answered(sender.post("http://hooks.test:" + s.port(), Map.of(), PAYLOAD));
+      assertThat(c.status()).isEqualTo(200);
+      assertThat(c.body()).as("Content-Length '%s'", length).isEmpty();
+      assertThat(c.truncated()).isTrue();
+    }
+  }
+
+  @Test
   void callersCannotSetFramingHeadersOrSmuggleLines() {
     SafeHttpSender sender = sender(Dns.always(LOOPBACK));
     for (Map<String, String> bad :

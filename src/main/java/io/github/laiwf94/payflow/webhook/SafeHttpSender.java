@@ -168,6 +168,8 @@ public final class SafeHttpSender {
           "proxy-connection");
   private static final Pattern TOKEN = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
   private static final Pattern HEADER_VALUE = Pattern.compile("[\\x20-\\x7e\\t]*");
+  private static final Pattern CHUNK_SIZE = Pattern.compile("[0-9A-Fa-f]{1,15}");
+  private static final Pattern CONTENT_LENGTH = Pattern.compile("[0-9]{1,18}");
   private static final Pattern STATUS_LINE =
       Pattern.compile("HTTP/1\\.[01] ([1-5][0-9]{2})(?: .*)?");
 
@@ -411,6 +413,9 @@ public final class SafeHttpSender {
     int status;
     while (true) {
       String line = head.line();
+      if (line == null && head.overflowed()) {
+        return failed(Failure.PROTOCOL, "response head over " + MAX_HEAD + " bytes", start);
+      }
       if (line == null) {
         return expired(deadline)
             ? failed(Failure.TIMEOUT, "no answer in " + options.timeout().toMillis() + " ms", start)
@@ -471,8 +476,13 @@ public final class SafeHttpSender {
             return new Body(kept.toByteArray(), true);
           }
           int semi = sizeLine.indexOf(';');
-          long size =
-              Long.parseLong((semi < 0 ? sizeLine : sizeLine.substring(0, semi)).strip(), 16);
+          String hex = (semi < 0 ? sizeLine : sizeLine.substring(0, semi)).strip();
+          if (!CHUNK_SIZE.matcher(hex).matches()) {
+            // A sign, a size past 2^60 or no digits at all: the framing can't be trusted, so
+            // what was read so far is kept and the rest isn't read.
+            return new Body(kept.toByteArray(), true);
+          }
+          long size = Long.parseLong(hex, 16);
           if (size == 0) {
             return new Body(kept.toByteArray(), false);
           }
@@ -486,6 +496,10 @@ public final class SafeHttpSender {
       }
       String cl = fields.get("content-length");
       if (cl != null) {
+        if (!CONTENT_LENGTH.matcher(cl.strip()).matches()) {
+          // Negative, repeated with different values ("5, 7") or not a number.
+          return new Body(new byte[0], true);
+        }
         long length = Long.parseLong(cl.strip());
         int want = (int) Math.min(length, cap);
         int got = copy(in, kept, want);
@@ -493,7 +507,7 @@ public final class SafeHttpSender {
       }
       int got = copy(in, kept, cap);
       return new Body(kept.toByteArray(), got == cap && in.read() >= 0);
-    } catch (IOException | NumberFormatException e) {
+    } catch (IOException e) {
       return new Body(kept.toByteArray(), true);
     }
   }
@@ -517,6 +531,7 @@ public final class SafeHttpSender {
   private static final class Head {
     private final InputStream in;
     private int used;
+    private boolean overflowed;
 
     Head(InputStream in) {
       this.in = in;
@@ -527,7 +542,11 @@ public final class SafeHttpSender {
       ByteArrayOutputStream b = new ByteArrayOutputStream();
       while (true) {
         int c = in.read();
-        if (c < 0 || ++used > MAX_HEAD) {
+        if (c < 0) {
+          return null;
+        }
+        if (++used > MAX_HEAD) {
+          overflowed = true;
           return null;
         }
         if (c == '\n') {
@@ -538,6 +557,11 @@ public final class SafeHttpSender {
         }
         b.write(c);
       }
+    }
+
+    /** Whether a line was cut short by the cap rather than by the end of the stream. */
+    boolean overflowed() {
+      return overflowed;
     }
 
     /** Header fields with lowercased names until the empty line, or null over the cap. */
