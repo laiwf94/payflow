@@ -554,11 +554,10 @@ timeout is 10 s, so partitions held by a dead instance come back quickly after a
 
 Merchants learn about their orders without polling by registering webhook endpoints. What a
 receiver sees and how it verifies a delivery is in [webhooks.md](webhooks.md); this section is
-how payflow sends. This part is
-being built over the week of #25; so far it has the endpoints themselves, the sender that makes
-every attempt, the dispatcher that turns each relayed event into signed, retried, ordered
-deliveries, the delivery log with replays and test pings, secret rotation and the disabling of
-failing endpoints.
+how payflow sends: the endpoints themselves, the sender that makes every attempt, the
+dispatcher that turns each relayed event into signed, retried, ordered deliveries, the delivery
+log with replays and test pings, secret rotation and the disabling of failing endpoints. "End to
+end" at the end of this section is the run that puts them together.
 
 ### Endpoints
 
@@ -751,6 +750,32 @@ endpoints would starve the API. A ping belongs to no order, so V19 makes `order_
 leave them empty; it waits for nothing and nothing waits for it. It is tried once: its one
 answer is the answer, and a ping retried for three days would only fill the log. A disabled
 endpoint receives nothing, pings included, so pinging one is a 400.
+
+### End to end
+
+`WebhookEndToEndTest` runs the whole path with nothing stubbed on payflow's side: the saga, the
+outbox relay through Redpanda and the dispatcher, all in the background, and a stand-in merchant
+in its own container (Python, standard library) that checks every signature with the Python
+example from [webhooks.md](webhooks.md) and drops repeats by `Payflow-Event-Id`. The merchant is
+reached through the container's published port, the one address let through with
+`allowed-networks`, as on a development stack. One order is completed and then refunded in two
+steps and a second is declined, 15 events in all. The merchant's first three answers are 500s;
+between the capture and the refunds it rotates its secret through the API and keeps only the old
+one deployed for the partial refund, then deploys only the new one for the rest. It checks that:
+
+- every event is accepted exactly once, with the bytes the outbox holds, and no request is
+  refused for its signature or answered as a duplicate;
+- each order's requests, failures and retries included, follow its `seq` from 0 with no gaps:
+  nothing of an order is sent until everything before it was accepted;
+- deliveries before the rotation carry one `v1`; those between the rotation and the merchant's
+  deploy carry two, verify under either secret and are accepted on the old one alone; those after
+  verify under the new one;
+- the three failures come back as later attempts of the same deliveries, the delivery log shows
+  every delivery `SUCCEEDED` with one attempt per request the merchant saw (18 for 15 events), and
+  the endpoint ends enabled with no `failing_since`.
+
+With retries tuned to a 200 ms base and a 1 s cap the run takes about 15 s. It also caught the
+guide saying `seq` starts at 1; it starts at 0, the order's first version.
 
 ### Sending without reaching inside
 

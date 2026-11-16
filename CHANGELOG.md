@@ -100,6 +100,10 @@ notes on GitHub link here.
   Node.js, Java and with openssl, a complete standard-library receiver, how to answer, duplicates
   and ordering, retries and replays, and rotating the secret without dropping an event. The test
   suite runs every example in it against payflow's own signer.
+- An end-to-end webhook test (#25): a stand-in merchant in a container, verifying with the
+  guide's Python example, gets a completed, refunded order's and a declined order's every event
+  exactly once and in `seq` order, through three failed answers and a secret rotation it deploys
+  mid-stream.
 - Webhook delivery (#25). The outbox relay creates a delivery of each event it publishes to every
   enabled endpoint whose filter takes it, in the same transaction, once per event and endpoint.
   `WebhookDispatcher` POSTs the event's JSON signed in `Payflow-Signature: t=...,v1=...`
@@ -155,6 +159,8 @@ notes on GitHub link here.
 
 ### Fixed
 
+- docs/webhooks.md said an order's `seq` starts at 1 for `order.created`; it starts at 0. Its
+  example event (`order.completed`, `seq` 4) and test vector are corrected to match (#25).
 - The chaos property no longer flags a correct `refund_exceeds_captured`: it priced a refused line
   refund at the cheapest units it could have been given rather than the dearest (#82).
 - The simulator's control API accepts faults on `inventory.restock`, so the compose stack can

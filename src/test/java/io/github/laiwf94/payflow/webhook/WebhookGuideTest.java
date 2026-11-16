@@ -36,6 +36,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * docs/webhooks.md is held to payflow: its test vector is recomputed, its example body is what
@@ -540,8 +541,9 @@ class WebhookGuideTest {
       while (printed.size() < 2 && System.nanoTime() < until) {
         Thread.sleep(20);
       }
+      long seq = new ObjectMapper().readTree(body()).get("seq").asLong();
       assertThat(printed)
-          .containsExactly("order.completed " + eventId + " 5", "ping " + other + " None");
+          .containsExactly("order.completed " + eventId + " " + seq, "ping " + other + " None");
     } finally {
       p.destroy();
       if (!p.waitFor(10, TimeUnit.SECONDS)) {

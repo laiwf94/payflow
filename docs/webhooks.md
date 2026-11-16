@@ -50,11 +50,11 @@ nothing, so never verify a re-serialized copy):
 
 <!-- example: body -->
 ```json
-{"seq": 5, "state": "COMPLETED", "amount": 2500, "currency": "EUR", "event_id": "0b6f3f8e-2a4c-4d71-9a51-6f0e5b7c9d12", "order_id": "5f2d7c1a-8e3b-4c90-b6a4-1d2e3f4a5b6c", "event_type": "order.completed", "merchant_id": "acme", "occurred_at": "2026-11-15T07:00:00.123456Z", "previous_state": "PAYMENT_CAPTURED", "merchant_reference": "ord-1042"}
+{"seq": 4, "state": "COMPLETED", "amount": 2500, "currency": "EUR", "event_id": "0b6f3f8e-2a4c-4d71-9a51-6f0e5b7c9d12", "order_id": "5f2d7c1a-8e3b-4c90-b6a4-1d2e3f4a5b6c", "event_type": "order.completed", "merchant_id": "acme", "occurred_at": "2026-11-15T07:00:00.123456Z", "previous_state": "PAYMENT_CAPTURED", "merchant_reference": "ord-1042"}
 ```
 
-- `seq` is the event's place in its order's stream: 1 for `order.created`, one more for each
-  later event of that order. `state` is the order's state after the event and `previous_state`
+- `seq` is the event's place in its order's stream: 0 for `order.created`, one more for each
+  later event of that order, refund events included, with no gaps. `state` is the order's state after the event and `previous_state`
   the one before, when the event moved it.
 - `amount` is in minor units of `currency`. `merchant_reference` is there when the order was
   created with one, and `failure_code` when the order failed.
@@ -102,8 +102,8 @@ secret:     whsec_test-only-docs-example-key
 previous:   whsec_test-only-docs-previous-key
 timestamp:  1794726001
 body:       the example body above, as UTF-8, with no line break at the end
-signature:  t=1794726001,v1=9095d5905351e630ad78e54101e63d71d61fcdec1a6efb5eb3d87ad71c6bc541
-rotating:   t=1794726001,v1=9095d5905351e630ad78e54101e63d71d61fcdec1a6efb5eb3d87ad71c6bc541,v1=52bb40ab4f89147396ebebfdf8ad463efbe87d44e5be9464fd92305ee4e41d46
+signature:  t=1794726001,v1=ab8b8405521852ad24407448f55e7e1347cdc08588d851b95bb8ab0d01dffc61
+rotating:   t=1794726001,v1=ab8b8405521852ad24407448f55e7e1347cdc08588d851b95bb8ab0d01dffc61,v1=0c93f1dde7dbeef4bed59cda99db65ff467aff9b82996afda721cdf391ec8683
 ```
 
 `signature` is what payflow sends with one secret, and `rotating` while `previous` still signs
