@@ -460,6 +460,66 @@ with the order's reference and voids each hold and refunds each capture. Neither
 row, because the forward step they undo may have happened without the row knowing. Running
 either twice changes nothing the second time.
 
+## Timers
+
+Some things have to happen later, whatever restarts in between: stock an unpaid order holds goes
+back after a while, an authorization about to lapse needs renewing. A thread that sleeps until
+then dies with its process, so a timer is a row in Postgres, `timers`, and any instance fires it.
+
+A timer is keyed by its `kind`, the name of the handler that fires it (`order.reservation_expiry`),
+and its `subject_id`, usually an order, so a subject has at most one timer of each kind.
+`TimerService` changes them, always in the caller's transaction and never outside one (it throws
+`IllegalTransactionStateException` without one), so a timer exists exactly when the state that
+needs it was committed:
+
+- `schedule(kind, subject, at)` adds a timer unless the subject already has one of that kind, and
+  says whether it did; scheduling twice is harmless.
+- `reschedule(kind, subject, at)` moves the timer, or adds it if it is gone, and starts its
+  attempts over.
+- `cancel(kind, subject)` removes it and says whether there was one to remove.
+
+Only kinds with a handler on this instance can be used, and the worker only claims those kinds.
+During a rolling deploy a timer of a kind that only the new version knows waits for a new
+instance instead of failing on an old one. Startup fails if two handlers claim one kind.
+
+`TimerWorker` claims timers the way the webhook dispatcher claims deliveries: due ones, earliest
+first, with `FOR UPDATE SKIP LOCKED`, leasing each with a fresh `lease_token` and pushing its
+`next_attempt_at` out by the lease (30 s). A held timer therefore drops out of the due range of the
+`timers_due` index instead of being skipped by every poll until it fires. A poll claims up to 256
+timers; each waits on its own virtual thread for one of 8 fire permits, which keeps fires well
+inside the connection pool.
+
+Firing is one transaction: delete the timer where its token is still the claim's, then run the
+handler. The handler's writes and the timer's removal commit together, so a timer fires once or
+not at all:
+
+- **Crash mid-fire.** The transaction rolls back with the connection and the timer is still there,
+  leased to a dead worker. When the lease runs out, the next claim is told it is `recovered` and
+  fires it. Nothing happened the first time, so nothing happens twice.
+- **Rescheduled or cancelled under a claim.** Both clear or remove the token, so the delete
+  matches nothing and the handler never runs. A fire that has already deleted the row holds its
+  lock, so a cancel or reschedule waits for that fire to commit. A cancel then finds nothing and
+  says so. A reschedule adds a new timer, because the old one did fire.
+- **Several instances.** The claim and the fenced delete are both row-level, so any number of
+  workers share one table. `TimerWorkerTest` runs four on the real clock against 3,000 timers due
+  within one second. One crashes in the middle of fifteen of its fires, and another is stopped and
+  replaced halfway. Every timer fires exactly once, and none before it was due.
+- **The handler throws.** Everything it wrote rolls back. The timer gets the saga's full jitter
+  `Backoff` (200 ms doubling to 30 s), and the error is recorded on the row. It is retried without
+  end, and logged as an error from the tenth attempt. A handler must only write to the database
+  (make an order due, release a hold), never call another system, and it must not throw for
+  something that won't change. It may schedule another timer, including its own kind for the same
+  subject: the old row is already deleted in its transaction.
+
+A committed schedule due within one poll wakes the worker instead of waiting up to 100 ms. On
+`SIGTERM` the worker stops claiming. Timers claimed but not started are given back at once, due
+now, and fires in flight get `payflow.timers.shutdown-grace` (5 s). A timer still unfired after
+that is handed back already expired (`next_attempt_at = '-infinity'`, new token), unless its fire
+holds the row. In that case it is skipped rather than waited for: either the fire commits or its
+lease runs out. Metrics: `payflow.timers.fire{kind,outcome}`, `payflow.timers.lateness{kind}`
+(fired minus due), `payflow.timers.retries`, `payflow.timers.lost` and
+`payflow.timers.handed_back{how}`.
+
 ## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what
@@ -893,6 +953,8 @@ response without the other fails the build.
 | Inventory refuses a restock | Refund stays `PENDING`; error log | Retries until the inventory system accepts it; the money is never refunded twice |
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
 | payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
+| payflow killed mid-fire of a timer | The fire's transaction rolls back; the timer stays, leased | Lease expires (30 s); the next instance fires it once |
+| A timer's handler throws | Its writes roll back; error recorded on the timer | Retried with backoff forever, capped at 30 s apart; error log after 10 attempts |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
 | Relay dies after sending, before commit | Events sent again | Consumers deduplicate by event id |
@@ -937,6 +999,9 @@ response without the other fails the build.
 | Refund amount / lines per refund / quantity per line | 1-99,999,999 minor units / 1-50 / 1-1,000 | `CreateRefundRequest` |
 | Refunds claimed per poll and in flight | 64 | `payflow.saga.batch-size` |
 | Saga lease | 30 s | `payflow.saga.lease` |
+| Timers claimed per poll / fired at once | 256 / 8 | `payflow.timers.batch-size`, `concurrency` |
+| Timer lease / retry backoff / shutdown grace | 30 s / 200 ms to 30 s, full jitter / 5 s | `payflow.timers.*` |
+| Timer kind | 1-63 of `a-z 0-9 _ .`, starting with a letter | `TimerHandlers.KIND`, `timers_kind_format` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |
 | Backoff | 200 ms base, 30 s cap, full jitter | `payflow.saga.backoff-*` |

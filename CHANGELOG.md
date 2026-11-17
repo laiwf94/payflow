@@ -36,6 +36,11 @@ notes on GitHub link here.
 - Tagged releases: a `vX.Y.Z` or `vX.Y.Z-rc.N` tag on main reruns the gate and publishes the jar,
   a CycloneDX 1.6 SBOM and `SHA256SUMS` on a GitHub release, and a linux/amd64 and linux/arm64
   image at `ghcr.io/laiwf94/payflow:X.Y.Z`.
+- Durable timers (#26): a `timers` table, `TimerService` to schedule, reschedule and cancel a
+  timer in the caller's transaction, and `TimerWorker`, which claims due timers with `FOR UPDATE
+  SKIP LOCKED`, fences each fire on its lease token and fires it in the same transaction as its
+  handler's writes, so it fires once across crashes, restarts and instances. Handlers that fail
+  are retried with full-jitter backoff. Settings under `payflow.timers.*`; no handlers yet.
 - The running version on `/livez` (`components.build.details.version`) and in the
   `payflow X.Y.Z ready` log line.
 - Clean shutdown: on `SIGTERM` the saga worker stops claiming, lets running steps finish for up
