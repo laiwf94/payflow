@@ -112,8 +112,11 @@ class OrderApiTest {
     Api.Response c = api.post("/v1/orders/" + id + "/cancel", null);
     assertThat(c.status()).isEqualTo(202);
     assertThat(c.json().get("cancel_requested").asBoolean()).isTrue();
+    assertThat(c.json().get("cancel_reason").asString()).isEqualTo("requested");
     assertThat(api.post("/v1/orders/" + id + "/cancel", null).status()).as("repeat").isEqualTo(202);
     awaitState(id, "CANCELLED");
+    assertThat(api.get("/v1/orders/" + id).json().get("cancel_reason").asString())
+        .isEqualTo("requested");
     Api.Response again = api.post("/v1/orders/" + id + "/cancel", null);
     assertThat(again.status()).isEqualTo(409);
     assertThat(again.errorCode()).isEqualTo("order_not_cancellable");

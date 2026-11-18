@@ -29,6 +29,7 @@ class TimerServiceTest {
   @Autowired PlatformTransactionManager txManager;
   @Autowired TimerService wired;
   @Autowired TimerWorker wiredWorker;
+  @Autowired TimerHandlers wiredHandlers;
 
   private final MutableClock clock = new MutableClock(Instant.parse("2026-11-23T10:00:00Z"));
   private final AtomicInteger wakeUps = new AtomicInteger();
@@ -229,8 +230,11 @@ class TimerServiceTest {
   }
 
   @Test
-  void theApplicationsWorkerHasNoHandlersYetAndStaysIdle() {
+  void aWorkerWithNoHandlersStaysIdleAndTheApplicationsHasTheExpiryHandlers() {
+    // Disabled for tests (application.properties), but wired with the holds' two kinds.
     assertThat(wiredWorker.isRunning()).isFalse();
+    assertThat(wiredHandlers.kinds())
+        .containsExactlyInAnyOrder("order.reservation_expiry", "order.payment_expiry");
     TimerWorker idle =
         new TimerWorker(
             repo,

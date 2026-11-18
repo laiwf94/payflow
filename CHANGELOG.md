@@ -40,7 +40,14 @@ notes on GitHub link here.
   timer in the caller's transaction, and `TimerWorker`, which claims due timers with `FOR UPDATE
   SKIP LOCKED`, fences each fire on its lease token and fires it in the same transaction as its
   handler's writes, so it fires once across crashes, restarts and instances. Handlers that fail
-  are retried with full-jitter backoff. Settings under `payflow.timers.*`; no handlers yet.
+  are retried with full-jitter backoff. Settings under `payflow.timers.*`.
+- Holds that run out (#26): an order whose payment isn't captured within
+  `payflow.holds.reservation-window` (15 min) of reserving its stock, or
+  `payflow.holds.payment-window` (1 h) of being created, is cancelled on its own. It goes through
+  the same compensation as a merchant's cancel (any authorization voided, stock released) and
+  ends `CANCELLED`. The order has a new `cancel_reason` (`requested`, `reservation_expired` or
+  `payment_expired`), also in the `order.cancel_requested` event's payload; orders cancelled
+  before this change have none. New counter `payflow.holds.expired{reason,outcome}`.
 - The running version on `/livez` (`components.build.details.version`) and in the
   `payflow X.Y.Z ready` log line.
 - Clean shutdown: on `SIGTERM` the saga worker stops claiming, lets running steps finish for up

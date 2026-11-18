@@ -57,7 +57,8 @@ nothing, so never verify a re-serialized copy):
   later event of that order, refund events included, with no gaps. `state` is the order's state after the event and `previous_state`
   the one before, when the event moved it.
 - `amount` is in minor units of `currency`. `merchant_reference` is there when the order was
-  created with one, and `failure_code` when the order failed.
+  created with one, `failure_code` when the order failed, and `cancel_reason` (`requested`,
+  `reservation_expired` or `payment_expired`) once a cancel was asked for.
 - Refund events (`refund.created`, `refund.succeeded`, `refund.failed`) add a `refund` object
   with its `id`, `amount`, `state`, any `lines`, and `failure_code` when it failed.
 

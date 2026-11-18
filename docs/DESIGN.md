@@ -10,7 +10,7 @@ creates a second order or a second refund. Other systems learn about every state
 per order, even if Kafka is down when the change happens.
 
 This version leaves out partial captures, multiple payments per order (split
-tender), inventory reservation expiry, and running the saga across regions. Some of these come up
+tender), and running the saga across regions. Some of these come up
 under [Growing past one database](#growing-past-one-database).
 
 ## The order row
@@ -27,7 +27,8 @@ An order row is both the business record and the saga's durable state:
 | `captured_minor`, `refunded_minor` | What the payment provider reports, after each money step. |
 | `attempt`, `step_started_at`, `next_attempt_at` | Retry bookkeeping for the current step; `next_attempt_at` is null exactly when the order is terminal. |
 | `lease_token`, `lease_until` | Which worker holds the order, and until when. |
-| `cancel_requested`, `failure_code`, `failure_message`, `correlation_id`, `version` | Requests, outcomes, tracing and an update counter. |
+| `cancel_requested`, `cancel_reason` | A cancel was asked for, and why: `requested` by the merchant, `reservation_expired` or `payment_expired` by a hold running out (see [Holds that run out](#holds-that-run-out)). |
+| `failure_code`, `failure_message`, `correlation_id`, `version` | Outcomes, tracing and an update counter. |
 
 Money is a `long` count of minor units plus a `java.util.Currency`, never `double` or
 `BigDecimal`: 1999 EUR is 19.99 euro, 500 JPY is 500 yen. Amounts are between 1 and 99,999,999,
@@ -520,6 +521,42 @@ lease runs out. Metrics: `payflow.timers.fire{kind,outcome}`, `payflow.timers.la
 (fired minus due), `payflow.timers.retries`, `payflow.timers.lost` and
 `payflow.timers.handed_back{how}`.
 
+### Holds that run out
+
+An unpaid order can't hold stock forever. Two timers end it, and both are kept in step with the
+order in the transaction that changes it (`OrderHolds`, called from `OrderTransitions`):
+
+| Timer | Scheduled when | Due | Cancels an order in |
+|---|---|---|---|
+| `order.payment_expiry` | the order is created | `created_at` + `payflow.holds.payment-window` (1 h) | `PENDING`, `INVENTORY_RESERVED`, `PAYMENT_AUTHORIZED` |
+| `order.reservation_expiry` | the order moves to `INVENTORY_RESERVED` | that moment + `payflow.holds.reservation-window` (15 min) | `INVENTORY_RESERVED`, `PAYMENT_AUTHORIZED` |
+
+The move out of those states, by capturing or by starting to compensate, cancels both, so an order
+that completes in milliseconds leaves no timer behind: an insert and a delete per timer, inside
+transactions the saga commits anyway. The cancels run before the order row is written. A fire
+deletes its timer and then updates the order, so taking the two locks in the same order keeps a
+fire and a capture from deadlocking. A move that turns out to be fenced out rolls the cancels back
+with it.
+
+When one fires, `ExpiryHandler` does in the timer's transaction what a merchant's cancel does: it
+sets `cancel_requested` with the reason in `cancel_reason`, pulls the next attempt forward, writes
+`order.cancel_requested` (whose payload carries `cancel_reason`) and wakes the saga after commit.
+The saga then compensates at its next decision point exactly as for a requested cancel, through
+`REVERSING_PAYMENT` when an authorization may exist, then `RELEASING_INVENTORY`, to `CANCELLED`
+with no failure. It needs no lease: a worker mid-step sees the flag in the row its next write
+returns. The update only matches an order still in the states the reason applies to and not
+already being cancelled, so the first reason recorded is the one kept, and a timer that fires
+after the order moved on, or for an order that doesn't exist, is spent without changing anything.
+
+A capture can still win the race: if the expiry commits while the capture is at the provider, the
+capture commits too, the next decision sees the flag, and the money is refunded, as with a merchant
+cancel that lands mid-capture. `HoldExpiryTest` holds a timer's row while the saga captures to
+show this ends `CANCELLED` with the capture refunded and no deadlock.
+`ProcessCrashRecoveryTest` runs the packaged jar with a 5 s reservation window and a provider that
+answers every authorization with a 503, kills it with `SIGKILL` inside the window and starts it
+again. The new instance fires the timer, releases the stock once and cancels the order once, with
+the cancel request no earlier than the timer was due and no payment at the provider.
+
 ## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what
@@ -954,6 +991,7 @@ response without the other fails the build.
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
 | payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
 | payflow killed mid-fire of a timer | The fire's transaction rolls back; the timer stays, leased | Lease expires (30 s); the next instance fires it once |
+| An unpaid order outlives its reservation or payment window | Its timer fires and flags a cancel (`cancel_reason`) | Compensation as for a merchant's cancel; the order ends `CANCELLED` with its stock released and any authorization voided |
 | A timer's handler throws | Its writes roll back; error recorded on the timer | Retried with backoff forever, capped at 30 s apart; error log after 10 attempts |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
@@ -1002,6 +1040,7 @@ response without the other fails the build.
 | Timers claimed per poll / fired at once | 256 / 8 | `payflow.timers.batch-size`, `concurrency` |
 | Timer lease / retry backoff / shutdown grace | 30 s / 200 ms to 30 s, full jitter / 5 s | `payflow.timers.*` |
 | Timer kind | 1-63 of `a-z 0-9 _ .`, starting with a letter | `TimerHandlers.KIND`, `timers_kind_format` |
+| Reservation window / payment window | 15 min / 1 h, each 1 s to 31 days | `payflow.holds.reservation-window`, `payment-window` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |
 | Backoff | 200 ms base, 30 s cap, full jitter | `payflow.saga.backoff-*` |

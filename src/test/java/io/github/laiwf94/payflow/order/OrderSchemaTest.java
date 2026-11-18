@@ -247,6 +247,42 @@ class OrderSchemaTest {
   }
 
   @Test
+  void aCancelReasonNeedsACancelAndAKnownValue() {
+    UUID id = insertPending();
+    String set =
+        "UPDATE orders SET cancel_requested = :flag, cancel_reason = :reason WHERE id = :id";
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(set)
+                    .param("flag", false)
+                    .param("reason", "requested")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_cancel_reason");
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(set)
+                    .param("flag", true)
+                    .param("reason", "expired")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_cancel_reason");
+    for (CancelReason r : CancelReason.values()) {
+      assertThat(
+              jdbc.sql(set).param("flag", true).param("reason", r.code()).param("id", id).update())
+          .isOne();
+      assertThat(repo.findById(id).orElseThrow().cancelReason()).isEqualTo(r);
+    }
+    // A cancel without a reason is what orders cancelled before reasons existed look like.
+    assertThat(
+            jdbc.sql("UPDATE orders SET cancel_reason = NULL WHERE id = :id")
+                .param("id", id)
+                .update())
+        .isOne();
+    assertThat(repo.findById(id).orElseThrow().cancelReason()).isNull();
+  }
+
+  @Test
   void merchantReferencesAreUniquePerMerchantAndWellFormed() {
     UUID first = insertPending();
     setReference(first, "acme", "cart-1");
@@ -304,11 +340,12 @@ class OrderSchemaTest {
                     SELECT count(*) FROM pg_constraint
                     WHERE conrelid = 'orders'::regclass AND contype = 'c'
                       AND conname IN ('orders_merchant_reference_format',
-                        'orders_partially_refunded_in_part', 'orders_legal_transition')
+                        'orders_partially_refunded_in_part', 'orders_legal_transition',
+                        'orders_cancel_reason')
                     """)
                 .query(Integer.class)
                 .single())
-        .isEqualTo(3);
+        .isEqualTo(4);
   }
 
   private void setReference(UUID id, String merchant, String reference) {
@@ -332,6 +369,7 @@ class OrderSchemaTest {
             Orders.ADDRESS,
             "pm_card_ok",
             false,
+            null,
             null,
             null,
             null,

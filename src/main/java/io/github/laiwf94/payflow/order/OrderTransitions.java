@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.order;
 
+import io.github.laiwf94.payflow.hold.OrderHolds;
 import io.github.laiwf94.payflow.outbox.OutboxWriter;
 import java.time.Instant;
 import java.util.Locale;
@@ -7,6 +8,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 /**
  * Every change to an order goes through here, and every state change writes its event to the outbox
@@ -26,15 +28,18 @@ public class OrderTransitions {
 
   private final OrderRepository repo;
   private final OutboxWriter outbox;
+  private final OrderHolds holds;
 
-  public OrderTransitions(OrderRepository repo, OutboxWriter outbox) {
+  public OrderTransitions(OrderRepository repo, OutboxWriter outbox, OrderHolds holds) {
     this.repo = repo;
     this.outbox = outbox;
+    this.holds = holds;
   }
 
   /**
-   * Stores a new order and its {@code order.created} event. Returns false, writing nothing, when
-   * the merchant already has an order with the same reference.
+   * Stores a new order, its {@code order.created} event and the timer that cancels it if it is not
+   * paid in time. Returns false, writing nothing, when the merchant already has an order with the
+   * same reference.
    */
   @Transactional
   public boolean create(Order order) {
@@ -42,6 +47,7 @@ public class OrderTransitions {
       return false;
     }
     outbox.write(CREATED, order, null, order.createdAt());
+    holds.created(order);
     return true;
   }
 
@@ -51,10 +57,22 @@ public class OrderTransitions {
    */
   @Transactional
   public Optional<Order> apply(Order before, UUID leaseToken, StateChange change, Instant now) {
+    boolean moves = change.state() != before.state();
+    if (moves) {
+      holds.beforeMove(before.id(), before.state(), change.state());
+    }
     Optional<Order> after = repo.update(before.id(), leaseToken, before.state(), change, now);
-    after
-        .filter(o -> o.state() != before.state())
-        .ifPresent(o -> outbox.write(eventType(o.state()), o, before.state(), now));
+    if (after.isEmpty()) {
+      if (moves) {
+        // The timers cancelled above belong to the worker that fenced us out.
+        TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+      }
+      return after;
+    }
+    if (moves) {
+      outbox.write(eventType(after.get().state()), after.get(), before.state(), now);
+      holds.afterMove(after.get(), now);
+    }
     return after;
   }
 

@@ -5,6 +5,7 @@ import static org.awaitility.Awaitility.await;
 
 import io.github.laiwf94.payflow.sim.FaultPlan;
 import io.github.laiwf94.payflow.sim.Faults;
+import io.github.laiwf94.payflow.sim.InventorySimulator;
 import io.github.laiwf94.payflow.sim.PaymentProviderSimulator;
 import io.github.laiwf94.payflow.sim.ShippingSimulator;
 import io.github.laiwf94.payflow.sim.SimulatorApplication;
@@ -37,8 +38,10 @@ import org.springframework.context.ConfigurableApplicationContext;
  * Runs the packaged jar as a child process and kills it with SIGKILL twice: once while the payment
  * authorization is in flight, once after the provider has captured but before the service heard
  * back. A second test stops it with SIGTERM at the same two points and checks that a clean stop
- * hands every lease back, so the next instance doesn't wait for one to expire. The simulators run
- * in this JVM, so the provider's ledger survives the kills, exactly as a real provider's would.
+ * hands every lease back, so the next instance doesn't wait for one to expire. A third kills it
+ * while an unpaid order holds stock, and the next instance releases it once when the hold runs out.
+ * The simulators run in this JVM, so the provider's ledger survives the kills, exactly as a real
+ * provider's would.
  */
 class ProcessCrashRecoveryTest {
 
@@ -176,10 +179,97 @@ class ProcessCrashRecoveryTest {
         .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() == 5);
   }
 
+  @Test
+  void anUnpaidOrderSurvivesAKillMidHoldAndIsCancelledOnceWhenTheHoldRunsOut() throws Exception {
+    Faults faults = simulators.getBean(Faults.class);
+    PaymentProviderSimulator payments = simulators.getBean(PaymentProviderSimulator.class);
+    InventorySimulator inventory = simulators.getBean(InventorySimulator.class);
+    faults.reset(new SplittableRandom(3));
+    // The provider answers every authorization with a 503, so the order sits on its stock,
+    // retrying, until the reservation window ends it. Retries alone would never give up here.
+    faults.set("payment.authorize", new FaultPlan(1, 0, 0, Duration.ZERO, List.of()));
+    String[] hold = {
+      "--payflow.holds.reservation-window=5s",
+      "--payflow.saga.step-timeout=10m",
+      "--payflow.saga.max-attempts=10000"
+    };
+
+    appPort = freePort();
+    log = Path.of("build", "hold-test-" + UUID.randomUUID() + ".log");
+    startApp(SHORT_LEASE, DEFAULT_GRACE, hold);
+    Api api = new Api(appPort, TestKeys.ACME);
+    String id = api.post("/v1/orders", Api.orderBody()).json().get("id").asString();
+    await().atMost(Duration.ofSeconds(20)).until(() -> "INVENTORY_RESERVED".equals(state(id)));
+    assertThat(inventory.heldFor("sku-1")).isEqualTo(2);
+    String due =
+        query(
+            """
+            SELECT extract(epoch FROM due_at)::text FROM timers
+            WHERE kind = 'order.reservation_expiry' AND subject_id = ?
+            """,
+            id);
+    assertThat(due).isNotNull();
+
+    // kill -9 inside the window: the timer is a row, not a thread, so it outlives the process.
+    killApp();
+    assertThat(
+            query(
+                """
+                SELECT CASE WHEN due_at > now() THEN 'pending' ELSE 'due' END FROM timers
+                WHERE kind = 'order.reservation_expiry' AND subject_id = ?
+                """,
+                id))
+        .isEqualTo("pending");
+    assertThat(state(id)).isEqualTo("INVENTORY_RESERVED");
+
+    startApp(SHORT_LEASE, DEFAULT_GRACE, hold);
+    await()
+        .atMost(Duration.ofSeconds(30))
+        .pollInterval(Duration.ofMillis(100))
+        .until(() -> "CANCELLED".equals(state(id)));
+
+    var order = api.get("/v1/orders/" + id).json();
+    assertThat(order.get("cancel_reason").asString()).isEqualTo("reservation_expired");
+    assertThat(order.has("failure")).isFalse();
+    assertThat(payments.ledgerFor(id)).isEmpty();
+    assertThat(inventory.heldFor("sku-1")).isZero();
+    assertThat(inventory.heldFor("sku-2")).isZero();
+    assertThat(query("SELECT count(*)::text FROM timers WHERE subject_id = ?", id)).isEqualTo("0");
+    // Once: one cancel request, one release, one cancellation, and the request came no earlier
+    // than the timer was due.
+    await()
+        .atMost(Duration.ofSeconds(60))
+        .until(() -> api.get("/v1/orders/" + id + "/events").json().get("data").size() == 6);
+    List<String> types = new ArrayList<>();
+    double cancelledAt = 0;
+    for (var e : api.get("/v1/orders/" + id + "/events").json().get("data")) {
+      types.add(e.get("event_type").asString());
+      if (e.get("event_type").asString().equals("order.cancel_requested")) {
+        cancelledAt =
+            java.time.OffsetDateTime.parse(e.get("occurred_at").asString())
+                    .toInstant()
+                    .toEpochMilli()
+                / 1000.0;
+      }
+    }
+    assertThat(types)
+        .containsExactly(
+            "order.created",
+            "order.inventory_reserved",
+            "order.cancel_requested",
+            "order.reversing_payment",
+            "order.releasing_inventory",
+            "order.cancelled");
+    assertThat(cancelledAt)
+        .isGreaterThanOrEqualTo(Math.floor(Double.parseDouble(due) * 1000) / 1000);
+    assertThat(Files.readString(log)).contains("is being cancelled: reservation_expired");
+  }
+
   private static final Duration SHORT_LEASE = Duration.ofSeconds(3);
   private static final Duration DEFAULT_GRACE = Duration.ofSeconds(5);
 
-  private void startApp(Duration lease, Duration shutdownGrace) throws IOException {
+  private void startApp(Duration lease, Duration shutdownGrace, String... extra)
+      throws IOException {
     int simPort = ((WebServerApplicationContext) simulators).getWebServer().getPort();
     String sim = "http://127.0.0.1:" + simPort + "/sim";
     List<String> cmd = new ArrayList<>();
@@ -206,6 +296,7 @@ class ProcessCrashRecoveryTest {
     cmd.add("--payflow.saga.lease=" + lease.toMillis() + "ms");
     cmd.add("--payflow.saga.shutdown-grace=" + shutdownGrace.toMillis() + "ms");
     cmd.add("--payflow.saga.unknown-outcome-delay=100ms");
+    cmd.addAll(List.of(extra));
     cmd.add(
         "--payflow.api-keys=acme:"
             + io.github.laiwf94.payflow.security.ApiKeys.hash(TestKeys.ACME));

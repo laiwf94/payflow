@@ -85,6 +85,9 @@ public class OutboxWriter {
     if (order.failureCode() != null) {
       payload.put("failure_code", order.failureCode());
     }
+    if (order.cancelReason() != null) {
+      payload.put("cancel_reason", order.cancelReason().code());
+    }
     if (refund != null) {
       Map<String, Object> r = new LinkedHashMap<>();
       r.put("id", refund.id());

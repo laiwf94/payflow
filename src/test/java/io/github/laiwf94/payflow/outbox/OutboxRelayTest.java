@@ -122,6 +122,7 @@ class OutboxRelayTest {
         o.shippingAddress(),
         o.paymentMethod(),
         o.cancelRequested(),
+        o.cancelReason(),
         o.reservationId(),
         o.paymentId(),
         o.shipmentId(),

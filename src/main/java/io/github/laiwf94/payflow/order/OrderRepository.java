@@ -244,6 +244,7 @@ public class OrderRepository {
     return jdbc.sql(
             """
             UPDATE orders SET cancel_requested = true,
+                cancel_reason = COALESCE(cancel_reason, 'requested'),
                 next_attempt_at = LEAST(next_attempt_at, :now),
                 version = version + 1, updated_at = :now
             WHERE id = :id AND merchant_id = :merchant
@@ -253,6 +254,30 @@ public class OrderRepository {
         .param("now", ts(now))
         .param("id", id)
         .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /**
+   * Flags a cancel for {@code reason} if nothing asked for one first and the order is still in one
+   * of the states the reason {@linkplain CancelReason#appliesTo applies to}, and makes it due now.
+   * Like a merchant's cancel it needs no lease: a worker holding the order sees the flag in the row
+   * its next write returns and compensates at the next step boundary. Empty, writing nothing, when
+   * the order has moved on, is already being cancelled, or doesn't exist.
+   */
+  public Optional<Order> expire(UUID id, CancelReason reason, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET cancel_requested = true, cancel_reason = :reason,
+                next_attempt_at = LEAST(next_attempt_at, :now),
+                version = version + 1, updated_at = :now
+            WHERE id = :id AND NOT cancel_requested AND state IN (:states)
+            RETURNING *
+            """)
+        .param("reason", reason.code())
+        .param("now", ts(now))
+        .param("id", id)
+        .param("states", reason.appliesTo().stream().map(Enum::name).sorted().toList())
         .query((rs, n) -> map(rs))
         .optional();
   }
@@ -357,6 +382,7 @@ public class OrderRepository {
         read(rs.getString("shipping_address"), new TypeReference<ShippingAddress>() {}),
         rs.getString("payment_method"),
         rs.getBoolean("cancel_requested"),
+        CancelReason.fromCode(rs.getString("cancel_reason")),
         rs.getString("reservation_id"),
         rs.getString("payment_id"),
         rs.getString("shipment_id"),

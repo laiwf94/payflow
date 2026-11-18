@@ -5,7 +5,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-/** An order as stored, including the saga bookkeeping. */
+/**
+ * An order as stored, including the saga bookkeeping. {@code cancelReason} is set exactly when
+ * {@code cancelRequested} is, except on orders cancelled before reasons were recorded.
+ */
 public record Order(
     UUID id,
     String merchantId,
@@ -16,6 +19,7 @@ public record Order(
     ShippingAddress shippingAddress,
     String paymentMethod,
     boolean cancelRequested,
+    CancelReason cancelReason,
     String reservationId,
     String paymentId,
     String shipmentId,
@@ -74,6 +78,7 @@ public record Order(
         shippingAddress,
         paymentMethod,
         false,
+        null,
         null,
         null,
         null,

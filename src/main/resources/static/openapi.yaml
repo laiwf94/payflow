@@ -1206,6 +1206,16 @@ components:
           type: string
         cancel_requested:
           type: boolean
+        cancel_reason:
+          type: string
+          enum: [requested, reservation_expired, payment_expired]
+          description: >-
+            Why the order is being or was cancelled, present when `cancel_requested` is true:
+            the merchant asked (`requested`), it held stock for the reservation window without
+            its payment being captured (`reservation_expired`), or it was not paid within the
+            payment window after it was created (`payment_expired`). An expired order goes
+            through the same compensation as a requested cancel and ends `CANCELLED`. Orders
+            cancelled before reasons were recorded have none.
         payment:
           type: object
           additionalProperties: false

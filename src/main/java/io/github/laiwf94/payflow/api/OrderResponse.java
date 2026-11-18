@@ -10,7 +10,9 @@ import java.util.UUID;
 
 /**
  * An order as the API returns it. Saga bookkeeping (leases, attempts) stays internal. {@code
- * refunds} holds the order's newest refunds and what its pending ones are returning.
+ * cancelReason} says why a cancel was requested ({@code requested}, {@code reservation_expired} or
+ * {@code payment_expired}). {@code refunds} holds the order's newest refunds and what its pending
+ * ones are returning.
  */
 public record OrderResponse(
     UUID id,
@@ -22,6 +24,7 @@ public record OrderResponse(
     ShippingAddress shippingAddress,
     String paymentMethod,
     boolean cancelRequested,
+    String cancelReason,
     Payment payment,
     Shipment shipment,
     Failure failure,
@@ -58,6 +61,7 @@ public record OrderResponse(
         o.shippingAddress(),
         o.paymentMethod(),
         o.cancelRequested(),
+        o.cancelReason() == null ? null : o.cancelReason().code(),
         o.paymentId() == null
             ? null
             : new Payment(o.paymentId(), o.capturedMinor(), o.refundedMinor()),
