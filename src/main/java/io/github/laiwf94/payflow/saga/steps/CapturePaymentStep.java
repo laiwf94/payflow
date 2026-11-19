@@ -4,19 +4,35 @@ import io.github.laiwf94.payflow.gateway.CallResult;
 import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
+import io.github.laiwf94.payflow.hold.HoldProperties;
+import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.saga.SagaProperties;
 import io.github.laiwf94.payflow.saga.SagaStep;
 import io.github.laiwf94.payflow.saga.StepOutcome;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
- * Takes the authorized money. On a retry or resume it asks the provider first: if the earlier
- * capture went through, capturing again would be refused (or, at a provider without idempotency
- * keys, could charge twice), and the order would be failed for a capture that actually succeeded.
+ * Takes the authorized money, on one of two paths.
+ *
+ * <ul>
+ *   <li><b>Automatic</b>: captures straight away.
+ *   <li><b>Manual</b>: until the merchant asks for the capture, there is nothing to do, so the
+ *       order {@linkplain StepOutcome.Await waits}, unleased and off the due list, until the
+ *       authorization expires. The request (or a cancel) makes it due at once; an expiry with no
+ *       request fails it as {@code authorization_expired} into the reversal, which voids the
+ *       authorization and releases the stock. Once asked, it captures exactly as the automatic path
+ *       does.
+ * </ul>
+ *
+ * <p>On a retry or resume it asks the provider first: if the earlier capture went through,
+ * capturing again would be refused (or, at a provider without idempotency keys, could charge
+ * twice), and the order would be failed for a capture that actually succeeded. A manual order that
+ * was never asked to capture has made no capture call, so it just waits again.
  */
 @Component
 class CapturePaymentStep implements SagaStep {
@@ -24,11 +40,17 @@ class CapturePaymentStep implements SagaStep {
   private final PaymentGateway payments;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
+  private final HoldProperties holds;
 
-  CapturePaymentStep(PaymentGateway payments, SagaProperties props, UnknownOutcomes unknown) {
+  CapturePaymentStep(
+      PaymentGateway payments,
+      SagaProperties props,
+      UnknownOutcomes unknown,
+      HoldProperties holds) {
     this.payments = payments;
     this.props = props;
     this.unknown = unknown;
+    this.holds = holds;
   }
 
   @Override
@@ -38,6 +60,29 @@ class CapturePaymentStep implements SagaStep {
 
   @Override
   public StepOutcome execute(Order order, boolean resumed) {
+    if (order.captureMode() == CaptureMode.MANUAL && !order.captureRequested()) {
+      return awaitCapture(order);
+    }
+    return capture(order, resumed);
+  }
+
+  /** The manual path before the merchant's request: wait for it, at most until the hold lapses. */
+  private StepOutcome awaitCapture(Order order) {
+    // Orders authorized before expiries were recorded have none; count from the step's start.
+    Instant expires =
+        order.authorizationExpiresAt() != null
+            ? order.authorizationExpiresAt()
+            : order.stepStartedAt().plus(holds.authorizationLifetime());
+    return new StepOutcome.Await(
+        "waiting for the merchant to capture",
+        expires,
+        new StepOutcome.Fail(
+            "authorization_expired",
+            "the authorization expired before the merchant captured the payment",
+            OrderState.REVERSING_PAYMENT));
+  }
+
+  private StepOutcome capture(Order order, boolean resumed) {
     if (resumed) {
       CallResult<List<PaymentInfo>> found = payments.findByReference(order.id().toString());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {

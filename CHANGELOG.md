@@ -48,6 +48,15 @@ notes on GitHub link here.
   ends `CANCELLED`. The order has a new `cancel_reason` (`requested`, `reservation_expired` or
   `payment_expired`), also in the `order.cancel_requested` event's payload; orders cancelled
   before this change have none. New counter `payflow.holds.expired{reason,outcome}`.
+- Manual capture (#26): `capture_mode` on `POST /v1/orders` (`automatic`, the default, or
+  `manual`). A manual order waits in `PAYMENT_AUTHORIZED`, holding its stock, until the new
+  `POST /v1/orders/{id}/capture`, which answers `202` with `capture_requested: true` and writes
+  the new `order.capture_requested` event; it can't be captured otherwise (`409
+  order_not_capturable`). Every authorized order now shows `payment.authorization_expires_at`,
+  `payflow.holds.authorization-lifetime` (7 days) after authorizing began; a manual order not
+  captured by then fails as `authorization_expired`, voided and with its stock released. Events
+  of a manual order carry `capture_mode: manual`. New counter `payflow.saga.waits`. Clients that
+  switch over webhook event types or error codes should add the new ones.
 - The running version on `/livez` (`components.build.details.version`) and in the
   `payflow X.Y.Z ready` log line.
 - Clean shutdown: on `SIGTERM` the saga worker stops claiming, lets running steps finish for up
@@ -168,6 +177,9 @@ notes on GitHub link here.
   matches every later read (#77).
 - Error responses always carry a JSON body: `Accept: text/html` gets a `406` with the error
   instead of an empty body.
+- A cancel or capture request that lands while a saga step runs now makes the order due at once,
+  instead of waiting out the retry backoff (or a manual order's wait) the step then writes. Every
+  saga write carries the version the worker read (#26).
 
 ### Fixed
 

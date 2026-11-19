@@ -138,8 +138,8 @@ class OpenApiContractTest {
     record("GET /v1/orders/{id}/events", api.get("/v1/orders/" + missing + "/events"));
     record("GET /v1/orders/{id}/events", anonymous.get("/v1/orders/" + missing + "/events"));
 
-    // POST /v1/orders/{id}/refund and /cancel, on an order that hasn't been captured
-    for (String action : List.of("refund", "cancel")) {
+    // POST /v1/orders/{id}/refund, /cancel and /capture, on an order that hasn't been captured
+    for (String action : List.of("refund", "cancel", "capture")) {
       String op = "POST /v1/orders/{id}/" + action;
       String path = "/v1/orders/" + pending + "/" + action;
       record(op, api.post(path, null, "Idempotency-Key", "has space"));
@@ -164,8 +164,24 @@ class OpenApiContractTest {
               "reused-" + action));
     }
     record("POST /v1/orders/{id}/refund", api.post("/v1/orders/" + pending + "/refund", null));
+    // An order that captures automatically can't be captured on request, and the refusal replays.
+    record("POST /v1/orders/{id}/capture", api.post("/v1/orders/" + pending + "/capture", null));
+    replayed("POST /v1/orders/{id}/capture", 409, "/v1/orders/" + pending + "/capture", null);
     record("POST /v1/orders/{id}/cancel", api.post("/v1/orders/" + pending + "/cancel", null));
     replayed("POST /v1/orders/{id}/cancel", 202, "/v1/orders/" + pending + "/cancel", null);
+
+    // A manual-capture order waits authorized until it is captured on request.
+    Api.Response manual = api.post("/v1/orders", Api.manualOrderBody());
+    record("POST /v1/orders", manual);
+    String waiting = manual.json().get("id").asString();
+    while (worker.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+    record("GET /v1/orders/{id}", api.get("/v1/orders/" + waiting));
+    assertThat(api.get("/v1/orders/" + waiting).json().get("state").asString())
+        .isEqualTo("PAYMENT_AUTHORIZED");
+    record("POST /v1/orders/{id}/capture", api.post("/v1/orders/" + waiting + "/capture", null));
+    replayed("POST /v1/orders/{id}/capture", 202, "/v1/orders/" + waiting + "/capture", null);
 
     String done = createdOrderId();
     while (worker.runOnce() > 0) {

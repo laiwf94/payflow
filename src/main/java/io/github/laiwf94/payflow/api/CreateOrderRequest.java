@@ -12,7 +12,8 @@ import java.util.List;
 /**
  * {@code POST /v1/orders}. Unit amounts are minor units of {@code currency}; the server computes
  * the total, so a client can't send a total that disagrees with its lines. {@code
- * merchantReference} is optional and unique per merchant.
+ * merchantReference} is optional and unique per merchant. {@code captureMode} is {@code automatic}
+ * (the default) or {@code manual}.
  */
 public record CreateOrderRequest(
     @NotNull @Size(min = 1, max = 50) List<@NotNull @Valid Item> items,
@@ -24,7 +25,9 @@ public record CreateOrderRequest(
     @Pattern(
             regexp = "[\\x21-\\x7e]{1,128}",
             message = "must be 1-128 printable ASCII characters without spaces")
-        String merchantReference) {
+        String merchantReference,
+    @Pattern(regexp = "automatic|manual", message = "must be automatic or manual")
+        String captureMode) {
 
   /** Free text may hold anything printable, including markup, but no control characters. */
   static final String TEXT = "[^\\p{Cntrl}]*";

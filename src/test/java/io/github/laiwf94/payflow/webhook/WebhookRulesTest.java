@@ -16,10 +16,10 @@ class WebhookRulesTest {
   @Test
   void everyEventTheOutboxWritesCanBeSubscribedTo() {
     assertThat(WebhookEvents.TYPES)
-        .startsWith("order.created", "order.cancel_requested")
+        .startsWith("order.created", "order.cancel_requested", "order.capture_requested")
         .endsWith(
             "refund.created", "refund.succeeded", "refund.failed", "webhook_endpoint.disabled")
-        .hasSize(2 + OrderState.values().length - 1 + 3 + 1)
+        .hasSize(3 + OrderState.values().length - 1 + 3 + 1)
         .doesNotContain("order.pending", "*", WebhookEvents.PING);
     for (OrderState s : OrderState.values()) {
       if (s != OrderState.PENDING) {

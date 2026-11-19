@@ -1,11 +1,11 @@
 package io.github.laiwf94.payflow.hold;
 
 import io.github.laiwf94.payflow.order.CancelReason;
+import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.timer.TimerService;
 import java.time.Instant;
-import java.util.UUID;
 
 /**
  * Keeps an order's expiry timers in step with its state, in the transaction that changes it, so a
@@ -16,6 +16,9 @@ import java.util.UUID;
  *   <li>Reserving its stock schedules {@link #RESERVATION_EXPIRY} for the end of the reservation
  *       window.
  *   <li>Leaving the unpaid states, by capturing or by starting to compensate, cancels both.
+ *   <li>A {@linkplain CaptureMode#MANUAL manual-capture} order's authorization also cancels both:
+ *       the customer has paid as far as they can, and the order now waits for the merchant's
+ *       capture for as long as the authorization lives, which its own expiry bounds.
  * </ul>
  *
  * A timer that fires after the order moved on finds nothing to do ({@link ExpiryHandler}), so the
@@ -48,13 +51,19 @@ public class OrderHolds {
    * transaction, like a timer's fire, locks the timer before the order. A fire deletes its timer
    * and then updates the order; doing it the other way round here could deadlock with one.
    */
-  public void beforeMove(UUID orderId, OrderState from, OrderState to) {
-    if (unpaid(from) && !unpaid(to)) {
-      timers.cancel(PAYMENT_EXPIRY, orderId);
+  public void beforeMove(Order before, OrderState to) {
+    OrderState from = before.state();
+    if ((unpaid(from) && !unpaid(to)) || awaitsCapture(before.captureMode(), to)) {
+      timers.cancel(PAYMENT_EXPIRY, before.id());
       if (from != OrderState.PENDING) {
-        timers.cancel(RESERVATION_EXPIRY, orderId);
+        timers.cancel(RESERVATION_EXPIRY, before.id());
       }
     }
+  }
+
+  /** A manual-capture order that is now authorized waits for the merchant, not for a window. */
+  private static boolean awaitsCapture(CaptureMode mode, OrderState to) {
+    return mode == CaptureMode.MANUAL && to == OrderState.PAYMENT_AUTHORIZED;
   }
 
   /** In the same transaction, once the order row says it moved: schedules what the move starts. */

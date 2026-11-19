@@ -52,11 +52,11 @@ public class OrderRepository {
     return jdbc.sql(
                 """
                 INSERT INTO orders (id, merchant_id, merchant_reference, state, amount_minor,
-                    currency, items, shipping_address, payment_method, step_started_at,
-                    next_attempt_at, correlation_id, created_at, updated_at)
+                    currency, items, shipping_address, payment_method, capture_mode,
+                    step_started_at, next_attempt_at, correlation_id, created_at, updated_at)
                 VALUES (:id, :merchant, :reference, :state, :amount, :currency,
-                    CAST(:items AS jsonb), CAST(:address AS jsonb), :method, :stepStartedAt,
-                    :nextAttemptAt, :correlationId, :createdAt, :updatedAt)
+                    CAST(:items AS jsonb), CAST(:address AS jsonb), :method, :captureMode,
+                    :stepStartedAt, :nextAttemptAt, :correlationId, :createdAt, :updatedAt)
                 ON CONFLICT (merchant_id, merchant_reference) DO NOTHING
                 """)
             .param("id", o.id())
@@ -68,6 +68,7 @@ public class OrderRepository {
             .param("items", write(o.items()))
             .param("address", write(o.shippingAddress()))
             .param("method", o.paymentMethod())
+            .param("captureMode", o.captureMode().code())
             .param("stepStartedAt", ts(o.stepStartedAt()))
             .param("nextAttemptAt", ts(o.nextAttemptAt()))
             .param("correlationId", o.correlationId())
@@ -188,6 +189,25 @@ public class OrderRepository {
    */
   public Optional<Order> update(
       UUID id, UUID leaseToken, OrderState expected, StateChange change, Instant now) {
+    return update(id, leaseToken, expected, null, change, now);
+  }
+
+  /**
+   * {@link #update}, made by a worker that last read the order at {@code seenVersion}. If the row
+   * has moved on since, someone changed it without the lease (a merchant's capture or cancel
+   * request, an expiry), and that change may need the saga's attention sooner than {@code change}
+   * schedules it: the order is made due now rather than at {@code change.nextAttemptAt()}. Without
+   * this, a step that decided to wait just before a capture request landed would write its wait
+   * over the request's "due now", and the capture would sit until the wait ran out. {@code null}
+   * skips the check.
+   */
+  public Optional<Order> update(
+      UUID id,
+      UUID leaseToken,
+      OrderState expected,
+      Long seenVersion,
+      StateChange change,
+      Instant now) {
     if (change.state().isTerminal() != (change.nextAttemptAt() == null)) {
       throw new IllegalArgumentException(
           "terminal states have no next attempt, other states need one: " + change);
@@ -198,7 +218,11 @@ public class OrderRepository {
                 state = :state,
                 attempt = :attempt,
                 step_started_at = COALESCE(CAST(:stepStartedAt AS timestamptz), step_started_at),
-                next_attempt_at = CAST(:nextAttemptAt AS timestamptz),
+                next_attempt_at = CASE
+                    WHEN CAST(:nextAttemptAt AS timestamptz) IS NULL THEN NULL
+                    WHEN version <> CAST(:seenVersion AS bigint)
+                        THEN LEAST(CAST(:nextAttemptAt AS timestamptz), CAST(:now AS timestamptz))
+                    ELSE CAST(:nextAttemptAt AS timestamptz) END,
                 lease_token = CASE WHEN CAST(:keepUntil AS timestamptz) IS NULL
                                    THEN NULL ELSE lease_token END,
                 lease_until = CAST(:keepUntil AS timestamptz),
@@ -208,6 +232,8 @@ public class OrderRepository {
                 tracking_number = COALESCE(CAST(:trackingNumber AS text), tracking_number),
                 captured_minor = COALESCE(CAST(:captured AS bigint), captured_minor),
                 refunded_minor = COALESCE(CAST(:refunded AS bigint), refunded_minor),
+                authorization_expires_at = COALESCE(
+                    CAST(:authorizationExpiresAt AS timestamptz), authorization_expires_at),
                 failure_code = COALESCE(CAST(:failureCode AS text), failure_code),
                 failure_message = COALESCE(CAST(:failureMessage AS text), failure_message),
                 version = version + 1,
@@ -226,6 +252,8 @@ public class OrderRepository {
         .param("trackingNumber", change.trackingNumber())
         .param("captured", change.capturedMinor())
         .param("refunded", change.refundedMinor())
+        .param("authorizationExpiresAt", ts(change.authorizationExpiresAt()))
+        .param("seenVersion", seenVersion)
         .param("failureCode", change.failureCode())
         .param("failureMessage", change.failureMessage())
         .param("now", ts(now))
@@ -249,6 +277,33 @@ public class OrderRepository {
                 version = version + 1, updated_at = :now
             WHERE id = :id AND merchant_id = :merchant
               AND state IN ('PENDING', 'INVENTORY_RESERVED', 'PAYMENT_AUTHORIZED')
+            RETURNING *
+            """)
+        .param("now", ts(now))
+        .param("id", id)
+        .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /**
+   * Records the merchant's capture request on a manual-capture order that is authorized, not being
+   * cancelled, not already asked to capture, and whose authorization is still live at {@code now},
+   * and makes it due now. Like a cancel it needs no lease: a worker holding the order is fenced
+   * from writing a wait over it (see {@link #update(UUID, UUID, OrderState, Long, StateChange,
+   * Instant)}). The step clock restarts, so a capture asked for days after the authorization gets
+   * the whole step timeout rather than none. Empty, writing nothing, when any condition fails.
+   */
+  public Optional<Order> requestCapture(String merchantId, UUID id, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET capture_requested = true,
+                step_started_at = :now, next_attempt_at = :now,
+                version = version + 1, updated_at = :now
+            WHERE id = :id AND merchant_id = :merchant
+              AND capture_mode = 'manual' AND state = 'PAYMENT_AUTHORIZED'
+              AND NOT cancel_requested AND NOT capture_requested
+              AND authorization_expires_at > :now
             RETURNING *
             """)
         .param("now", ts(now))
@@ -381,14 +436,17 @@ public class OrderRepository {
         read(rs.getString("items"), ITEMS),
         read(rs.getString("shipping_address"), new TypeReference<ShippingAddress>() {}),
         rs.getString("payment_method"),
+        CaptureMode.fromCode(rs.getString("capture_mode")),
         rs.getBoolean("cancel_requested"),
         CancelReason.fromCode(rs.getString("cancel_reason")),
+        rs.getBoolean("capture_requested"),
         rs.getString("reservation_id"),
         rs.getString("payment_id"),
         rs.getString("shipment_id"),
         rs.getString("tracking_number"),
         rs.getLong("captured_minor"),
         rs.getLong("refunded_minor"),
+        instant(rs, "authorization_expires_at"),
         rs.getString("failure_code"),
         rs.getString("failure_message"),
         rs.getInt("attempt"),

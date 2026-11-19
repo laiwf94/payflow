@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.api;
 
+import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderPosition;
@@ -80,6 +81,9 @@ class OrderController {
         orders.create(
             merchant(http),
             req.merchantReference(),
+            req.captureMode() == null
+                ? CaptureMode.AUTOMATIC
+                : CaptureMode.fromCode(req.captureMode()),
             req.items().stream()
                 .map(i -> new LineItem(i.sku(), i.quantity(), i.unitAmount()))
                 .toList(),
@@ -101,6 +105,16 @@ class OrderController {
   ResponseEntity<OrderResponse> cancel(@PathVariable String id, HttpServletRequest http) {
     return ResponseEntity.accepted()
         .body(OrderResponse.of(orders.cancel(merchant(http), parse(id))));
+  }
+
+  /**
+   * Takes the money of a manual-capture order waiting in {@code PAYMENT_AUTHORIZED}. The capture
+   * runs in the background; the order shows {@code PAYMENT_CAPTURED} and then {@code COMPLETED}.
+   */
+  @PostMapping("/{id}/capture")
+  ResponseEntity<OrderResponse> capture(@PathVariable String id, HttpServletRequest http) {
+    return ResponseEntity.accepted()
+        .body(OrderResponse.of(orders.capture(merchant(http), parse(id))));
   }
 
   /**

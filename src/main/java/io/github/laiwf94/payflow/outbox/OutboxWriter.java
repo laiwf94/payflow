@@ -1,5 +1,6 @@
 package io.github.laiwf94.payflow.outbox;
 
+import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
 import java.time.Instant;
@@ -79,6 +80,9 @@ public class OutboxWriter {
     payload.put("state", order.state());
     if (previous != null) {
       payload.put("previous_state", previous);
+    }
+    if (order.captureMode() == CaptureMode.MANUAL) {
+      payload.put("capture_mode", order.captureMode().code());
     }
     payload.put("amount", order.amount().minorUnits());
     payload.put("currency", order.amount().currencyCode());

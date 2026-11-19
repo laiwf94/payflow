@@ -27,6 +27,7 @@ An order row is both the business record and the saga's durable state:
 | `captured_minor`, `refunded_minor` | What the payment provider reports, after each money step. |
 | `attempt`, `step_started_at`, `next_attempt_at` | Retry bookkeeping for the current step; `next_attempt_at` is null exactly when the order is terminal. |
 | `lease_token`, `lease_until` | Which worker holds the order, and until when. |
+| `capture_mode`, `capture_requested`, `authorization_expires_at` | Who captures (`automatic`, or `manual` on the merchant's request), whether a manual order's capture was asked for, and when the authorization's hold on the card lapses (see [Capturing later](#capturing-later)). |
 | `cancel_requested`, `cancel_reason` | A cancel was asked for, and why: `requested` by the merchant, `reservation_expired` or `payment_expired` by a hold running out (see [Holds that run out](#holds-that-run-out)). |
 | `failure_code`, `failure_message`, `correlation_id`, `version` | Outcomes, tracing and an update counter. |
 
@@ -557,6 +558,48 @@ answers every authorization with a 503, kills it with `SIGKILL` inside the windo
 again. The new instance fires the timer, releases the stock once and cancels the order once, with
 the cancel request no earlier than the timer was due and no payment at the provider.
 
+### Capturing later
+
+A merchant who charges on shipment creates the order with `capture_mode: manual`. The saga runs
+as usual up to `PAYMENT_AUTHORIZED` and then has nothing to do until the merchant calls `POST
+/v1/orders/{id}/capture`, so `CapturePaymentStep` has two paths:
+
+- **automatic**: capture at once, as before;
+- **manual, not yet asked**: return `StepOutcome.Await` with the authorization's expiry as its
+  deadline. The worker writes the order back unleased with `next_attempt_at` at that deadline
+  and `attempt = 0`, so it leaves the due list without a timer of its own and costs nothing while
+  it waits. Waiting has no attempt count and no step timeout; the deadline is the step's.
+- **manual, asked**: capture exactly as the automatic path does, lookup on resume included.
+
+The capture request is one guarded `UPDATE`, like a cancel, and needs no lease: it matches only a
+manual order in `PAYMENT_AUTHORIZED` that is not being cancelled, not already asked, and whose
+`authorization_expires_at` is still ahead. It sets `capture_requested`, makes the order due now,
+restarts `step_started_at` (a capture asked for days after the authorization gets the whole
+2-minute step timeout, not none) and writes `order.capture_requested`. Anything else is 409
+`order_not_capturable`, except a repeat while the capture is still on its way, which answers
+with the order as it is.
+
+There is a race the plain write would lose: the step reads the order, the request commits, and
+then the step writes its wait, putting `next_attempt_at` back a week. So every saga write carries
+the version the worker read, and if the row has moved on since, someone changed it without the
+lease, and the write keeps the order due now (`LEAST(next, now)`) instead of at the time it asked
+for. The same rule stops a cancel from waiting out a retry's backoff. `ManualCaptureTest` lands a
+capture request and a cancel between the step and its write; without the version check, both
+tests fail with the order parked for the whole authorization.
+
+`authorization_expires_at` is recorded for every order when it is authorized:
+`payflow.holds.authorization-lifetime` (7 days, what the card networks give an online payment)
+after the authorization step started. Every attempt, and so the authorization itself, happened at
+or after that, so the recorded expiry is never later than the provider's. A manual order nobody
+captures fails at that moment with `authorization_expired` into `REVERSING_PAYMENT`, which voids
+the authorization, then releases the stock and ends `FAILED`.
+
+The reservation and payment windows are for orders that never get paid. A manual order that is
+authorized has been paid for as far as the customer can, so its move to `PAYMENT_AUTHORIZED`
+cancels both timers, and from then on the authorization's own expiry bounds how long it holds
+stock. Until then the windows apply as to any other order. A cancel while it waits voids the
+authorization and ends `CANCELLED` as usual.
+
 ## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what
@@ -991,6 +1034,7 @@ response without the other fails the build.
 | payflow killed mid-step | Lease left behind | Lease expires (30 s); the next worker resumes and looks before acting |
 | payflow stopped with `SIGTERM` | Running steps finish for up to 5 s; leases are handed back | Next instance claims on its first poll; a step cut off at the deadline resumes and looks before acting |
 | payflow killed mid-fire of a timer | The fire's transaction rolls back; the timer stays, leased | Lease expires (30 s); the next instance fires it once |
+| A manual-capture order is not captured before its authorization expires | The waiting step reaches its deadline | Fails as `authorization_expired`; the authorization is voided and the stock released |
 | An unpaid order outlives its reservation or payment window | Its timer fires and flags a cancel (`cancel_reason`) | Compensation as for a merchant's cancel; the order ends `CANCELLED` with its stock released and any authorization voided |
 | A timer's handler throws | Its writes roll back; error recorded on the timer | Retried with backoff forever, capped at 30 s apart; error log after 10 attempts |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
@@ -1041,6 +1085,7 @@ response without the other fails the build.
 | Timer lease / retry backoff / shutdown grace | 30 s / 200 ms to 30 s, full jitter / 5 s | `payflow.timers.*` |
 | Timer kind | 1-63 of `a-z 0-9 _ .`, starting with a letter | `TimerHandlers.KIND`, `timers_kind_format` |
 | Reservation window / payment window | 15 min / 1 h, each 1 s to 31 days | `payflow.holds.reservation-window`, `payment-window` |
+| Authorization lifetime | 7 days, 1 s to 31 days | `payflow.holds.authorization-lifetime` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |
 | Backoff | 200 ms base, 30 s cap, full jitter | `payflow.saga.backoff-*` |

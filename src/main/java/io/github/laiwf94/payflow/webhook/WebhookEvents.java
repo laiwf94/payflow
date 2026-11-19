@@ -40,6 +40,7 @@ public final class WebhookEvents {
     Set<String> types = new LinkedHashSet<>();
     types.add(OrderTransitions.CREATED);
     types.add(OrderTransitions.CANCEL_REQUESTED);
+    types.add(OrderTransitions.CAPTURE_REQUESTED);
     for (OrderState s : OrderState.values()) {
       // An order is created PENDING and never returns there, so no event announces it.
       if (s != OrderState.PENDING) {

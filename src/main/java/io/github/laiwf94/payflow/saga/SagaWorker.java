@@ -187,7 +187,33 @@ public class SagaWorker implements SmartLifecycle {
       case StepOutcome.Fail f ->
           move(order, token, f.compensateTo(), StepOutcome.Fields.NONE, f.code(), f.message());
       case StepOutcome.Retry r -> retry(order, token, r);
+      case StepOutcome.Await a -> await(order, token, a);
     };
+  }
+
+  /**
+   * Parks the order until {@code a.until()}, giving the lease back, or fails it once that has
+   * passed. The write is made against the version this worker read, so a request that changed the
+   * order while the step ran leaves it due now instead of parked (see {@link
+   * OrderRepository#update(UUID, UUID, OrderState, Long, StateChange, Instant)}).
+   */
+  private Order await(Order order, UUID token, StepOutcome.Await a) {
+    Instant now = clock.instant();
+    OrderState state = order.state();
+    if (!now.isBefore(a.until())) {
+      StepOutcome.Fail f = a.onDeadline();
+      log.warn("{} waited until {} with nothing to do: {}", state, a.until(), f.message());
+      return move(order, token, f.compensateTo(), StepOutcome.Fields.NONE, f.code(), f.message());
+    }
+    Optional<Order> parked =
+        transitions.apply(
+            order, token, StateChange.to(state).attempt(0).nextAttemptAt(a.until()).build(), now);
+    if (parked.isPresent()) {
+      log.info("{} waits until {}: {}", state, a.until(), a.reason());
+      meters.counter("payflow.saga.waits", "state", state.name()).increment();
+    }
+    crash.at("committed:" + state);
+    return null;
   }
 
   private Order retry(Order order, UUID token, StepOutcome.Retry r) {
@@ -251,6 +277,9 @@ public class SagaWorker implements SmartLifecycle {
     }
     if (f.refundedMinor() != null) {
       b.refundedMinor(f.refundedMinor());
+    }
+    if (f.authorizationExpiresAt() != null) {
+      b.authorizationExpiresAt(f.authorizationExpiresAt());
     }
     if (failureCode != null) {
       b.failure(failureCode, failureMessage);

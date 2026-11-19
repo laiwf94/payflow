@@ -21,6 +21,7 @@ public record StateChange(
     String trackingNumber,
     Long capturedMinor,
     Long refundedMinor,
+    Instant authorizationExpiresAt,
     String failureCode,
     String failureMessage) {
 
@@ -41,6 +42,7 @@ public record StateChange(
     private String trackingNumber;
     private Long capturedMinor;
     private Long refundedMinor;
+    private Instant authorizationExpiresAt;
     private String failureCode;
     private String failureMessage;
 
@@ -94,6 +96,11 @@ public record StateChange(
       return this;
     }
 
+    public Builder authorizationExpiresAt(Instant at) {
+      this.authorizationExpiresAt = at;
+      return this;
+    }
+
     public Builder failure(String code, String message) {
       this.failureCode = code;
       this.failureMessage = message;
@@ -113,6 +120,7 @@ public record StateChange(
           trackingNumber,
           capturedMinor,
           refundedMinor,
+          authorizationExpiresAt,
           failureCode,
           failureMessage);
     }

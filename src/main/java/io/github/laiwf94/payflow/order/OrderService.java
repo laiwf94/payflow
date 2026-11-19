@@ -4,6 +4,7 @@ import io.github.laiwf94.payflow.money.InvalidMoneyException;
 import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.saga.SagaWorker;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -82,6 +83,7 @@ public class OrderService {
   public Order create(
       String merchantId,
       String merchantReference,
+      CaptureMode captureMode,
       List<LineItem> items,
       String currency,
       ShippingAddress address,
@@ -100,6 +102,7 @@ public class OrderService {
             UUID.randomUUID(),
             merchantId,
             merchantReference,
+            captureMode,
             total,
             items,
             address,
@@ -149,6 +152,50 @@ public class OrderService {
             + current.state().name().toLowerCase(Locale.ROOT)
             + "; only orders not yet"
             + " captured can be cancelled, use refund after completion");
+  }
+
+  /**
+   * Asks for the capture of a manual-capture order that is waiting in {@code PAYMENT_AUTHORIZED}.
+   * The saga takes the money at once. Asking again while the capture is still on its way answers
+   * with the order as it is; anything else that can't be captured is {@link WrongState}.
+   */
+  @Transactional(noRollbackFor = {NotFound.class, WrongState.class})
+  public Order capture(String merchantId, UUID id) {
+    Instant now = clock.instant();
+    Optional<Order> o = transitions.requestCapture(merchantId, id, now);
+    if (o.isPresent()) {
+      wakeWorkerAfterCommit();
+      return o.get();
+    }
+    Order current = get(merchantId, id);
+    if (current.captureRequested() && !current.state().isTerminal()) {
+      return current;
+    }
+    throw new WrongState("order_not_capturable", notCapturable(current, now));
+  }
+
+  private static String notCapturable(Order o, Instant now) {
+    if (o.captureMode() != CaptureMode.MANUAL) {
+      return "order captures automatically; only orders created with capture_mode manual are"
+          + " captured on request";
+    }
+    if (o.captureRequested()) {
+      return "order is "
+          + o.state().name().toLowerCase(Locale.ROOT)
+          + "; its capture was requested";
+    }
+    if (o.state() != OrderState.PAYMENT_AUTHORIZED) {
+      return "order is "
+          + o.state().name().toLowerCase(Locale.ROOT)
+          + "; only payment_authorized orders can be captured";
+    }
+    if (o.cancelRequested()) {
+      return "order is being cancelled";
+    }
+    if (o.authorizationExpiresAt() != null && !now.isBefore(o.authorizationExpiresAt())) {
+      return "the authorization expired at " + o.authorizationExpiresAt();
+    }
+    return "order can't be captured now";
   }
 
   private void wakeWorkerAfterCommit() {

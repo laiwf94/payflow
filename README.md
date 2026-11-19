@@ -92,6 +92,12 @@ released: `payflow.holds.reservation-window` (15 min) after its stock was reserv
 `CANCELLED` with `cancel_reason` `reservation_expired` or `payment_expired`. The clocks are rows in
 Postgres, so they keep running across restarts and crashes.
 
+To charge on shipment, create the order with `"capture_mode": "manual"`. It stops in
+`PAYMENT_AUTHORIZED`, holding its stock, until `POST /v1/orders/{id}/capture`; the windows above
+stop applying once it is authorized. The authorization lasts `payflow.holds.authorization-lifetime`
+(7 days), shown as `payment.authorization_expires_at`; an order not captured by then fails as
+`authorization_expired`, with the authorization voided and the stock released.
+
 Webhooks are only sent to public addresses: a URL whose host is, or resolves to, a loopback,
 private, link-local, metadata or CGNAT address is refused at registration and on every send. For
 a development stack whose merchant server is on a private network, list that network in
@@ -164,10 +170,11 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/orders` | Create an order; the saga starts once it commits. Returns `201` in `PENDING`. An optional `merchant_reference` is unique per merchant. |
+| `POST /v1/orders` | Create an order; the saga starts once it commits. Returns `201` in `PENDING`. An optional `merchant_reference` is unique per merchant; `capture_mode` is `automatic` (default) or `manual`. |
 | `GET /v1/orders` | The merchant's orders, newest first, up to 100 a page with a signed `next_cursor`. Filters: `state`, `created_gte`, `created_lt`, `currency`, `merchant_reference`. |
 | `GET /v1/orders/{id}` | The order, with payment, shipment and failure details, and `refunds`: its ten newest refunds, `has_more`, and the `pending_amount` still on its way back. |
 | `POST /v1/orders/{id}/cancel` | Cancel before capture. `202`; the saga unwinds and ends `CANCELLED`, with `cancel_reason: requested`. |
+| `POST /v1/orders/{id}/capture` | Capture a `manual` order waiting in `PAYMENT_AUTHORIZED`. `202` with `capture_requested: true`; the saga captures, ships and ends `COMPLETED`. |
 | `POST /v1/orders/{id}/refund` | Refund whatever is left of a completed order's capture. `202` with the order as it is; it becomes `REFUNDED` once the provider has returned the money. |
 | `POST /v1/orders/{id}/refunds` | Refund part of a completed order: `{"amount": 500}`, or `{"lines": [{"sku": "mug", "quantity": 1}]}` priced from the order. `202` with the refund, `PENDING`; the order becomes `PARTIALLY_REFUNDED` or `REFUNDED` once the provider has returned the money. |
 | `GET /v1/orders/{id}/refunds` | The order's refunds, oldest first, each `PENDING`, `SUCCEEDED` or `FAILED` (with the provider's reason). |
@@ -186,7 +193,7 @@ The full contract is [openapi.yaml](src/main/resources/static/openapi.yaml), als
 
 Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` with stable codes:
 `invalid_argument` / `invalid_cursor` 400, `unauthenticated` 401, `not_found` 404, `method_not_allowed` 405,
-`not_acceptable` 406, `order_not_cancellable` / `order_not_refundable` /
+`not_acceptable` 406, `order_not_cancellable` / `order_not_capturable` / `order_not_refundable` /
 `order_reference_in_use` / `refund_exceeds_captured` / `refund_exceeds_purchased` /
 `webhook_endpoint_limit_reached` / `idempotency_key_in_use` 409, `payload_too_large` 413, `unsupported_media_type` 415,
 `idempotency_key_reused` 422, `internal` 500, `unavailable` 503. Another merchant's order is a
@@ -205,6 +212,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Refund worker | Partial refunds settle on their own and add up to a full one, each with its `refund.created` and `refund.succeeded` events under versions of their own; a refused refund fails and frees its share; an unavailable provider is retried with backoff; a worker killed after the provider refunded, with key handling off, is resumed without a second refund; a stale lease can't settle; `SIGTERM` hands back a refund still waiting for the provider. |
 | Timers | Real Postgres: a timer fires at its due time and not a microsecond before, once; a failing handler's writes roll back and it is retried with full-jitter backoff without giving up; a reschedule or cancel after the claim fences the fire out, and a cancel waits for a fire that is committing; a crash mid-fire rolls back and the timer fires once when the lease runs out; a stop gives back unstarted claims at once and leaves a fire in flight to finish. Four instances fire 3,000 timers due within one second exactly once each and none early, while one crashes mid-fire and another is replaced. Schedules commit or roll back with the caller's transaction, and need one. Raw SQL can't store a malformed timer. |
 | Holds that run out | Real steps over HTTP, the wired expiry handlers and one clock for the saga and timer workers: stock held past the reservation window is released and the order cancelled once, not a microsecond early; an authorized order is voided; an order stuck before reserving is cancelled at the end of its payment window; a paid order leaves no timer behind; the first reason to cancel is kept; a timer that fires after the order moved on changes nothing; a fenced move keeps its timers; a fire holding its timer while the saga captures neither deadlocks nor keeps the money. The packaged jar is killed with `SIGKILL` inside a 5 s window and the next instance cancels the order once, no earlier than it was due. Raw SQL can't store a cancel reason without a cancel. |
+| Manual capture | Real steps over HTTP and one clock: a manual order waits authorized, unleased and off the due list, with no hold timers, until the capture request, then captures and ships once; asking twice gives the same answer; automatic, unauthorized, cancelling and expired orders are refused and nothing is written; an authorization nobody captures fails the order at its expiry, not a microsecond early, voided with its stock released; a cancel while waiting voids it; a capture or cancel landing between the step's read and its wait still leaves the order due now; a capture asked for 50 minutes after authorizing gets the whole 2-minute step timeout. Raw SQL can't ask a non-manual order to capture. |
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
@@ -223,7 +231,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 540 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 553 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

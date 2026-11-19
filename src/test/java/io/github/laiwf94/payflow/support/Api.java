@@ -96,6 +96,11 @@ public final class Api {
     return "{\"merchant_reference\":\"" + escaped + "\"," + orderBody().strip().substring(1);
   }
 
+  /** {@link #orderBody()} for an order the merchant captures: {@code capture_mode} manual. */
+  public static String manualOrderBody() {
+    return "{\"capture_mode\":\"manual\"," + orderBody().strip().substring(1);
+  }
+
   public static String orderBody(String paymentMethod, String postalCode) {
     return """
         {"items":[{"sku":"sku-1","quantity":2,"unit_amount":1000},

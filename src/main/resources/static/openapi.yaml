@@ -206,6 +206,47 @@ paths:
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
           $ref: '#/components/responses/KeyReused'
+  /v1/orders/{id}/capture:
+    post:
+      operationId: captureOrder
+      summary: Capture a manual-capture order's payment
+      description: |
+        For an order created with `capture_mode` `manual`, which waits in PAYMENT_AUTHORIZED
+        until this call, typically made when the goods ship. Accepted while the authorization is
+        live (`payment.authorization_expires_at`) and the order is not being cancelled: the saga
+        captures the full amount, books the shipment and ends COMPLETED, or fails into the
+        reversal if the provider refuses the capture. The answer shows `capture_requested`.
+        Asking again while the capture is on its way answers with the order as it is. An order
+        nobody captures before its authorization expires fails with `authorization_expired`; its
+        authorization is voided and its stock released.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '202':
+          description: Capture requested.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CaptureConflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/KeyReused'
   /v1/orders/{id}/refund:
     post:
       operationId: refundOrder
@@ -902,6 +943,22 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    CaptureConflict:
+      description: |
+        The order can't be captured on request (`order_not_capturable`): it captures
+        automatically, it isn't waiting in PAYMENT_AUTHORIZED, it is being cancelled, or its
+        authorization has expired. Or a request with this Idempotency-Key is still running
+        (`idempotency_key_in_use`).
+      x-error-codes: [order_not_capturable, idempotency_key_in_use]
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+        Idempotent-Replayed:
+          $ref: '#/components/headers/IdempotentReplayed'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     RefundConflict:
       description: |
         Only a COMPLETED or PARTIALLY_REFUNDED order with money left to refund can be refunded
@@ -1065,6 +1122,15 @@ components:
             The merchant's own id for the order, such as a cart or order number: 1-128 printable
             ASCII characters without spaces. Optional, and unique per merchant; a second order with
             the same reference is refused with 409 `order_reference_in_use`.
+        capture_mode:
+          type: string
+          enum: [automatic, manual]
+          default: automatic
+          description: |
+            `automatic` captures the payment as soon as it is authorized. `manual` holds it: the
+            order waits in PAYMENT_AUTHORIZED until `POST /v1/orders/{id}/capture`, for as long
+            as the authorization lives. Its stock stays reserved meanwhile, and the reservation
+            and payment windows no longer apply once it is authorized.
     CreateRefund:
       type: object
       additionalProperties: false
@@ -1180,8 +1246,8 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, state, amount, currency, items, shipping_address, payment_method, cancel_requested,
-         refunds, created_at, updated_at]
+        [id, state, amount, currency, items, shipping_address, payment_method, capture_mode,
+         capture_requested, cancel_requested, refunds, created_at, updated_at]
       properties:
         id:
           type: string
@@ -1204,6 +1270,12 @@ components:
           $ref: '#/components/schemas/Address'
         payment_method:
           type: string
+        capture_mode:
+          type: string
+          enum: [automatic, manual]
+        capture_requested:
+          type: boolean
+          description: A `manual` order's capture was asked for. Always false for `automatic`.
         cancel_requested:
           type: boolean
         cancel_reason:
@@ -1227,6 +1299,12 @@ components:
               type: integer
             refunded_amount:
               type: integer
+            authorization_expires_at:
+              type: string
+              format: date-time
+              description: >-
+                When the hold on the card lapses, never later than the provider's own expiry.
+                Absent on orders authorized before it was recorded.
         shipment:
           type: object
           additionalProperties: false
@@ -1311,7 +1389,8 @@ components:
         event_type:
           type: string
           description: >-
-            `order.<state>` when the order changed state, `order.cancel_requested`, or one of
+            `order.<state>` when the order changed state, `order.cancel_requested`,
+            `order.capture_requested`, or one of
             `refund.created`, `refund.succeeded` and `refund.failed` for one of its refunds. A
             refund that succeeds is followed by the order's `order.partially_refunded` or
             `order.refunded`.
@@ -1343,12 +1422,14 @@ components:
       type: string
       description: |
         An event type an endpoint can subscribe to, or `*` for every type. Most are events the
-        order's stream carries: `order.created`, `order.cancel_requested`, one per state the
+        order's stream carries: `order.created`, `order.cancel_requested`,
+        `order.capture_requested`, one per state the
         order can move to, and one per refund change. `webhook_endpoint.disabled` says payflow
         disabled one of the merchant's endpoints because every attempt to deliver to it failed
         for three days; that endpoint gets it once as a final notice whatever its filter says.
       enum:
-        ['*', order.created, order.cancel_requested, order.inventory_reserved,
+        ['*', order.created, order.cancel_requested, order.capture_requested,
+         order.inventory_reserved,
          order.payment_authorized, order.payment_captured, order.completed,
          order.cancelling_shipment, order.reversing_payment, order.releasing_inventory,
          order.failed, order.cancelled, order.partially_refunded, order.refunded,
@@ -1684,7 +1765,8 @@ components:
               description: Stable; see the top-level description and each response's `x-error-codes`.
               enum:
                 [invalid_argument, invalid_cursor, unauthenticated, not_found, method_not_allowed,
-                 not_acceptable, order_not_cancellable, order_not_refundable,
+                 not_acceptable, order_not_cancellable, order_not_capturable,
+                 order_not_refundable,
                  order_reference_in_use, refund_exceeds_captured, refund_exceeds_purchased,
                  webhook_endpoint_limit_reached, idempotency_key_in_use, payload_too_large,
                  unsupported_media_type, idempotency_key_reused, internal, unavailable]

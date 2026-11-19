@@ -222,6 +222,89 @@ class SagaWorkerTest {
   }
 
   @Test
+  void anAwaitingStepParksTheOrderUnleasedUntilItsDeadlineAndThenFailsIt() {
+    Instant until = clock.instant().plus(Duration.ofHours(1));
+    script.put(
+        PAYMENT_AUTHORIZED,
+        (o, r) ->
+            new StepOutcome.Await(
+                "waiting",
+                until,
+                new StepOutcome.Fail("thing_expired", "nobody came", REVERSING_PAYMENT)));
+    Order o = insert();
+    SagaWorker w = worker();
+    assertThat(w.runOnce()).isOne();
+    Order parked = load(o);
+    assertThat(parked.state()).isEqualTo(PAYMENT_AUTHORIZED);
+    assertThat(parked.nextAttemptAt()).isEqualTo(until);
+    assertThat(parked.attempt()).isZero();
+    assertThat(leaseToken(o)).isNull();
+    // Waiting has no step timeout and no attempt limit: the step's deadline is the only one.
+    clock.advance(Duration.ofHours(1).minusNanos(1_000));
+    assertThat(w.runOnce()).isZero();
+    assertThat(load(o)).isEqualTo(parked);
+    clock.advance(Duration.ofNanos(1_000));
+    assertThat(w.runOnce()).isOne();
+    Order failed = load(o);
+    assertThat(failed.state()).isEqualTo(FAILED);
+    assertThat(failed.failureCode()).isEqualTo("thing_expired");
+    assertThat(failed.failureMessage()).isEqualTo("nobody came");
+    assertThat(calls)
+        .filteredOn(c -> c.contains(":PAYMENT_AUTHORIZED:"))
+        .hasSize(2)
+        .allMatch(c -> c.endsWith(":false"));
+    assertThatThrownBy(() -> new StepOutcome.Await("x", null, null))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void aChangeMadeWhileTheStepRunsLeavesTheOrderDueInsteadOfWaiting() {
+    Instant until = clock.instant().plus(Duration.ofDays(7));
+    AtomicInteger n = new AtomicInteger();
+    script.put(
+        PAYMENT_AUTHORIZED,
+        (o, r) -> {
+          if (n.incrementAndGet() == 1) {
+            // A merchant's request lands after the step read the order and before it writes.
+            assertThat(repo.requestCancel("acme", o.id(), clock.instant())).isPresent();
+          }
+          return new StepOutcome.Await(
+              "waiting", until, new StepOutcome.Fail("x", "x", REVERSING_PAYMENT));
+        });
+    Order o = insert();
+    SagaWorker w = worker();
+    w.runOnce();
+    Order due = load(o);
+    assertThat(due.state()).isEqualTo(PAYMENT_AUTHORIZED);
+    assertThat(due.cancelRequested()).isTrue();
+    assertThat(due.nextAttemptAt()).isEqualTo(clock.instant());
+    assertThat(leaseToken(o)).isNull();
+    assertThat(w.runOnce()).isOne();
+    assertThat(load(o).state()).isEqualTo(CANCELLED);
+
+    // The same holds for a retry: the cancel doesn't wait out the backoff.
+    script.put(
+        PAYMENT_AUTHORIZED,
+        (o2, r) -> {
+          assertThat(repo.requestCancel("acme", o2.id(), clock.instant())).isPresent();
+          return new StepOutcome.Retry("provider busy", Duration.ofMinutes(5));
+        });
+    Order other = insert();
+    w.runOnce();
+    assertThat(load(other).nextAttemptAt()).isEqualTo(clock.instant());
+    assertThat(w.runOnce()).isOne();
+    assertThat(load(other).state()).isEqualTo(CANCELLED);
+  }
+
+  private UUID leaseToken(Order o) {
+    return jdbc.sql("SELECT lease_token FROM orders WHERE id = :id")
+        .param("id", o.id())
+        .query(UUID.class)
+        .optional()
+        .orElse(null);
+  }
+
+  @Test
   void aCancelRequestDivertsTheNextForwardStep() {
     Order o = insert();
     jdbc.sql("UPDATE orders SET cancel_requested = true WHERE id = :id")

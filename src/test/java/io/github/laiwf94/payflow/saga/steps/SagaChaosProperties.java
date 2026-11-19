@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.saga.steps;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.laiwf94.payflow.PayflowApplication;
+import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
@@ -88,6 +89,10 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * that succeeded.
  */
 class SagaChaosProperties {
+
+  /** The defaults; every order here captures automatically, so only the lifetime is read. */
+  private static final HoldProperties HOLDS =
+      new HoldProperties(Duration.ofMinutes(15), Duration.ofHours(1), Duration.ofDays(7));
 
   private static ConfigurableApplicationContext ctx;
 
@@ -268,8 +273,8 @@ class SagaChaosProperties {
     List<SagaStep> steps =
         List.of(
             new ReserveInventoryStep(inv),
-            new AuthorizePaymentStep(pay, props, unknown),
-            new CapturePaymentStep(pay, props, unknown),
+            new AuthorizePaymentStep(pay, props, unknown, HOLDS),
+            new CapturePaymentStep(pay, props, unknown, HOLDS),
             new CreateShipmentStep(ship),
             new CancelShipmentStep(ship),
             new ReversePaymentStep(pay, props, unknown),

@@ -26,6 +26,9 @@ public class OrderTransitions {
   /** The type of the event a cancel request writes before the saga acts on it. */
   public static final String CANCEL_REQUESTED = "order.cancel_requested";
 
+  /** The type of the event a manual-capture order's capture request writes. */
+  public static final String CAPTURE_REQUESTED = "order.capture_requested";
+
   private final OrderRepository repo;
   private final OutboxWriter outbox;
   private final OrderHolds holds;
@@ -59,9 +62,10 @@ public class OrderTransitions {
   public Optional<Order> apply(Order before, UUID leaseToken, StateChange change, Instant now) {
     boolean moves = change.state() != before.state();
     if (moves) {
-      holds.beforeMove(before.id(), before.state(), change.state());
+      holds.beforeMove(before, change.state());
     }
-    Optional<Order> after = repo.update(before.id(), leaseToken, before.state(), change, now);
+    Optional<Order> after =
+        repo.update(before.id(), leaseToken, before.state(), before.version(), change, now);
     if (after.isEmpty()) {
       if (moves) {
         // The timers cancelled above belong to the worker that fenced us out.
@@ -81,6 +85,17 @@ public class OrderTransitions {
   public Optional<Order> requestCancel(String merchantId, UUID id, Instant now) {
     Optional<Order> after = repo.requestCancel(merchantId, id, now);
     after.ifPresent(o -> outbox.write(CANCEL_REQUESTED, o, null, now));
+    return after;
+  }
+
+  /**
+   * Records a capture request on a manual-capture order. Empty when the order doesn't exist for
+   * this merchant or can't be captured now (see {@link OrderRepository#requestCapture}).
+   */
+  @Transactional
+  public Optional<Order> requestCapture(String merchantId, UUID id, Instant now) {
+    Optional<Order> after = repo.requestCapture(merchantId, id, now);
+    after.ifPresent(o -> outbox.write(CAPTURE_REQUESTED, o, null, now));
     return after;
   }
 

@@ -19,6 +19,7 @@ public enum ApiError {
   METHOD_NOT_ALLOWED(405, "method_not_allowed"),
   NOT_ACCEPTABLE(406, "not_acceptable"),
   ORDER_NOT_CANCELLABLE(409, "order_not_cancellable"),
+  ORDER_NOT_CAPTURABLE(409, "order_not_capturable"),
   ORDER_NOT_REFUNDABLE(409, "order_not_refundable"),
   ORDER_REFERENCE_IN_USE(409, "order_reference_in_use"),
   REFUND_EXCEEDS_CAPTURED(409, "refund_exceeds_captured"),

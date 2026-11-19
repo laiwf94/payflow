@@ -283,6 +283,47 @@ class OrderSchemaTest {
   }
 
   @Test
+  void onlyAManualOrderCanBeAskedToCaptureAndModesAreKnown() {
+    UUID id = insertPending();
+    assertThat(repo.findById(id).orElseThrow().captureMode()).isEqualTo(CaptureMode.AUTOMATIC);
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET capture_requested = true WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_capture_requested_manual");
+    for (String bad : List.of("Manual", "later", "")) {
+      assertThatThrownBy(
+              () ->
+                  jdbc.sql("UPDATE orders SET capture_mode = :m WHERE id = :id")
+                      .param("m", bad)
+                      .param("id", id)
+                      .update())
+          .as(bad)
+          .hasMessageContaining("orders_capture_mode");
+    }
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET authorization_expires_at = 'infinity' WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_authorization_expiry_finite");
+    assertThat(
+            jdbc.sql(
+                    """
+                    UPDATE orders SET capture_mode = 'manual', capture_requested = true,
+                        authorization_expires_at = now() WHERE id = :id
+                    """)
+                .param("id", id)
+                .update())
+        .isOne();
+    Order o = repo.findById(id).orElseThrow();
+    assertThat(o.captureMode()).isEqualTo(CaptureMode.MANUAL);
+    assertThat(o.captureRequested()).isTrue();
+    assertThat(o.authorizationExpiresAt()).isNotNull();
+  }
+
+  @Test
   void merchantReferencesAreUniquePerMerchantAndWellFormed() {
     UUID first = insertPending();
     setReference(first, "acme", "cart-1");
@@ -341,11 +382,12 @@ class OrderSchemaTest {
                     WHERE conrelid = 'orders'::regclass AND contype = 'c'
                       AND conname IN ('orders_merchant_reference_format',
                         'orders_partially_refunded_in_part', 'orders_legal_transition',
-                        'orders_cancel_reason')
+                        'orders_cancel_reason', 'orders_capture_mode',
+                        'orders_capture_requested_manual', 'orders_authorization_expiry_finite')
                     """)
                 .query(Integer.class)
                 .single())
-        .isEqualTo(4);
+        .isEqualTo(7);
   }
 
   private void setReference(UUID id, String merchant, String reference) {
@@ -368,14 +410,17 @@ class OrderSchemaTest {
             Orders.pending("acme", Instant.now()).items(),
             Orders.ADDRESS,
             "pm_card_ok",
+            CaptureMode.AUTOMATIC,
+            false,
+            null,
             false,
             null,
             null,
             null,
             null,
+            0,
+            0,
             null,
-            0,
-            0,
             null,
             null,
             0,

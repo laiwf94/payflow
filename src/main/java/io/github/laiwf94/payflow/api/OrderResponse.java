@@ -11,8 +11,9 @@ import java.util.UUID;
 /**
  * An order as the API returns it. Saga bookkeeping (leases, attempts) stays internal. {@code
  * cancelReason} says why a cancel was requested ({@code requested}, {@code reservation_expired} or
- * {@code payment_expired}). {@code refunds} holds the order's newest refunds and what its pending
- * ones are returning.
+ * {@code payment_expired}). {@code captureMode} is {@code automatic} or {@code manual}, and {@code
+ * captureRequested} says a manual order's capture was asked for. {@code refunds} holds the order's
+ * newest refunds and what its pending ones are returning.
  */
 public record OrderResponse(
     UUID id,
@@ -23,6 +24,8 @@ public record OrderResponse(
     List<LineItem> items,
     ShippingAddress shippingAddress,
     String paymentMethod,
+    String captureMode,
+    boolean captureRequested,
     boolean cancelRequested,
     String cancelReason,
     Payment payment,
@@ -32,7 +35,12 @@ public record OrderResponse(
     Instant createdAt,
     Instant updatedAt) {
 
-  public record Payment(String id, long capturedAmount, long refundedAmount) {}
+  /**
+   * The payment once authorized. {@code authorizationExpiresAt} is when the hold on the card lapses
+   * (absent on orders authorized before it was recorded).
+   */
+  public record Payment(
+      String id, long capturedAmount, long refundedAmount, Instant authorizationExpiresAt) {}
 
   public record Shipment(String id, String trackingNumber) {}
 
@@ -60,11 +68,14 @@ public record OrderResponse(
         o.items(),
         o.shippingAddress(),
         o.paymentMethod(),
+        o.captureMode().code(),
+        o.captureRequested(),
         o.cancelRequested(),
         o.cancelReason() == null ? null : o.cancelReason().code(),
         o.paymentId() == null
             ? null
-            : new Payment(o.paymentId(), o.capturedMinor(), o.refundedMinor()),
+            : new Payment(
+                o.paymentId(), o.capturedMinor(), o.refundedMinor(), o.authorizationExpiresAt()),
         o.shipmentId() == null ? null : new Shipment(o.shipmentId(), o.trackingNumber()),
         o.failureCode() == null ? null : new Failure(o.failureCode(), o.failureMessage()),
         new Refunds(

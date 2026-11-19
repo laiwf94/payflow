@@ -58,11 +58,13 @@ nothing, so never verify a re-serialized copy):
   the one before, when the event moved it.
 - `amount` is in minor units of `currency`. `merchant_reference` is there when the order was
   created with one, `failure_code` when the order failed, and `cancel_reason` (`requested`,
-  `reservation_expired` or `payment_expired`) once a cancel was asked for.
+  `reservation_expired` or `payment_expired`) once a cancel was asked for. `capture_mode` is
+  there, as `manual`, on every event of an order the merchant captures.
 - Refund events (`refund.created`, `refund.succeeded`, `refund.failed`) add a `refund` object
   with its `id`, `amount`, `state`, any `lines`, and `failure_code` when it failed.
 
-The types are `order.created`, `order.cancel_requested`, `order.inventory_reserved`,
+The types are `order.created`, `order.cancel_requested`, `order.capture_requested`,
+`order.inventory_reserved`,
 `order.payment_authorized`, `order.payment_captured`, `order.completed`,
 `order.cancelling_shipment`, `order.reversing_payment`, `order.releasing_inventory`,
 `order.failed`, `order.cancelled`, `order.partially_refunded`, `order.refunded`,
