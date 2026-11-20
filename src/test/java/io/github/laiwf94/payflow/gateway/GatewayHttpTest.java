@@ -49,6 +49,28 @@ class GatewayHttpTest {
   }
 
   @Test
+  void anAuthorizationReportsItsExpiryAndCanBeExtendedUntilItLapses() {
+    PaymentInfo auth = success(payments.authorize("a-x", "ox", Money.of(700, "EUR"), "pm_card_ok"));
+    assertThat(auth.expiresAt()).isNotNull();
+    PaymentInfo extended = success(payments.reauthorize("re-x", auth.id()));
+    assertThat(extended.status()).isEqualTo(PaymentStatus.AUTHORIZED);
+    assertThat(extended.expiresAt()).isAfterOrEqualTo(auth.expiresAt());
+    assertThat(paymentSim.expireNow(auth.id())).isTrue();
+    assertThat(success(payments.findByReference("ox")).get(0).status())
+        .isEqualTo(PaymentStatus.EXPIRED);
+    assertThat(payments.reauthorize("re-y", auth.id()))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class,
+            r -> assertThat(r.code()).isEqualTo("authorization_expired"));
+    assertThat(payments.capture("c-x", auth.id(), 700))
+        .isInstanceOfSatisfying(
+            CallResult.Rejected.class,
+            r -> assertThat(r.code()).isEqualTo("authorization_expired"));
+    assertThat(success(payments.voidAuthorization("v-x", auth.id())).status())
+        .isEqualTo(PaymentStatus.EXPIRED);
+  }
+
+  @Test
   void paymentHappyPath() {
     PaymentInfo auth =
         success(payments.authorize("a-1", "o1", Money.of(2500, "EUR"), "pm_card_ok"));

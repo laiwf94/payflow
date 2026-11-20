@@ -205,9 +205,14 @@ public class SagaWorker implements SmartLifecycle {
       log.warn("{} waited until {} with nothing to do: {}", state, a.until(), f.message());
       return move(order, token, f.compensateTo(), StepOutcome.Fields.NONE, f.code(), f.message());
     }
-    Optional<Order> parked =
-        transitions.apply(
-            order, token, StateChange.to(state).attempt(0).nextAttemptAt(a.until()).build(), now);
+    StateChange.Builder wait = StateChange.to(state).attempt(0).nextAttemptAt(a.until());
+    if (a.fields().authorizationExpiresAt() != null) {
+      wait.authorizationExpiresAt(a.fields().authorizationExpiresAt());
+    }
+    if (a.fields().reauthorizedAt() != null) {
+      wait.reauthorizedAt(a.fields().reauthorizedAt());
+    }
+    Optional<Order> parked = transitions.apply(order, token, wait.build(), now);
     if (parked.isPresent()) {
       log.info("{} waits until {}: {}", state, a.until(), a.reason());
       meters.counter("payflow.saga.waits", "state", state.name()).increment();
@@ -280,6 +285,9 @@ public class SagaWorker implements SmartLifecycle {
     }
     if (f.authorizationExpiresAt() != null) {
       b.authorizationExpiresAt(f.authorizationExpiresAt());
+    }
+    if (f.reauthorizedAt() != null) {
+      b.reauthorizedAt(f.reauthorizedAt());
     }
     if (failureCode != null) {
       b.failure(failureCode, failureMessage);

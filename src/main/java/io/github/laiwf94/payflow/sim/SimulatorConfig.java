@@ -1,6 +1,8 @@
 package io.github.laiwf94.payflow.sim;
 
+import java.time.Clock;
 import java.util.SplittableRandom;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -26,12 +28,13 @@ public class SimulatorConfig {
 
   @Bean
   SimulatorSettings simulatorSettings(SimulatorProperties props) {
-    return new SimulatorSettings(props.answerDelay());
+    return new SimulatorSettings(props.answerDelay(), props.authorizationLifetime());
   }
 
   @Bean
-  PaymentProviderSimulator paymentProviderSimulator(Faults faults, SimulatorSettings settings) {
-    return new PaymentProviderSimulator(faults, settings);
+  PaymentProviderSimulator paymentProviderSimulator(
+      Faults faults, SimulatorSettings settings, ObjectProvider<Clock> clock) {
+    return new PaymentProviderSimulator(faults, settings, clock.getIfAvailable(Clock::systemUTC));
   }
 
   @Bean

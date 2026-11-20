@@ -26,8 +26,14 @@ import org.springframework.stereotype.Component;
  *       authorization expires. The request (or a cancel) makes it due at once; an expiry with no
  *       request fails it as {@code authorization_expired} into the reversal, which voids the
  *       authorization and releases the stock. Once asked, it captures exactly as the automatic path
- *       does.
+ *       does. Shortly before the authorization lapses a timer may ask for it to be extended; the
+ *       {@link ReauthorizeStep} does that, once, and the order goes back to waiting until the new
+ *       expiry.
  * </ul>
+ *
+ * <p>A provider that refuses the capture because the hold already lapsed (issuers sometimes drop
+ * one before the expiry the provider advertised) fails the order as {@code authorization_expired}:
+ * nothing was taken, and a lapsed authorization can't be extended.
  *
  * <p>On a retry or resume it asks the provider first: if the earlier capture went through,
  * capturing again would be refused (or, at a provider without idempotency keys, could charge
@@ -41,16 +47,19 @@ class CapturePaymentStep implements SagaStep {
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
   private final HoldProperties holds;
+  private final ReauthorizeStep reauthorize;
 
   CapturePaymentStep(
       PaymentGateway payments,
       SagaProperties props,
       UnknownOutcomes unknown,
-      HoldProperties holds) {
+      HoldProperties holds,
+      ReauthorizeStep reauthorize) {
     this.payments = payments;
     this.props = props;
     this.unknown = unknown;
     this.holds = holds;
+    this.reauthorize = reauthorize;
   }
 
   @Override
@@ -61,9 +70,20 @@ class CapturePaymentStep implements SagaStep {
   @Override
   public StepOutcome execute(Order order, boolean resumed) {
     if (order.captureMode() == CaptureMode.MANUAL && !order.captureRequested()) {
+      if (order.reauthorizationRequested() && order.reauthorizedAt() == null) {
+        return reauthorize.execute(order, resumed);
+      }
       return awaitCapture(order);
     }
     return capture(order, resumed);
+  }
+
+  /** What a manual order still waiting when its authorization lapses does: undo, and say why. */
+  static StepOutcome.Fail authorizationExpired() {
+    return new StepOutcome.Fail(
+        "authorization_expired",
+        "the authorization expired before the merchant captured the payment",
+        OrderState.REVERSING_PAYMENT);
   }
 
   /** The manual path before the merchant's request: wait for it, at most until the hold lapses. */
@@ -74,12 +94,7 @@ class CapturePaymentStep implements SagaStep {
             ? order.authorizationExpiresAt()
             : order.stepStartedAt().plus(holds.authorizationLifetime());
     return new StepOutcome.Await(
-        "waiting for the merchant to capture",
-        expires,
-        new StepOutcome.Fail(
-            "authorization_expired",
-            "the authorization expired before the merchant captured the payment",
-            OrderState.REVERSING_PAYMENT));
+        "waiting for the merchant to capture", expires, authorizationExpired());
   }
 
   private StepOutcome capture(Order order, boolean resumed) {
@@ -95,6 +110,10 @@ class CapturePaymentStep implements SagaStep {
         unknown.resolved("capture", true);
         return captured(ours.get());
       }
+      if (ours.isPresent() && ours.get().status() == PaymentStatus.EXPIRED) {
+        unknown.resolved("capture", false);
+        return lapsed();
+      }
       if (ours.isEmpty() || ours.get().status() != PaymentStatus.AUTHORIZED) {
         return refused(
             ours.map(p -> p.status().name().toLowerCase(java.util.Locale.ROOT)).orElse("missing"));
@@ -104,7 +123,8 @@ class CapturePaymentStep implements SagaStep {
     long amount = order.amount().minorUnits();
     return switch (payments.capture(Keys.capture(order.id()), order.paymentId(), amount)) {
       case CallResult.Success<PaymentInfo> s -> captured(s.value());
-      case CallResult.Rejected<PaymentInfo> r -> refused(r.code());
+      case CallResult.Rejected<PaymentInfo> r ->
+          ReauthorizeStep.EXPIRED.equals(r.code()) ? lapsed() : refused(r.code());
       case CallResult.Transient<PaymentInfo> t -> new StepOutcome.Retry(t.reason());
       case CallResult.Unknown<PaymentInfo> u -> {
         unknown.seen("capture");
@@ -116,6 +136,14 @@ class CapturePaymentStep implements SagaStep {
   private static StepOutcome captured(PaymentInfo p) {
     return new StepOutcome.Advance(
         OrderState.PAYMENT_CAPTURED, StepOutcome.Fields.money(p.captured(), p.refunded()));
+  }
+
+  /** The issuer dropped the hold before we could take the money. */
+  private static StepOutcome lapsed() {
+    return new StepOutcome.Fail(
+        "authorization_expired",
+        "the authorization lapsed at the issuer before the capture",
+        OrderState.REVERSING_PAYMENT);
   }
 
   private static StepOutcome refused(String why) {

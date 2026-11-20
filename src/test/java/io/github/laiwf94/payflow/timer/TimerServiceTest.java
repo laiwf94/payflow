@@ -230,11 +230,12 @@ class TimerServiceTest {
   }
 
   @Test
-  void aWorkerWithNoHandlersStaysIdleAndTheApplicationsHasTheExpiryHandlers() {
-    // Disabled for tests (application.properties), but wired with the holds' two kinds.
+  void aWorkerWithNoHandlersStaysIdleAndTheApplicationsHasTheHoldHandlers() {
+    // Disabled for tests (application.properties), but wired with the holds' three kinds.
     assertThat(wiredWorker.isRunning()).isFalse();
     assertThat(wiredHandlers.kinds())
-        .containsExactlyInAnyOrder("order.reservation_expiry", "order.payment_expiry");
+        .containsExactlyInAnyOrder(
+            "order.reservation_expiry", "order.payment_expiry", "order.reauthorization");
     TimerWorker idle =
         new TimerWorker(
             repo,

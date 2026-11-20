@@ -63,6 +63,12 @@ import org.springframework.transaction.support.TransactionTemplate;
       "payflow.holds.reservation-window=1m",
       "payflow.holds.payment-window=10m",
       "payflow.holds.authorization-lifetime=1h",
+      // Without extensions, so the order waits for exactly one lifetime; ReauthorizationTest
+      // covers them.
+      "payflow.holds.reauthorize-before=0s",
+      // The provider's authorizations last as long as payflow's fallback estimate, so the expiry
+      // recorded is the same whichever is used.
+      "payflow.simulator.authorization-lifetime=1h",
       // Short enough that a capture asked for late would give up at once if the clock didn't
       // restart; retries alone never give up otherwise.
       "payflow.saga.step-timeout=2m",
@@ -98,6 +104,7 @@ class ManualCaptureTest {
     Db.truncateAll(jdbc);
     faults.reset(new SplittableRandom(1));
     payments.reset();
+    payments.useClock(clock);
     inventory.reset();
     shipping.reset();
     hooks.clear();
@@ -366,9 +373,10 @@ class ManualCaptureTest {
     assertThat(failed.failureCode()).isEqualTo("authorization_expired");
     assertThat(failed.cancelRequested()).isFalse();
     assertThat(failed.capturedMinor()).isZero();
-    assertThat(operations(w)).containsExactly("authorize", "void");
+    // The provider's hold lapsed at the same moment, so the reversal finds nothing left to void.
+    assertThat(operations(w)).containsExactly("authorize");
     assertThat(payments.paymentsFor(w.id().toString()))
-        .allMatch(p -> p.status() == PaymentProviderSimulator.Status.VOIDED);
+        .allMatch(p -> p.status() == PaymentProviderSimulator.Status.EXPIRED);
     assertThat(inventory.heldFor("sku-1")).isZero();
     assertThat(inventory.heldFor("sku-2")).isZero();
     assertThat(shipping.shipment(w.id().toString())).isEmpty();

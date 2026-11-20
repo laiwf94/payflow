@@ -92,7 +92,8 @@ class SagaChaosProperties {
 
   /** The defaults; every order here captures automatically, so only the lifetime is read. */
   private static final HoldProperties HOLDS =
-      new HoldProperties(Duration.ofMinutes(15), Duration.ofHours(1), Duration.ofDays(7));
+      new HoldProperties(
+          Duration.ofMinutes(15), Duration.ofHours(1), Duration.ofDays(7), Duration.ofDays(1));
 
   private static ConfigurableApplicationContext ctx;
 
@@ -274,7 +275,8 @@ class SagaChaosProperties {
         List.of(
             new ReserveInventoryStep(inv),
             new AuthorizePaymentStep(pay, props, unknown, HOLDS),
-            new CapturePaymentStep(pay, props, unknown, HOLDS),
+            new CapturePaymentStep(
+                pay, props, unknown, HOLDS, new ReauthorizeStep(pay, props, unknown, HOLDS)),
             new CreateShipmentStep(ship),
             new CancelShipmentStep(ship),
             new ReversePaymentStep(pay, props, unknown),

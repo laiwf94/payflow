@@ -32,13 +32,19 @@ public sealed interface StepOutcome {
    * until}. A change made to the order meanwhile (a capture or cancel request) makes it due at once
    * instead, even one that lands while this step runs. Once {@code until} has passed with nothing
    * to do, the order fails as {@code onDeadline} says. Unlike a retry, waiting has no attempt count
-   * and no step timeout: the wait is the step.
+   * and no step timeout: the wait is the step. {@code fields} are recorded as the wait begins: what
+   * the step learned before deciding to wait again, such as a re-authorization's new expiry.
    */
-  record Await(String reason, Instant until, Fail onDeadline) implements StepOutcome {
+  record Await(String reason, Instant until, Fail onDeadline, Fields fields)
+      implements StepOutcome {
     public Await {
-      if (until == null || onDeadline == null) {
+      if (until == null || onDeadline == null || fields == null) {
         throw new IllegalArgumentException("a wait needs a deadline and what happens at it");
       }
+    }
+
+    public Await(String reason, Instant until, Fail onDeadline) {
+      this(reason, until, onDeadline, Fields.NONE);
     }
   }
 
@@ -50,29 +56,35 @@ public sealed interface StepOutcome {
       String trackingNumber,
       Long capturedMinor,
       Long refundedMinor,
-      Instant authorizationExpiresAt) {
+      Instant authorizationExpiresAt,
+      Instant reauthorizedAt) {
 
-    public static final Fields NONE = new Fields(null, null, null, null, null, null, null);
+    public static final Fields NONE = new Fields(null, null, null, null, null, null, null, null);
 
     public static Fields reservation(String id) {
-      return new Fields(id, null, null, null, null, null, null);
+      return new Fields(id, null, null, null, null, null, null, null);
     }
 
     public static Fields payment(String id) {
-      return new Fields(null, id, null, null, null, null, null);
+      return new Fields(null, id, null, null, null, null, null, null);
     }
 
     /** An authorized payment and when its hold on the card lapses. */
     public static Fields authorization(String id, Instant expiresAt) {
-      return new Fields(null, id, null, null, null, null, expiresAt);
+      return new Fields(null, id, null, null, null, null, expiresAt, null);
+    }
+
+    /** The authorization was extended at {@code at} and now lapses at {@code expiresAt}. */
+    public static Fields reauthorization(Instant expiresAt, Instant at) {
+      return new Fields(null, null, null, null, null, null, expiresAt, at);
     }
 
     public static Fields money(long captured, long refunded) {
-      return new Fields(null, null, null, null, captured, refunded, null);
+      return new Fields(null, null, null, null, captured, refunded, null, null);
     }
 
     public static Fields shipment(String id, String tracking) {
-      return new Fields(null, null, id, tracking, null, null, null);
+      return new Fields(null, null, id, tracking, null, null, null, null);
     }
   }
 }

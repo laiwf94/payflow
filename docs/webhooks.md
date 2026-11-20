@@ -60,11 +60,14 @@ nothing, so never verify a re-serialized copy):
   created with one, `failure_code` when the order failed, and `cancel_reason` (`requested`,
   `reservation_expired` or `payment_expired`) once a cancel was asked for. `capture_mode` is
   there, as `manual`, on every event of an order the merchant captures.
+- `order.payment_reauthorized` says payflow extended the authorization of a manual-capture
+  order that is still waiting for its capture; the order stays `PAYMENT_AUTHORIZED`. From then
+  until it is captured or cancelled, its events carry the new `authorization_expires_at`.
 - Refund events (`refund.created`, `refund.succeeded`, `refund.failed`) add a `refund` object
   with its `id`, `amount`, `state`, any `lines`, and `failure_code` when it failed.
 
 The types are `order.created`, `order.cancel_requested`, `order.capture_requested`,
-`order.inventory_reserved`,
+`order.payment_reauthorized`, `order.inventory_reserved`,
 `order.payment_authorized`, `order.payment_captured`, `order.completed`,
 `order.cancelling_shipment`, `order.reversing_payment`, `order.releasing_inventory`,
 `order.failed`, `order.cancelled`, `order.partially_refunded`, `order.refunded`,

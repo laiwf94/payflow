@@ -12,7 +12,10 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/** Wires the expiry of unpaid orders: the timers that track them and the handlers that fire. */
+/**
+ * Wires the time limits on holds: the timers that track unpaid orders and waiting authorizations,
+ * and the handlers that fire.
+ */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(HoldProperties.class)
 public class HoldConfig {
@@ -54,5 +57,11 @@ public class HoldConfig {
         saga,
         clock,
         meters);
+  }
+
+  @Bean
+  ReauthorizationHandler reauthorizationHandler(
+      OrderRepository orders, ObjectProvider<SagaWorker> saga, Clock clock, MeterRegistry meters) {
+    return new ReauthorizationHandler(orders, saga, clock, meters);
   }
 }

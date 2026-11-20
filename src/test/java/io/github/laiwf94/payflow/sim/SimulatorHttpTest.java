@@ -235,6 +235,56 @@ class SimulatorHttpTest {
     assertThat(s.body()).contains("\"honor_idempotency_keys\":false").contains("900");
   }
 
+  @Test
+  void authorizationsExpireAndCanBeExtendedOverHttp() throws Exception {
+    String auth =
+        "{\"reference\":\"o2\",\"amount\":900,\"currency\":\"EUR\",\"payment_method\":\"pm_card_ok\"}";
+    HttpResponse<String> a = send("POST", "/sim/payments/authorizations", auth);
+    assertThat(a.statusCode()).isEqualTo(201);
+    assertThat(a.body()).contains("\"expires_at\":\"");
+    String id = "pay_00000001";
+
+    HttpResponse<String> r =
+        send("POST", "/sim/payments/" + id + "/reauthorize", null, "Idempotency-Key", "re-o2");
+    assertThat(r.statusCode()).isEqualTo(200);
+    assertThat(r.body()).contains("\"status\":\"AUTHORIZED\"").contains("\"expires_at\":\"");
+    assertThat(send("POST", "/sim/control/payments/" + id + "/expire", null).statusCode())
+        .isEqualTo(204);
+    assertThat(send("POST", "/sim/control/payments/" + id + "/expire", null).statusCode())
+        .as("nothing left to expire")
+        .isEqualTo(404);
+    assertThat(send("GET", "/sim/payments?reference=o2", null).body())
+        .contains("\"status\":\"EXPIRED\"");
+    HttpResponse<String> late =
+        send("POST", "/sim/payments/" + id + "/capture", "{\"amount\":900}");
+    assertThat(late.statusCode()).isEqualTo(409);
+    assertThat(late.body()).contains("authorization_expired");
+    assertThat(send("POST", "/sim/payments/" + id + "/reauthorize", null).body())
+        .contains("authorization_expired");
+    assertThat(send("GET", "/sim/control/ledger?reference=o2", null).body())
+        .contains("\"operation\":\"reauthorize\"")
+        .doesNotContain("\"operation\":\"capture\"");
+
+    HttpResponse<String> s =
+        send("PUT", "/sim/control/settings", "{\"authorization_lifetime_ms\":60000}");
+    assertThat(s.body()).contains("\"authorization_lifetime_ms\":60000");
+    assertThat(
+            send("PUT", "/sim/control/settings", "{\"authorization_lifetime_ms\":0}").statusCode())
+        .isEqualTo(400);
+    assertThat(
+            send("PUT", "/sim/control/faults/payment.reauthorize", "{\"early_expiry_rate\":0.5}")
+                .body())
+        .contains("\"early_expiry_rate\":0.5");
+    HttpResponse<String> misplaced =
+        send("PUT", "/sim/control/faults/payment.capture", "{\"early_expiry_rate\":0.5}");
+    assertThat(misplaced.statusCode()).isEqualTo(400);
+    assertThat(misplaced.body()).contains("places no hold");
+    assertThat(send("POST", "/sim/control/reset", null).statusCode()).isEqualTo(204);
+    assertThat(send("PUT", "/sim/control/settings", "{}").body())
+        .as("a reset restores the configured lifetime")
+        .contains("\"authorization_lifetime_ms\":604800000");
+  }
+
   private HttpResponse<String> send(String method, String path, String body, String... headers)
       throws IOException, InterruptedException {
     HttpRequest.Builder b = request(method, path, body);

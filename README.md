@@ -95,8 +95,11 @@ Postgres, so they keep running across restarts and crashes.
 To charge on shipment, create the order with `"capture_mode": "manual"`. It stops in
 `PAYMENT_AUTHORIZED`, holding its stock, until `POST /v1/orders/{id}/capture`; the windows above
 stop applying once it is authorized. The authorization lasts `payflow.holds.authorization-lifetime`
-(7 days), shown as `payment.authorization_expires_at`; an order not captured by then fails as
-`authorization_expired`, with the authorization voided and the stock released.
+(7 days) or as long as the provider says, shown as `payment.authorization_expires_at`. A day
+before it lapses (`payflow.holds.reauthorize-before`; `0` turns it off) payflow extends it once,
+shows `payment.reauthorized_at` and writes `order.payment_reauthorized`. An order not captured by
+the end fails as `authorization_expired`, as does one whose hold the issuer dropped early, with
+nothing taken and the stock released.
 
 Webhooks are only sent to public addresses: a URL whose host is, or resolves to, a loopback,
 private, link-local, metadata or CGNAT address is refused at registration and on every send. For
@@ -213,6 +216,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Timers | Real Postgres: a timer fires at its due time and not a microsecond before, once; a failing handler's writes roll back and it is retried with full-jitter backoff without giving up; a reschedule or cancel after the claim fences the fire out, and a cancel waits for a fire that is committing; a crash mid-fire rolls back and the timer fires once when the lease runs out; a stop gives back unstarted claims at once and leaves a fire in flight to finish. Four instances fire 3,000 timers due within one second exactly once each and none early, while one crashes mid-fire and another is replaced. Schedules commit or roll back with the caller's transaction, and need one. Raw SQL can't store a malformed timer. |
 | Holds that run out | Real steps over HTTP, the wired expiry handlers and one clock for the saga and timer workers: stock held past the reservation window is released and the order cancelled once, not a microsecond early; an authorized order is voided; an order stuck before reserving is cancelled at the end of its payment window; a paid order leaves no timer behind; the first reason to cancel is kept; a timer that fires after the order moved on changes nothing; a fenced move keeps its timers; a fire holding its timer while the saga captures neither deadlocks nor keeps the money. The packaged jar is killed with `SIGKILL` inside a 5 s window and the next instance cancels the order once, no earlier than it was due. Raw SQL can't store a cancel reason without a cancel. |
 | Manual capture | Real steps over HTTP and one clock: a manual order waits authorized, unleased and off the due list, with no hold timers, until the capture request, then captures and ships once; asking twice gives the same answer; automatic, unauthorized, cancelling and expired orders are refused and nothing is written; an authorization nobody captures fails the order at its expiry, not a microsecond early, voided with its stock released; a cancel while waiting voids it; a capture or cancel landing between the step's read and its wait still leaves the order due now; a capture asked for 50 minutes after authorizing gets the whole 2-minute step timeout. Raw SQL can't ask a non-manual order to capture. |
+| Re-authorization | Real steps over HTTP, the extension timer and one clock for the saga, timers, requests and the provider: a waiting order is extended once at the timer's due time, not a microsecond early, records the provider's new expiry and `reauthorized_at`, writes `order.payment_reauthorized`, and is captured after its first expiry; one still waiting fails at the new expiry without a second extension; a hold the issuer dropped early fails the order as `authorization_expired` from the extension or the capture, with nothing taken and stock released; a lost extension answer is found by lookup and never repeated, even with provider keys off; an outage retries on a fresh step clock; a capture or cancel leaves nothing to extend. The simulator's expiry, extension, early-expiry rate and control API are tested on their own and over HTTP. |
 | Outbox and consumer | Three relays at once keep each order's events in sequence; a crash after sending produces duplicates, never gaps; every event delivered twice lands once; poison records go to the dead-letter topic. |
 | Idempotency | Replays, replayed errors, reuse with another body or path, 20 concurrent duplicates creating one order, takeover of an abandoned key, rollback and release on a 5xx. A taken `merchant_reference` is a 409 that replays with its own key, and 20 concurrent creates with one reference make one order. |
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
@@ -231,7 +235,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 553 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 570 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 ```
 

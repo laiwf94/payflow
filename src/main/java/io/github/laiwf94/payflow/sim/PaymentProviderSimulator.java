@@ -1,10 +1,14 @@
 package io.github.laiwf94.payflow.sim;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -18,6 +22,16 @@ import java.util.function.UnaryOperator;
  * caller's reference, and the payment's refunds can be listed. That list is how a caller finds out
  * whether a refund whose answer it lost was made, which the payment's refunded total alone can't
  * tell once a payment has more than one refund.
+ *
+ * <p>An authorization doesn't last: it carries the {@code expiresAt} the provider advertises,
+ * {@link SimulatorSettings#authorizationLifetime()} after it was made, and from then on it is
+ * {@link Status#EXPIRED}: a capture or a re-authorization is refused with {@code
+ * authorization_expired}, and a void has nothing left to drop. {@link #reauthorize} extends a live
+ * authorization by a whole lifetime from now, as the providers that offer authorization extension
+ * do. Issuers don't always keep a hold for as long as the provider says, so the fault plan's
+ * {@linkplain FaultPlan#earlyExpiryRate() early expiry rate} makes an authorization or
+ * re-authorization lapse at a random moment before its advertised expiry, which {@code expiresAt}
+ * doesn't show; {@link #expireNow} does the same on demand.
  *
  * <p>{@link SimulatorSettings#honorIdempotencyKeys()} can switch key handling off, which models a
  * provider (or a proxy in between) that doesn't deduplicate. The orchestrator must still never
@@ -36,7 +50,9 @@ public final class PaymentProviderSimulator {
     AUTHORIZED,
     DECLINED,
     CAPTURED,
-    VOIDED
+    VOIDED,
+    /** The hold lapsed before it was captured: no money was taken, and none can be now. */
+    EXPIRED
   }
 
   public record Payment(
@@ -47,7 +63,8 @@ public final class PaymentProviderSimulator {
       Status status,
       long captured,
       long refunded,
-      String declineCode) {}
+      String declineCode,
+      Instant expiresAt) {}
 
   /** One refund of a captured payment. {@code reference} is the caller's id for it. */
   public record Refund(String id, String paymentId, String reference, long amount) {}
@@ -62,13 +79,33 @@ public final class PaymentProviderSimulator {
   private final Map<String, Payment> payments = new LinkedHashMap<>();
   private final Map<String, Refund> refunds = new LinkedHashMap<>();
   private final Map<String, Stored> idempotency = new HashMap<>();
+
+  /** When each live authorization really lapses: its expiresAt, or earlier if it expires early. */
+  private final Map<String, Instant> lapses = new HashMap<>();
+
   private final List<LedgerEntry> ledger = new ArrayList<>();
   private long nextId = 1;
   private long nextRefundId = 1;
+  private final Clock defaultClock;
+  private Clock clock;
 
   public PaymentProviderSimulator(Faults faults, SimulatorSettings settings) {
+    this(faults, settings, Clock.systemUTC());
+  }
+
+  public PaymentProviderSimulator(Faults faults, SimulatorSettings settings, Clock clock) {
     this.faults = faults;
     this.settings = settings;
+    this.defaultClock = clock;
+    this.clock = clock;
+  }
+
+  /**
+   * Tells time by {@code clock} until the next {@link #reset}, so a test that moves its own clock
+   * can cross an authorization's lifetime without waiting for it.
+   */
+  public synchronized void useClock(Clock clock) {
+    this.clock = clock;
   }
 
   public Simulated<Payment> authorize(
@@ -88,6 +125,9 @@ public final class PaymentProviderSimulator {
                 () -> {
                   String id = "pay_" + String.format("%08d", nextId++);
                   String decline = DECLINES.get(method);
+                  Instant now = clock.instant();
+                  Instant expires =
+                      decline == null ? now.plus(settings.authorizationLifetime()) : null;
                   Payment p =
                       new Payment(
                           id,
@@ -97,8 +137,12 @@ public final class PaymentProviderSimulator {
                           decline == null ? Status.AUTHORIZED : Status.DECLINED,
                           0,
                           0,
-                          decline);
+                          decline,
+                          expires);
                   payments.put(id, p);
+                  if (expires != null) {
+                    lapses.put(id, lapse("payment.authorize", now, expires));
+                  }
                   ledger.add(
                       new LedgerEntry(
                           decline == null ? "authorize" : "decline", id, reference, amount));
@@ -120,7 +164,7 @@ public final class PaymentProviderSimulator {
                     throw new SimulatorException(
                         409, "already_captured", "payment already captured");
                   }
-                  requireStatus(p, Status.AUTHORIZED);
+                  requireLive(p);
                   if (amount <= 0 || amount > p.amount()) {
                     throw new SimulatorException(
                         400,
@@ -128,6 +172,7 @@ public final class PaymentProviderSimulator {
                         "capture must be between 1 and the authorized amount");
                   }
                   Payment c = with(p, Status.CAPTURED, amount, 0);
+                  lapses.remove(p.id());
                   ledger.add(new LedgerEntry("capture", p.id(), p.reference(), amount));
                   return c;
                 }));
@@ -142,14 +187,65 @@ public final class PaymentProviderSimulator {
                 "void|" + paymentId,
                 () -> {
                   Payment p = find(paymentId);
-                  if (p.status() == Status.VOIDED) {
+                  if (p.status() == Status.VOIDED || p.status() == Status.EXPIRED) {
+                    // Nothing is held any more, which is what the caller wants.
                     return p;
                   }
                   requireStatus(p, Status.AUTHORIZED);
                   Payment v = with(p, Status.VOIDED, 0, 0);
+                  lapses.remove(p.id());
                   ledger.add(new LedgerEntry("void", p.id(), p.reference(), p.amount()));
                   return v;
                 }));
+  }
+
+  /**
+   * Extends a live authorization: it now lasts {@link SimulatorSettings#authorizationLifetime()}
+   * from now, and its new {@code expiresAt} says so. The amount held doesn't change. Refused with
+   * {@code authorization_expired} once the hold has lapsed, early or not, since there is nothing
+   * left to extend, and with {@code invalid_state} for a payment that is not an authorization.
+   */
+  public Simulated<Payment> reauthorize(String idempotencyKey, String paymentId) {
+    return faults.run(
+        "payment.reauthorize",
+        () ->
+            idempotent(
+                idempotencyKey,
+                "reauthorize|" + paymentId,
+                () -> {
+                  Payment p = find(paymentId);
+                  requireLive(p);
+                  Instant now = clock.instant();
+                  Instant expires = now.plus(settings.authorizationLifetime());
+                  Payment r =
+                      new Payment(
+                          p.id(),
+                          p.reference(),
+                          p.amount(),
+                          p.currency(),
+                          Status.AUTHORIZED,
+                          0,
+                          0,
+                          p.declineCode(),
+                          expires);
+                  payments.put(p.id(), r);
+                  lapses.put(p.id(), lapse("payment.reauthorize", now, expires));
+                  ledger.add(new LedgerEntry("reauthorize", p.id(), p.reference(), p.amount()));
+                  return r;
+                }));
+  }
+
+  /**
+   * The issuer drops the hold now, whatever its advertised expiry: the payment reads as {@link
+   * Status#EXPIRED} from here on. Returns false when there was no live authorization to drop.
+   */
+  public synchronized boolean expireNow(String paymentId) {
+    Payment p = payments.get(paymentId);
+    if (p == null || current(p).status() != Status.AUTHORIZED) {
+      return false;
+    }
+    lapses.put(paymentId, clock.instant());
+    return true;
   }
 
   /**
@@ -205,11 +301,14 @@ public final class PaymentProviderSimulator {
   }
 
   public synchronized List<Payment> paymentsFor(String reference) {
-    return payments.values().stream().filter(p -> p.reference().equals(reference)).toList();
+    return payments.values().stream()
+        .filter(p -> p.reference().equals(reference))
+        .map(this::current)
+        .toList();
   }
 
   public synchronized List<Payment> payments() {
-    return List.copyOf(payments.values());
+    return payments.values().stream().map(this::current).toList();
   }
 
   public synchronized List<LedgerEntry> ledger() {
@@ -224,7 +323,9 @@ public final class PaymentProviderSimulator {
     payments.clear();
     refunds.clear();
     idempotency.clear();
+    lapses.clear();
     ledger.clear();
+    clock = defaultClock;
     nextId = 1;
     nextRefundId = 1;
   }
@@ -265,9 +366,19 @@ public final class PaymentProviderSimulator {
     }
   }
 
-  /** A replay returns the payment as it is now, as the common providers do. */
-  private Payment current(Payment p) {
-    return payments.getOrDefault(p.id(), p);
+  /**
+   * The payment as it is now, as the common providers report it on a replay or a lookup: an
+   * authorization whose hold has lapsed by now reads, and from then on stays, {@link
+   * Status#EXPIRED}.
+   */
+  private synchronized Payment current(Payment p) {
+    Payment now = payments.getOrDefault(p.id(), p);
+    Instant lapse = lapses.get(now.id());
+    if (now.status() == Status.AUTHORIZED && lapse != null && !clock.instant().isBefore(lapse)) {
+      lapses.remove(now.id());
+      now = with(now, Status.EXPIRED, 0, 0);
+    }
+    return now;
   }
 
   private Payment find(String id) {
@@ -275,7 +386,29 @@ public final class PaymentProviderSimulator {
     if (p == null) {
       throw new SimulatorException(404, "not_found", "no such payment");
     }
-    return p;
+    return current(p);
+  }
+
+  /**
+   * When a hold made at {@code now} and advertised until {@code expires} really lapses: then, or,
+   * as {@code operation}'s fault plan rolls, at a random moment before it.
+   */
+  private Instant lapse(String operation, Instant now, Instant expires) {
+    OptionalDouble early = faults.earlyExpiry(operation);
+    if (early.isEmpty()) {
+      return expires;
+    }
+    long span = Duration.between(now, expires).toNanos();
+    return now.plusNanos((long) (span * early.getAsDouble()));
+  }
+
+  /** A capture or extension needs a hold that is still there. */
+  private static void requireLive(Payment p) {
+    if (p.status() == Status.EXPIRED) {
+      throw new SimulatorException(
+          409, "authorization_expired", "the authorization expired at the issuer");
+    }
+    requireStatus(p, Status.AUTHORIZED);
   }
 
   private Payment with(Payment p, Status status, long captured, long refunded) {
@@ -288,7 +421,8 @@ public final class PaymentProviderSimulator {
             status,
             captured,
             refunded,
-            p.declineCode());
+            p.declineCode(),
+            status == Status.AUTHORIZED || status == Status.EXPIRED ? p.expiresAt() : null);
     payments.put(p.id(), n);
     return n;
   }

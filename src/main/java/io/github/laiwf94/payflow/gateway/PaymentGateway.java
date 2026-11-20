@@ -15,6 +15,12 @@ public interface PaymentGateway {
 
   CallResult<PaymentInfo> capture(String idempotencyKey, String paymentId, long amount);
 
+  /**
+   * Extends a live authorization, which then lapses at the {@link PaymentInfo#expiresAt()} the
+   * answer reports. Rejected with {@code authorization_expired} once the hold has lapsed.
+   */
+  CallResult<PaymentInfo> reauthorize(String idempotencyKey, String paymentId);
+
   CallResult<PaymentInfo> voidAuthorization(String idempotencyKey, String paymentId);
 
   /**

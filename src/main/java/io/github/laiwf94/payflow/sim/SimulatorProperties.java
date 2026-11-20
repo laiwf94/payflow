@@ -12,6 +12,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param defaultStock units every SKU starts with
  * @param answerDelay how long an unanswered call holds the connection
  * @param seed seed for fault dice, for reproducible runs; random when null
+ * @param authorizationLifetime how long the fake provider's authorizations last before they lapse
  */
 @ConfigurationProperties("payflow.simulator")
 public record SimulatorProperties(
@@ -19,4 +20,5 @@ public record SimulatorProperties(
     @DefaultValue("") String key,
     @DefaultValue("1000000") long defaultStock,
     @DefaultValue("5s") Duration answerDelay,
-    Long seed) {}
+    Long seed,
+    @DefaultValue("7d") Duration authorizationLifetime) {}

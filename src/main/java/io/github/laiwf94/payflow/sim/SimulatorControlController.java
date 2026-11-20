@@ -27,6 +27,7 @@ class SimulatorControlController {
   static final Set<String> OPERATIONS =
       Set.of(
           "payment.authorize",
+          "payment.reauthorize",
           "payment.capture",
           "payment.void",
           "payment.refund",
@@ -44,9 +45,14 @@ class SimulatorControlController {
       Double unknownBeforeRate,
       Double unknownAfterRate,
       Long latencyMs,
-      List<String> script) {}
+      List<String> script,
+      Double earlyExpiryRate) {}
 
-  record SettingsRequest(Boolean honorIdempotencyKeys, Long answerDelayMs) {}
+  /** The operations that place a hold on a card, and so can have it expire early. */
+  static final Set<String> HOLDS = Set.of("payment.authorize", "payment.reauthorize");
+
+  record SettingsRequest(
+      Boolean honorIdempotencyKeys, Long answerDelayMs, Long authorizationLifetimeMs) {}
 
   record StockRequest(long available) {}
 
@@ -87,7 +93,11 @@ class SimulatorControlController {
               orZero(req.unknownBeforeRate()),
               orZero(req.unknownAfterRate()),
               Duration.ofMillis(req.latencyMs() == null ? 0 : req.latencyMs()),
-              script);
+              script,
+              orZero(req.earlyExpiryRate()));
+      if (plan.earlyExpiryRate() > 0 && !HOLDS.contains(operation)) {
+        throw new IllegalArgumentException(operation + " places no hold that could expire early");
+      }
     } catch (IllegalArgumentException e) {
       throw new SimulatorException(400, "invalid_request", e.getMessage());
     }
@@ -107,6 +117,9 @@ class SimulatorControlController {
       if (req.answerDelayMs() != null) {
         settings.answerDelay(Duration.ofMillis(req.answerDelayMs()));
       }
+      if (req.authorizationLifetimeMs() != null) {
+        settings.authorizationLifetime(Duration.ofMillis(req.authorizationLifetimeMs()));
+      }
     } catch (IllegalArgumentException e) {
       throw new SimulatorException(400, "invalid_request", e.getMessage());
     }
@@ -116,7 +129,17 @@ class SimulatorControlController {
     return ResponseEntity.ok(
         Map.of(
             "honor_idempotency_keys", settings.honorIdempotencyKeys(),
-            "answer_delay_ms", settings.answerDelay().toMillis()));
+            "answer_delay_ms", settings.answerDelay().toMillis(),
+            "authorization_lifetime_ms", settings.authorizationLifetime().toMillis()));
+  }
+
+  /** The issuer drops a live authorization's hold now. 404 when there is none to drop. */
+  @PostMapping("/payments/{id}/expire")
+  ResponseEntity<?> expire(@PathVariable String id) {
+    if (!payments.expireNow(id)) {
+      throw new SimulatorException(404, "not_found", "no live authorization " + id);
+    }
+    return ResponseEntity.noContent().build();
   }
 
   @PutMapping("/stock/{sku}")
@@ -158,6 +181,7 @@ class SimulatorControlController {
     inventory.reset();
     shipping.reset();
     settings.honorIdempotencyKeys(true);
+    settings.resetAuthorizationLifetime();
     return ResponseEntity.noContent().build();
   }
 

@@ -480,16 +480,17 @@ class HoldExpiryTest {
                     new SimpleMeterRegistry()))
         .isInstanceOf(IllegalArgumentException.class);
     Duration s = Duration.ofSeconds(1);
-    assertThat(new HoldProperties(s, HoldProperties.MAX_WINDOW, s).paymentWindow())
+    Duration off = Duration.ZERO;
+    assertThat(new HoldProperties(s, HoldProperties.MAX_WINDOW, s, off).paymentWindow())
         .isEqualTo(Duration.ofDays(31));
-    assertThat(new HoldProperties(s, s, HoldProperties.MAX_WINDOW).authorizationLifetime())
+    assertThat(new HoldProperties(s, s, HoldProperties.MAX_WINDOW, off).authorizationLifetime())
         .isEqualTo(Duration.ofDays(31));
     for (Duration bad : List.of(Duration.ofMillis(999), Duration.ofDays(32), Duration.ZERO)) {
-      assertThatThrownBy(() -> new HoldProperties(bad, s, s))
+      assertThatThrownBy(() -> new HoldProperties(bad, s, s, off))
           .isInstanceOf(IllegalArgumentException.class);
-      assertThatThrownBy(() -> new HoldProperties(s, bad, s))
+      assertThatThrownBy(() -> new HoldProperties(s, bad, s, off))
           .isInstanceOf(IllegalArgumentException.class);
-      assertThatThrownBy(() -> new HoldProperties(s, s, bad))
+      assertThatThrownBy(() -> new HoldProperties(s, s, bad, off))
           .isInstanceOf(IllegalArgumentException.class);
     }
     for (CancelReason r : CancelReason.values()) {

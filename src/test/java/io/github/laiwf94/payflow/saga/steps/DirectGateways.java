@@ -55,7 +55,8 @@ final class DirectGateways {
         PaymentStatus.valueOf(p.status().name()),
         p.captured(),
         p.refunded(),
-        p.declineCode());
+        p.declineCode(),
+        p.expiresAt());
   }
 
   static RefundInfo info(PaymentProviderSimulator.Refund r) {
@@ -83,6 +84,11 @@ final class DirectGateways {
       public CallResult<PaymentInfo> capture(String key, String paymentId, long amount) {
         return call(
             () -> sim.capture(key, paymentId, amount), p -> new CallResult.Success<>(info(p)));
+      }
+
+      @Override
+      public CallResult<PaymentInfo> reauthorize(String key, String paymentId) {
+        return call(() -> sim.reauthorize(key, paymentId), p -> new CallResult.Success<>(info(p)));
       }
 
       @Override

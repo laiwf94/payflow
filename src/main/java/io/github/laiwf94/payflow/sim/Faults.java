@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.sim;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.function.Supplier;
 import java.util.random.RandomGenerator;
 
@@ -59,6 +60,19 @@ public final class Faults {
         yield new Simulated.Unanswered<>(applied, plan.latency());
       }
     };
+  }
+
+  /**
+   * Rolls the operation's {@linkplain FaultPlan#earlyExpiryRate() early expiry rate} for a hold it
+   * just placed: empty when the hold lasts as advertised, otherwise the fraction of its advertised
+   * lifetime, in [0, 1), after which the issuer drops it.
+   */
+  public synchronized OptionalDouble earlyExpiry(String operation) {
+    FaultPlan plan = get(operation);
+    if (plan.earlyExpiryRate() == 0 || random.nextDouble() >= plan.earlyExpiryRate()) {
+      return OptionalDouble.empty();
+    }
+    return OptionalDouble.of(random.nextDouble());
   }
 
   private Fault roll(FaultPlan plan) {

@@ -132,6 +132,8 @@ class OutboxRelayTest {
         o.capturedMinor(),
         o.refundedMinor(),
         o.authorizationExpiresAt(),
+        o.reauthorizationRequested(),
+        o.reauthorizedAt(),
         o.failureCode(),
         o.failureMessage(),
         o.attempt(),

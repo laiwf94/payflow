@@ -19,6 +19,10 @@ import java.time.Instant;
  *   <li>A {@linkplain CaptureMode#MANUAL manual-capture} order's authorization also cancels both:
  *       the customer has paid as far as they can, and the order now waits for the merchant's
  *       capture for as long as the authorization lives, which its own expiry bounds.
+ *   <li>When such an order is authorized, and {@linkplain HoldProperties#reauthorizes()
+ *       re-authorization} is on, {@link #REAUTHORIZATION} is scheduled for {@link
+ *       HoldProperties#reauthorizeBefore()} before the authorization lapses; leaving {@code
+ *       PAYMENT_AUTHORIZED} cancels it.
  * </ul>
  *
  * A timer that fires after the order moved on finds nothing to do ({@link ExpiryHandler}), so the
@@ -31,6 +35,9 @@ public class OrderHolds {
 
   /** Cancels an order that was not paid within the payment window. */
   public static final String PAYMENT_EXPIRY = "order.payment_expiry";
+
+  /** Asks the saga to extend a waiting manual-capture order's authorization before it lapses. */
+  public static final String REAUTHORIZATION = "order.reauthorization";
 
   private final TimerService timers;
   private final HoldProperties props;
@@ -59,6 +66,11 @@ public class OrderHolds {
         timers.cancel(RESERVATION_EXPIRY, before.id());
       }
     }
+    if (from == OrderState.PAYMENT_AUTHORIZED
+        && before.captureMode() == CaptureMode.MANUAL
+        && props.reauthorizes()) {
+      timers.cancel(REAUTHORIZATION, before.id());
+    }
   }
 
   /** A manual-capture order that is now authorized waits for the merchant, not for a window. */
@@ -70,6 +82,14 @@ public class OrderHolds {
   public void afterMove(Order after, Instant now) {
     if (after.state() == OrderState.INVENTORY_RESERVED) {
       timers.schedule(RESERVATION_EXPIRY, after.id(), now.plus(props.reservationWindow()));
+    }
+    if (awaitsCapture(after.captureMode(), after.state())
+        && props.reauthorizes()
+        && after.authorizationExpiresAt() != null) {
+      timers.schedule(
+          REAUTHORIZATION,
+          after.id(),
+          after.authorizationExpiresAt().minus(props.reauthorizeBefore()));
     }
   }
 

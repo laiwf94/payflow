@@ -10,6 +10,8 @@ import java.util.UUID;
  * {@code cancelRequested} is, except on orders cancelled before reasons were recorded. {@code
  * captureRequested} is only ever true for a {@link CaptureMode#MANUAL} order, once the merchant
  * asked for the capture; {@code authorizationExpiresAt} is set when the payment is authorized.
+ * {@code reauthorizationRequested} is set, on a manual-capture order only, when its authorization
+ * nears expiry, and {@code reauthorizedAt} once the authorization was extended, at most once.
  */
 public record Order(
     UUID id,
@@ -31,6 +33,8 @@ public record Order(
     long capturedMinor,
     long refundedMinor,
     Instant authorizationExpiresAt,
+    boolean reauthorizationRequested,
+    Instant reauthorizedAt,
     String failureCode,
     String failureMessage,
     int attempt,
@@ -45,6 +49,11 @@ public record Order(
     items = List.copyOf(items);
     if (captureRequested && captureMode != CaptureMode.MANUAL) {
       throw new IllegalArgumentException("only a manual-capture order can have a capture request");
+    }
+    if ((reauthorizationRequested && captureMode != CaptureMode.MANUAL)
+        || (reauthorizedAt != null && !reauthorizationRequested)) {
+      throw new IllegalArgumentException(
+          "only a manual-capture order asked to re-authorize can be re-authorized");
     }
   }
 
@@ -120,6 +129,8 @@ public record Order(
         null,
         0,
         0,
+        null,
+        false,
         null,
         null,
         null,

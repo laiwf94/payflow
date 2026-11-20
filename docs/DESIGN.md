@@ -587,12 +587,47 @@ for. The same rule stops a cancel from waiting out a retry's backoff. `ManualCap
 capture request and a cancel between the step and its write; without the version check, both
 tests fail with the order parked for the whole authorization.
 
-`authorization_expires_at` is recorded for every order when it is authorized:
+`authorization_expires_at` is recorded for every order when it is authorized: the `expires_at`
+the provider reports on the authorization, or, from a provider that reports none,
 `payflow.holds.authorization-lifetime` (7 days, what the card networks give an online payment)
 after the authorization step started. Every attempt, and so the authorization itself, happened at
-or after that, so the recorded expiry is never later than the provider's. A manual order nobody
+or after that, so the estimate is never later than the provider's. A manual order nobody
 captures fails at that moment with `authorization_expired` into `REVERSING_PAYMENT`, which voids
-the authorization, then releases the stock and ends `FAILED`.
+whatever is still held, then releases the stock and ends `FAILED`.
+
+### Extending an authorization
+
+A merchant who ships late shouldn't lose the sale to a lapsed hold, so a waiting manual order is
+re-authorized once, `payflow.holds.reauthorize-before` (1 day; zero turns it off; it must be
+shorter than the lifetime) before its authorization lapses:
+
+1. Moving a manual order to `PAYMENT_AUTHORIZED` schedules the durable timer
+   `order.reauthorization` for `authorization_expires_at - reauthorize-before`. Leaving the state,
+   by capturing or by compensating, cancels it in the same transaction.
+2. The timer's handler sets `reauthorization_requested` with one guarded `UPDATE`, like a capture
+   request: only on a manual order still in `PAYMENT_AUTHORIZED`, not asked to capture or cancel,
+   and not asked to re-authorize before. It makes the order due now and restarts the step clock,
+   so a provider outage gets the whole step timeout. An order that moved on is left alone.
+3. The capture step sees the flag and hands the order to `ReauthorizeStep`, which calls the
+   provider's extension (`POST /payments/{id}/reauthorize` at the simulator, with a key derived
+   from the order). On success the order waits again, as a `StepOutcome.Await` that also records
+   the provider's new `authorization_expires_at` and `reauthorized_at`, and
+   `order.payment_reauthorized` is written in the same transaction. No second timer is
+   scheduled: an order still waiting at the new expiry fails as before.
+4. A capture request wins: if the merchant asks between the timer and the step, the order is
+   captured and nothing is extended.
+
+Issuers don't always keep a hold as long as the provider says. The simulator's fault plan has an
+`early_expiry_rate` for `payment.authorize` and `payment.reauthorize`: the hold then lapses at a
+random moment before the `expires_at` it advertised, and `POST /sim/control/payments/{id}/expire`
+does the same on demand. The provider then refuses a capture or an extension with
+`authorization_expired`, and the order fails with that code into the reversal: nothing was taken,
+a lapsed hold can't be extended, and the stock is released. The reversal treats an expired
+payment like a voided one, since nothing is left to drop. Any other refusal of the extension fails
+the order as `reauthorization_failed`. An extension whose answer was lost is found on the retry by
+looking the payment up: an `expires_at` later than the recorded one means it went through, and
+the order takes that expiry rather than extending again, which `ReauthorizationTest` proves with
+the provider's idempotency keys switched off.
 
 The reservation and payment windows are for orders that never get paid. A manual order that is
 authorized has been paid for as far as the customer can, so its move to `PAYMENT_AUTHORIZED`
@@ -1036,6 +1071,7 @@ response without the other fails the build.
 | payflow killed mid-fire of a timer | The fire's transaction rolls back; the timer stays, leased | Lease expires (30 s); the next instance fires it once |
 | A manual-capture order is not captured before its authorization expires | The waiting step reaches its deadline | Fails as `authorization_expired`; the authorization is voided and the stock released |
 | An unpaid order outlives its reservation or payment window | Its timer fires and flags a cancel (`cancel_reason`) | Compensation as for a merchant's cancel; the order ends `CANCELLED` with its stock released and any authorization voided |
+| The issuer drops an authorization before its advertised expiry | The capture or extension is refused with `authorization_expired` | The order fails with that code into the reversal; nothing was taken and the stock is released |
 | A timer's handler throws | Its writes roll back; error recorded on the timer | Retried with backoff forever, capped at 30 s apart; error log after 10 attempts |
 | Two workers think they own an order | The stale one's writes are fenced out | Compare-and-set on lease token and state |
 | Kafka down | Events wait in the outbox | Relay retries; backlog gauge rises; API and saga unaffected |
@@ -1086,6 +1122,7 @@ response without the other fails the build.
 | Timer kind | 1-63 of `a-z 0-9 _ .`, starting with a letter | `TimerHandlers.KIND`, `timers_kind_format` |
 | Reservation window / payment window | 15 min / 1 h, each 1 s to 31 days | `payflow.holds.reservation-window`, `payment-window` |
 | Authorization lifetime | 7 days, 1 s to 31 days | `payflow.holds.authorization-lifetime` |
+| Re-authorization lead | 1 day before the authorization lapses, once per order; 0 is off, and it must be shorter than the lifetime | `payflow.holds.reauthorize-before` |
 | Wait for in-flight steps at shutdown | 5 s | `payflow.saga.shutdown-grace` |
 | Orders claimed per poll / in flight | 64 / 256 | `payflow.saga.batch-size`, `max-in-flight` |
 | Backoff | 200 ms base, 30 s cap, full jitter | `payflow.saga.backoff-*` |

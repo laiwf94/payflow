@@ -37,10 +37,15 @@ public record OrderResponse(
 
   /**
    * The payment once authorized. {@code authorizationExpiresAt} is when the hold on the card lapses
-   * (absent on orders authorized before it was recorded).
+   * (absent on orders authorized before it was recorded); {@code reauthorizedAt} is when the
+   * authorization was extended, on a manual-capture order that waited long enough for that.
    */
   public record Payment(
-      String id, long capturedAmount, long refundedAmount, Instant authorizationExpiresAt) {}
+      String id,
+      long capturedAmount,
+      long refundedAmount,
+      Instant authorizationExpiresAt,
+      Instant reauthorizedAt) {}
 
   public record Shipment(String id, String trackingNumber) {}
 
@@ -75,7 +80,11 @@ public record OrderResponse(
         o.paymentId() == null
             ? null
             : new Payment(
-                o.paymentId(), o.capturedMinor(), o.refundedMinor(), o.authorizationExpiresAt()),
+                o.paymentId(),
+                o.capturedMinor(),
+                o.refundedMinor(),
+                o.authorizationExpiresAt(),
+                o.reauthorizedAt()),
         o.shipmentId() == null ? null : new Shipment(o.shipmentId(), o.trackingNumber()),
         o.failureCode() == null ? null : new Failure(o.failureCode(), o.failureMessage()),
         new Refunds(

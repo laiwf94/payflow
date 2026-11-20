@@ -54,6 +54,16 @@ final class HttpPaymentGateway implements PaymentGateway {
   }
 
   @Override
+  public CallResult<PaymentInfo> reauthorize(String idempotencyKey, String paymentId) {
+    return http.call(
+        HttpMethod.POST,
+        null,
+        Map.of("Idempotency-Key", idempotencyKey),
+        u -> u.pathSegment(paymentId, "reauthorize"),
+        this::payment);
+  }
+
+  @Override
   public CallResult<PaymentInfo> voidAuthorization(String idempotencyKey, String paymentId) {
     return http.call(
         HttpMethod.POST,

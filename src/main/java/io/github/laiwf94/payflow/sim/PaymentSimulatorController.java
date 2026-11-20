@@ -64,6 +64,13 @@ class PaymentSimulatorController {
     return responses.respond(provider.capture(key, id, req.amount()), ResponseEntity::ok);
   }
 
+  @PostMapping("/{id}/reauthorize")
+  ResponseEntity<?> reauthorize(
+      @RequestHeader(name = "Idempotency-Key", required = false) String key,
+      @PathVariable String id) {
+    return responses.respond(provider.reauthorize(key, id), ResponseEntity::ok);
+  }
+
   @PostMapping("/{id}/void")
   ResponseEntity<?> voidAuthorization(
       @RequestHeader(name = "Idempotency-Key", required = false) String key,

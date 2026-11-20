@@ -57,6 +57,23 @@ notes on GitHub link here.
   captured by then fails as `authorization_expired`, voided and with its stock released. Events
   of a manual order carry `capture_mode: manual`. New counter `payflow.saga.waits`. Clients that
   switch over webhook event types or error codes should add the new ones.
+- Re-authorization (#26): a manual order still waiting for its capture is extended once,
+  `payflow.holds.reauthorize-before` (1 day; `0` turns it off) before its authorization lapses,
+  by the new durable timer `order.reauthorization` and the provider's extension call. The order
+  stays `PAYMENT_AUTHORIZED`, shows `payment.reauthorized_at` and the moved
+  `payment.authorization_expires_at`, and the new `order.payment_reauthorized` event carries the
+  new expiry. A hold the issuer dropped early fails the order as `authorization_expired` with its
+  stock released, whether the capture or the extension finds it; any other refusal of the
+  extension is `reauthorization_failed`. Migrations V28 and V29 add
+  `reauthorization_requested` and `reauthorized_at`. New counter
+  `payflow.holds.reauthorization{outcome}`.
+- The simulated provider's authorizations expire: each carries `expires_at`
+  (`payflow.simulator.authorization-lifetime`, 7 days, or `authorization_lifetime_ms` through
+  `PUT /sim/control/settings`) and then reads `EXPIRED`, refusing a capture or extension with
+  `409 authorization_expired`. `POST /sim/payments/{id}/reauthorize` extends a live one. The fault
+  plan's `early_expiry_rate` (for `payment.authorize` and `payment.reauthorize`) drops holds at a
+  random moment before their advertised expiry, and `POST /sim/control/payments/{id}/expire`
+  drops one now.
 - The running version on `/livez` (`components.build.details.version`) and in the
   `payflow X.Y.Z ready` log line.
 - Clean shutdown: on `SIGTERM` the saga worker stops claiming, lets running steps finish for up
@@ -180,6 +197,12 @@ notes on GitHub link here.
 - A cancel or capture request that lands while a saga step runs now makes the order due at once,
   instead of waiting out the retry backoff (or a manual order's wait) the step then writes. Every
   saga write carries the version the worker read (#26).
+- `payment.authorization_expires_at` is now the expiry the provider reports, falling back to
+  `payflow.holds.authorization-lifetime` after authorizing began only when it reports none. A
+  payment the provider reports `EXPIRED` is left alone by the reversal, like a voided one, and a
+  capture refused because the hold lapsed fails the order as `authorization_expired` rather than
+  `capture_failed` (#26). The payment provider adapter must report `expires_at` and offer the
+  extension call for re-authorization to work.
 
 ### Fixed
 

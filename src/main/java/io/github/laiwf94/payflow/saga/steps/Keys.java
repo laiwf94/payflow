@@ -19,6 +19,11 @@ final class Keys {
     return "capture-" + order;
   }
 
+  /** An order's authorization is extended at most once, so one key covers every attempt. */
+  static String reauthorize(UUID order) {
+    return "reauthorize-" + order;
+  }
+
   static String voidPayment(String paymentId) {
     return "void-" + paymentId;
   }

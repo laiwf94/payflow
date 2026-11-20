@@ -5,5 +5,7 @@ public enum PaymentStatus {
   AUTHORIZED,
   DECLINED,
   CAPTURED,
-  VOIDED
+  VOIDED,
+  /** The authorization lapsed before it was captured; nothing is held any more. */
+  EXPIRED
 }

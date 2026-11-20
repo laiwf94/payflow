@@ -6,14 +6,21 @@ import java.util.Objects;
 
 /**
  * Fault settings for one operation. Scripted faults are consumed first, in order; after that each
- * call draws from the rates. Rates are probabilities in [0, 1] and their sum must not exceed 1.
+ * call draws from the rates. Rates are probabilities in [0, 1] and the sum of the three call rates
+ * must not exceed 1.
+ *
+ * <p>{@code earlyExpiryRate} is drawn separately, for each hold an operation places ({@code
+ * payment.authorize} and {@code payment.reauthorize}; other operations place none and ignore it):
+ * the chance that the issuer drops the hold at a random moment before the expiry the provider
+ * advertised for it.
  */
 public record FaultPlan(
     double errorRate,
     double unknownBeforeRate,
     double unknownAfterRate,
     Duration latency,
-    List<Fault> script) {
+    List<Fault> script,
+    double earlyExpiryRate) {
 
   /** Latency above this would tie up simulator threads for no extra realism. */
   public static final Duration MAX_LATENCY = Duration.ofSeconds(30);
@@ -24,10 +31,21 @@ public record FaultPlan(
   // them.
   public static final FaultPlan NONE = new FaultPlan(0, 0, 0, Duration.ZERO, List.of());
 
+  /** A plan whose holds last as long as advertised. */
+  public FaultPlan(
+      double errorRate,
+      double unknownBeforeRate,
+      double unknownAfterRate,
+      Duration latency,
+      List<Fault> script) {
+    this(errorRate, unknownBeforeRate, unknownAfterRate, latency, script, 0);
+  }
+
   public FaultPlan {
     Objects.requireNonNull(latency, "latency");
     script = List.copyOf(script);
-    for (double r : new double[] {errorRate, unknownBeforeRate, unknownAfterRate}) {
+    for (double r :
+        new double[] {errorRate, unknownBeforeRate, unknownAfterRate, earlyExpiryRate}) {
       if (!(r >= 0 && r <= 1)) {
         throw new IllegalArgumentException("rates must be between 0 and 1");
       }

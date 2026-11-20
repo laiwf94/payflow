@@ -383,11 +383,59 @@ class OrderSchemaTest {
                       AND conname IN ('orders_merchant_reference_format',
                         'orders_partially_refunded_in_part', 'orders_legal_transition',
                         'orders_cancel_reason', 'orders_capture_mode',
-                        'orders_capture_requested_manual', 'orders_authorization_expiry_finite')
+                        'orders_capture_requested_manual', 'orders_authorization_expiry_finite',
+                        'orders_reauthorization_manual', 'orders_reauthorized_requested')
                     """)
                 .query(Integer.class)
                 .single())
-        .isEqualTo(7);
+        .isEqualTo(9);
+  }
+
+  @Test
+  void onlyAManualOrderAskedToReauthorizeCanBeReauthorized() {
+    UUID id = insertPending();
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET reauthorization_requested = true WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_reauthorization_manual");
+    jdbc.sql("UPDATE orders SET capture_mode = 'manual' WHERE id = :id").param("id", id).update();
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET reauthorized_at = now() WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .as("not asked")
+        .hasMessageContaining("orders_reauthorized_requested");
+    assertThatThrownBy(
+            () ->
+                jdbc.sql(
+                        """
+                        UPDATE orders SET reauthorization_requested = true,
+                            reauthorized_at = 'infinity' WHERE id = :id
+                        """)
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_reauthorized_requested");
+    assertThat(
+            jdbc.sql(
+                    """
+                    UPDATE orders SET reauthorization_requested = true, reauthorized_at = now()
+                    WHERE id = :id
+                    """)
+                .param("id", id)
+                .update())
+        .isOne();
+    Order o = repo.findById(id).orElseThrow();
+    assertThat(o.reauthorizationRequested()).isTrue();
+    assertThat(o.reauthorizedAt()).isNotNull();
+    assertThatThrownBy(
+            () ->
+                jdbc.sql("UPDATE orders SET capture_mode = 'automatic' WHERE id = :id")
+                    .param("id", id)
+                    .update())
+        .hasMessageContaining("orders_reauthorization_manual");
   }
 
   private void setReference(UUID id, String merchant, String reference) {
@@ -420,6 +468,8 @@ class OrderSchemaTest {
             null,
             0,
             0,
+            null,
+            false,
             null,
             null,
             null,

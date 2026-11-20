@@ -22,6 +22,7 @@ public record StateChange(
     Long capturedMinor,
     Long refundedMinor,
     Instant authorizationExpiresAt,
+    Instant reauthorizedAt,
     String failureCode,
     String failureMessage) {
 
@@ -43,6 +44,7 @@ public record StateChange(
     private Long capturedMinor;
     private Long refundedMinor;
     private Instant authorizationExpiresAt;
+    private Instant reauthorizedAt;
     private String failureCode;
     private String failureMessage;
 
@@ -101,6 +103,11 @@ public record StateChange(
       return this;
     }
 
+    public Builder reauthorizedAt(Instant at) {
+      this.reauthorizedAt = at;
+      return this;
+    }
+
     public Builder failure(String code, String message) {
       this.failureCode = code;
       this.failureMessage = message;
@@ -121,6 +128,7 @@ public record StateChange(
           capturedMinor,
           refundedMinor,
           authorizationExpiresAt,
+          reauthorizedAt,
           failureCode,
           failureMessage);
     }

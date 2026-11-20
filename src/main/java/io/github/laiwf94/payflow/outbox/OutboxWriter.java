@@ -92,6 +92,11 @@ public class OutboxWriter {
     if (order.cancelReason() != null) {
       payload.put("cancel_reason", order.cancelReason().code());
     }
+    if (order.reauthorizedAt() != null && order.state() == OrderState.PAYMENT_AUTHORIZED) {
+      payload.put(
+          "authorization_expires_at",
+          order.authorizationExpiresAt().atOffset(ZoneOffset.UTC).toString());
+    }
     if (refund != null) {
       Map<String, Object> r = new LinkedHashMap<>();
       r.put("id", refund.id());

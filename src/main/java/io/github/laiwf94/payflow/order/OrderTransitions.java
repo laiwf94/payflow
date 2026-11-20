@@ -29,6 +29,12 @@ public class OrderTransitions {
   /** The type of the event a manual-capture order's capture request writes. */
   public static final String CAPTURE_REQUESTED = "order.capture_requested";
 
+  /**
+   * The type of the event written when a waiting manual-capture order's authorization was extended.
+   * The order stays in {@code PAYMENT_AUTHORIZED}; the event carries the new expiry.
+   */
+  public static final String PAYMENT_REAUTHORIZED = "order.payment_reauthorized";
+
   private final OrderRepository repo;
   private final OutboxWriter outbox;
   private final OrderHolds holds;
@@ -76,6 +82,8 @@ public class OrderTransitions {
     if (moves) {
       outbox.write(eventType(after.get().state()), after.get(), before.state(), now);
       holds.afterMove(after.get(), now);
+    } else if (before.reauthorizedAt() == null && after.get().reauthorizedAt() != null) {
+      outbox.write(PAYMENT_REAUTHORIZED, after.get(), null, now);
     }
     return after;
   }

@@ -216,9 +216,12 @@ paths:
         live (`payment.authorization_expires_at`) and the order is not being cancelled: the saga
         captures the full amount, books the shipment and ends COMPLETED, or fails into the
         reversal if the provider refuses the capture. The answer shows `capture_requested`.
-        Asking again while the capture is on its way answers with the order as it is. An order
-        nobody captures before its authorization expires fails with `authorization_expired`; its
-        authorization is voided and its stock released.
+        Asking again while the capture is on its way answers with the order as it is. Shortly
+        before the authorization lapses (`payflow.holds.reauthorize-before`, one day by default)
+        payflow extends it once, writes `order.payment_reauthorized` and moves
+        `authorization_expires_at` to the provider's new expiry. An order nobody captures before
+        its authorization expires fails with `authorization_expired`, as does one whose hold the
+        issuer dropped early; its authorization is voided and its stock released.
       parameters:
         - $ref: '#/components/parameters/OrderId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -1303,8 +1306,15 @@ components:
               type: string
               format: date-time
               description: >-
-                When the hold on the card lapses, never later than the provider's own expiry.
-                Absent on orders authorized before it was recorded.
+                When the hold on the card lapses: the provider's own expiry, or an estimate
+                never later than it when the provider reports none. Moves when the
+                authorization is extended. Absent on orders authorized before it was recorded.
+            reauthorized_at:
+              type: string
+              format: date-time
+              description: >-
+                When payflow extended the authorization of a manual-capture order still
+                waiting for its capture. At most once per order.
         shipment:
           type: object
           additionalProperties: false
@@ -1390,7 +1400,7 @@ components:
           type: string
           description: >-
             `order.<state>` when the order changed state, `order.cancel_requested`,
-            `order.capture_requested`, or one of
+            `order.capture_requested`, `order.payment_reauthorized`, or one of
             `refund.created`, `refund.succeeded` and `refund.failed` for one of its refunds. A
             refund that succeeds is followed by the order's `order.partially_refunded` or
             `order.refunded`.
@@ -1423,13 +1433,13 @@ components:
       description: |
         An event type an endpoint can subscribe to, or `*` for every type. Most are events the
         order's stream carries: `order.created`, `order.cancel_requested`,
-        `order.capture_requested`, one per state the
+        `order.capture_requested`, `order.payment_reauthorized`, one per state the
         order can move to, and one per refund change. `webhook_endpoint.disabled` says payflow
         disabled one of the merchant's endpoints because every attempt to deliver to it failed
         for three days; that endpoint gets it once as a final notice whatever its filter says.
       enum:
         ['*', order.created, order.cancel_requested, order.capture_requested,
-         order.inventory_reserved,
+         order.payment_reauthorized, order.inventory_reserved,
          order.payment_authorized, order.payment_captured, order.completed,
          order.cancelling_shipment, order.reversing_payment, order.releasing_inventory,
          order.failed, order.cancelled, order.partially_refunded, order.refunded,

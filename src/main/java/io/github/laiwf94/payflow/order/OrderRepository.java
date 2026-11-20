@@ -234,6 +234,7 @@ public class OrderRepository {
                 refunded_minor = COALESCE(CAST(:refunded AS bigint), refunded_minor),
                 authorization_expires_at = COALESCE(
                     CAST(:authorizationExpiresAt AS timestamptz), authorization_expires_at),
+                reauthorized_at = COALESCE(CAST(:reauthorizedAt AS timestamptz), reauthorized_at),
                 failure_code = COALESCE(CAST(:failureCode AS text), failure_code),
                 failure_message = COALESCE(CAST(:failureMessage AS text), failure_message),
                 version = version + 1,
@@ -253,6 +254,7 @@ public class OrderRepository {
         .param("captured", change.capturedMinor())
         .param("refunded", change.refundedMinor())
         .param("authorizationExpiresAt", ts(change.authorizationExpiresAt()))
+        .param("reauthorizedAt", ts(change.reauthorizedAt()))
         .param("seenVersion", seenVersion)
         .param("failureCode", change.failureCode())
         .param("failureMessage", change.failureMessage())
@@ -309,6 +311,30 @@ public class OrderRepository {
         .param("now", ts(now))
         .param("id", id)
         .param("merchant", merchantId)
+        .query((rs, n) -> map(rs))
+        .optional();
+  }
+
+  /**
+   * Asks the saga to extend the authorization of a manual-capture order that is still waiting for
+   * its capture: authorized, not asked to capture or cancel, and not asked to re-authorize before.
+   * The order is made due now with a fresh step clock, as a capture request does, and like one it
+   * needs no lease. Empty, writing nothing, when any condition fails.
+   */
+  public Optional<Order> requestReauthorization(UUID id, Instant now) {
+    return jdbc.sql(
+            """
+            UPDATE orders SET reauthorization_requested = true,
+                attempt = 0, step_started_at = :now, next_attempt_at = :now,
+                version = version + 1, updated_at = :now
+            WHERE id = :id
+              AND capture_mode = 'manual' AND state = 'PAYMENT_AUTHORIZED'
+              AND NOT cancel_requested AND NOT capture_requested
+              AND NOT reauthorization_requested
+            RETURNING *
+            """)
+        .param("now", ts(now))
+        .param("id", id)
         .query((rs, n) -> map(rs))
         .optional();
   }
@@ -447,6 +473,8 @@ public class OrderRepository {
         rs.getLong("captured_minor"),
         rs.getLong("refunded_minor"),
         instant(rs, "authorization_expires_at"),
+        rs.getBoolean("reauthorization_requested"),
+        instant(rs, "reauthorized_at"),
         rs.getString("failure_code"),
         rs.getString("failure_message"),
         rs.getInt("attempt"),

@@ -10,6 +10,7 @@ import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.saga.SagaProperties;
 import io.github.laiwf94.payflow.saga.SagaStep;
 import io.github.laiwf94.payflow.saga.StepOutcome;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.stereotype.Component;
@@ -22,9 +23,10 @@ import org.springframework.stereotype.Component;
  * nothing is there. The idempotency key alone would cover a provider that honours keys; the lookup
  * also covers one that doesn't, or a key that expired.
  *
- * <p>It records when the authorization lapses: {@link HoldProperties#authorizationLifetime()} after
- * the step started. Every attempt, and so the authorization itself, happened at or after that, so
- * the recorded expiry is never later than the provider's.
+ * <p>It records when the authorization lapses: the expiry the provider reports for it, or, from a
+ * provider that reports none, {@link HoldProperties#authorizationLifetime()} after the step
+ * started. Every attempt, and so the authorization itself, happened at or after that, so the
+ * estimate is never later than the provider's.
  */
 @Component
 class AuthorizePaymentStep implements SagaStep {
@@ -93,10 +95,12 @@ class AuthorizePaymentStep implements SagaStep {
   }
 
   private StepOutcome authorized(Order order, PaymentInfo p) {
+    Instant expires =
+        p.expiresAt() != null
+            ? p.expiresAt()
+            : order.stepStartedAt().plus(holds.authorizationLifetime());
     return new StepOutcome.Advance(
-        OrderState.PAYMENT_AUTHORIZED,
-        StepOutcome.Fields.authorization(
-            p.id(), order.stepStartedAt().plus(holds.authorizationLifetime())));
+        OrderState.PAYMENT_AUTHORIZED, StepOutcome.Fields.authorization(p.id(), expires));
   }
 
   private static StepOutcome declined(String code) {
