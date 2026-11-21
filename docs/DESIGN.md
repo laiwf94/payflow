@@ -623,7 +623,10 @@ random moment before the `expires_at` it advertised, and `POST /sim/control/paym
 does the same on demand. The provider then refuses a capture or an extension with
 `authorization_expired`, and the order fails with that code into the reversal: nothing was taken,
 a lapsed hold can't be extended, and the stock is released. The reversal treats an expired
-payment like a voided one, since nothing is left to drop. Any other refusal of the extension fails
+payment like a voided one, since nothing is left to drop. A hold can also lapse before the saga
+even learns it was placed: if the authorization's answer was lost, the retry's lookup finds the
+payment `EXPIRED`, and the order fails as `authorization_expired` into `RELEASING_INVENTORY`
+rather than authorizing again (#84). Any other refusal of the extension fails
 the order as `reauthorization_failed`. An extension whose answer was lost is found on the retry by
 looking the payment up: an `expires_at` later than the recorded one means it went through, and
 the order takes that expiry rather than extending again, which `ReauthorizationTest` proves with

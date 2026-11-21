@@ -508,6 +508,38 @@ class ReauthorizationTest {
   }
 
   @Test
+  void aHoldThatLapsedBeforeItsLostAnswerWasFoundIsNeverAuthorizedAgain() {
+    for (boolean keys : List.of(false, true)) {
+      simSettings.honorIdempotencyKeys(keys);
+      faults.set(
+          "payment.authorize", new FaultPlan(0, 0, 0, Duration.ZERO, List.of(Fault.UNKNOWN_AFTER)));
+      Order o = create(CaptureMode.AUTOMATIC);
+      saga.runOnce();
+      assertThat(order(o).state()).as("answer lost, keys %s", keys).isEqualTo(INVENTORY_RESERVED);
+      assertThat(operations(o)).containsExactly("authorize");
+      // The issuer drops the hold before the saga's retry finds it.
+      assertThat(payments.expireNow(payment(o).id())).isTrue();
+
+      Order done = settle(o);
+      assertThat(done.state()).as("keys %s", keys).isEqualTo(FAILED);
+      assertThat(done.failureCode()).isEqualTo("authorization_expired");
+      assertThat(operations(o)).as("authorized once, keys %s", keys).containsExactly("authorize");
+      assertThat(payments.paymentsFor(o.id().toString()))
+          .singleElement()
+          .extracting(PaymentProviderSimulator.Payment::status)
+          .isEqualTo(PaymentProviderSimulator.Status.EXPIRED);
+      assertStockReleasedAndNothingShipped(o);
+      assertThat(timers(o)).isEmpty();
+      assertThat(events(o))
+          .containsExactly(
+              "order.created",
+              "order.inventory_reserved",
+              "order.releasing_inventory",
+              "order.failed");
+    }
+  }
+
+  @Test
   void theLeadMustBeShorterThanTheLifetime() {
     Duration h = Duration.ofHours(1);
     assertThat(new HoldProperties(h, h, h, Duration.ofMinutes(59)).reauthorizes()).isTrue();

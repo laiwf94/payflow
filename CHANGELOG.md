@@ -206,6 +206,9 @@ notes on GitHub link here.
 
 ### Fixed
 
+- An authorization whose answer was lost and whose hold the issuer dropped early is no longer
+  made a second time on the retry: the lookup now counts the `EXPIRED` payment as the earlier
+  attempt, and the order fails as `authorization_expired` with its stock released (#84).
 - docs/webhooks.md said an order's `seq` starts at 1 for `order.created`; it starts at 0. Its
   example event (`order.completed`, `seq` 4) and test vector are corrected to match (#25).
 - The chaos property no longer flags a correct `refund_exceeds_captured`: it priced a refused line

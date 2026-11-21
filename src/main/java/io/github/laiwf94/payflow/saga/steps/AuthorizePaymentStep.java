@@ -21,7 +21,10 @@ import org.springframework.stereotype.Component;
  * <p>When the step runs again (a retry, or a resume after a crash) the earlier attempt may have
  * gone through without us hearing about it. It asks the provider first and only authorizes again if
  * nothing is there. The idempotency key alone would cover a provider that honours keys; the lookup
- * also covers one that doesn't, or a key that expired.
+ * also covers one that doesn't, or a key that expired. An authorization the lookup finds already
+ * lapsed ({@link PaymentStatus#EXPIRED}, which an issuer can do before the expiry it advertised) is
+ * not made again: the order fails as {@code authorization_expired} with its stock released, as it
+ * would if the capture had found the hold gone, and the customer is never authorized twice.
  *
  * <p>It records when the authorization lapses: the expiry the provider reports for it, or, from a
  * provider that reports none, {@link HoldProperties#authorizationLifetime()} after the step
@@ -71,6 +74,15 @@ class AuthorizePaymentStep implements SagaStep {
       if (held.isPresent()) {
         unknown.resolved("authorize", true);
         return authorized(order, held.get());
+      }
+      Optional<PaymentInfo> lapsed =
+          s.value().stream().filter(p -> p.status() == PaymentStatus.EXPIRED).findFirst();
+      if (lapsed.isPresent()) {
+        unknown.resolved("authorize", true);
+        return new StepOutcome.Fail(
+            ReauthorizeStep.EXPIRED,
+            "the authorization lapsed before its answer was found: " + lapsed.get().id(),
+            OrderState.RELEASING_INVENTORY);
       }
       Optional<PaymentInfo> declined =
           s.value().stream().filter(p -> p.status() == PaymentStatus.DECLINED).findFirst();
