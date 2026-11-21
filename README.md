@@ -237,6 +237,7 @@ All of it runs against real Postgres and Redpanda through Testcontainers.
 ```console
 $ ./gradlew check          # format, Error Prone, 571 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
+$ ./bench/timers.sh        # 10,000 timers due in one second, three instances
 ```
 
 ## Load results
@@ -259,6 +260,12 @@ held only 668 orders/s at the same offered load, with saga latency turning into 
 queueing. Sampling `pg_stat_activity` at saturation shows the backends waiting on `WALWrite` and
 `WalSync`, the Postgres write-ahead log on Docker Desktop's virtual disk, and the service's
 connection pool full of requests waiting on those commits.
+
+`bench/timers.sh` on a 4-vCPU cloud VM, everything on one host: 10,000 order payment-expiry
+timers due within one second, fired by three payflow processes. Each run drained in 10.4-13.8 s
+(725-962 timers/s), with every timer fired exactly once and none early. One instance drains as
+fast as three, because each fire is a commit on the one Postgres. The runs and the analysis are in
+[docs/DESIGN.md](docs/DESIGN.md#draining-a-burst).
 
 ## Code and design notes
 
@@ -284,7 +291,7 @@ src/main/java/io/github/laiwf94/payflow/
 src/main/resources/db/migration   Flyway migrations
 examples/demo.sh                  failure scenarios against docker compose
 examples/rolling-restart.py       10,000 orders paged across two instances while both restart
-bench/                            k6 script and benchmark runner
+bench/                            k6 script, benchmark runner and timer drain benchmark
 ```
 
 ## License

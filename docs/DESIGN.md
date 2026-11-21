@@ -522,6 +522,45 @@ lease runs out. Metrics: `payflow.timers.fire{kind,outcome}`, `payflow.timers.la
 (fired minus due), `payflow.timers.retries`, `payflow.timers.lost` and
 `payflow.timers.handed_back{how}`.
 
+#### Draining a burst
+
+`bench/timers.sh` measures what happens when many timers come due together, as when a flash
+sale's reservations all run out. It starts payflow as separate processes against one Postgres and
+Redpanda in Docker, with the saga worker off. It then writes 10,000 `PENDING` orders, each with
+its `order.payment_expiry` timer, due evenly over one second starting 5 s later. Each fire is the
+real `ExpiryHandler` in one transaction: it deletes the timer, flags the order `payment_expired`,
+writes `order.cancel_requested` to the outbox and commits. With the saga off, each order's
+`updated_at` keeps the handler's clock at the fire, which gives the lateness of every timer. A
+run fails unless:
+
+- the table drains;
+- every order was cancelled once with exactly one event;
+- the instances' `fired` counters add up to 10,000, with nothing retried or lost;
+- no order was flagged before its timer was due.
+
+Default settings (batch 256, 8 fires at once per instance), three instances, on a 4-vCPU cloud VM
+(Xeon at 2.1 GHz) that also runs Postgres 17 and Redpanda, three runs after a warm-up:
+
+| Run | Drained after the first was due | Timers/s | Lateness p50 / p99 / max | Fired per instance |
+|---|---|---|---|---|
+| 1 | 13.8 s | 725 | 7.2 / 12.9 / 13.5 s | 3,315 / 3,312 / 3,373 |
+| 2 | 10.9 s | 915 | 5.1 / 9.9 / 10.3 s | 3,380 / 3,342 / 3,278 |
+| 3 | 10.4 s | 962 | 4.7 / 9.5 / 10.0 s | 3,323 / 3,321 / 3,356 |
+
+Every timer fired exactly once and none early. The instances shared the work evenly. The limit
+is the one database, not the workers:
+
+- One instance alone drained 10,000 at 907/s, the same as three.
+- 32 fires at once per instance instead of 8 made no difference.
+- During the drain, Postgres backends wait on `WALWrite` and `WalSync`.
+- `synchronous_commit=off` gained only about 10% (908 and 1,048/s), because the host's four cores
+  are busy too.
+
+Each timer costs one commit, so a burst of 10,000 is fully fired about 10 s after it falls due,
+and the median timer about 5 s late. For hold windows of minutes to days that delay doesn't
+matter. If it ever does, the lever is to fire several timers per transaction, which belongs with
+the other commit reductions planned for week 6 of ROADMAP.md.
+
 ### Holds that run out
 
 An unpaid order can't hold stock forever. Two timers end it, and both are kept in step with the

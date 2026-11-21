@@ -75,6 +75,10 @@ notes on GitHub link here.
   is captured only on request and extended at most once, between its authorization and its
   capture, that every refused capture request was refusable at that moment, that a cancel nobody
   asked for came from a hold timer, and that no timer is left once every order settles.
+- `bench/timers.sh` (#26): 10,000 payment-expiry timers due within one second, fired by several
+  payflow processes against one Postgres, failing unless each fires exactly once and none early.
+  Three instances drain them in 10-14 s (725-962 timers/s) on a 4-vCPU VM, where one commit per
+  timer on the shared database is the limit; results are in docs/DESIGN.md.
 - The simulated provider's authorizations expire: each carries `expires_at`
   (`payflow.simulator.authorization-lifetime`, 7 days, or `authorization_lifetime_ms` through
   `PUT /sim/control/settings`) and then reads `EXPIRED`, refusing a capture or extension with
