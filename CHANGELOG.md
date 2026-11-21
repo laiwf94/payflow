@@ -67,6 +67,14 @@ notes on GitHub link here.
   extension is `reauthorization_failed`. Migrations V28 and V29 add
   `reauthorization_requested` and `reauthorized_at`. New counter
   `payflow.holds.reauthorization{outcome}`.
+- The chaos property covers the time limits on holds (#26). Half its orders capture manually,
+  asked at a random moment or never; stock may be held 45 s and an order may go 90 s unpaid; the
+  provider keeps a hold 2 minutes, extended 1 minute before it lapses, and may drop it early; and
+  a timer worker on the saga's clock fires the expiries and extensions and crashes like any step.
+  It checks that no capture exceeds its authorization or takes a lapsed hold, that a manual order
+  is captured only on request and extended at most once, between its authorization and its
+  capture, that every refused capture request was refusable at that moment, that a cancel nobody
+  asked for came from a hold timer, and that no timer is left once every order settles.
 - The simulated provider's authorizations expire: each carries `expires_at`
   (`payflow.simulator.authorization-lifetime`, 7 days, or `authorization_lifetime_ms` through
   `PUT /sim/control/settings`) and then reads `EXPIRED`, refusing a capture or extension with

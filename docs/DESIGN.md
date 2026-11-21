@@ -638,6 +638,35 @@ cancels both timers, and from then on the authorization's own expiry bounds how 
 stock. Until then the windows apply as to any other order. A cancel while it waits voids the
 authorization and ends `CANCELLED` as usual.
 
+`SagaChaosProperties` runs all of this under its random faults and crashes, with holds short
+enough to run out within a try: stock may be held 45 s, an order may go 90 s unpaid, and the
+provider keeps an authorization for 2 minutes, extended 1 minute before it lapses. Half the
+orders capture manually, and the merchant asks for a capture at a random round, mostly while the
+order waits and before or after its extension, sometimes before it is authorized, after its hold
+lapsed, or never; automatic orders are asked too. Every hold the provider places may lapse early,
+at a per-try rate of up to 70%. A timer worker on the saga's clock fires the expiries and
+extensions, and crashes before, inside and after a fire like any step. On top of the money and
+stock invariants it checks:
+
+- every payment is authorized for exactly the order's amount and captured at most that much, and
+  no hold that lapsed was captured;
+- a manual order is captured only after an accepted capture request, and an automatic one never
+  takes one;
+- every refused capture request was refusable at that moment: the order captured automatically,
+  wasn't waiting in `PAYMENT_AUTHORIZED`, was being cancelled, or its authorization had expired;
+- an authorization is extended at most once, only for a manual order asked to by its timer, and
+  on the ledger after its authorization and before its capture;
+- an order that failed as `authorization_expired` captured nothing;
+- a cancelled order has a reason, `requested` only if the merchant asked, so any other cancel came
+  from a hold timer;
+- once every order has settled, the timers table is empty.
+
+Over ten runs of 200 tries each, 14 to 24 orders per run were re-authorized (some then captured,
+the rest failing at the new expiry), 5 to 8 failed as `authorization_expired`, 16 to 36 capture
+requests were accepted, and both hold windows cancelled orders. A run takes about 30 s. The
+property found #84, a lost authorization whose hold lapsed early being made a second time, on its
+first full-suite run.
+
 ## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what

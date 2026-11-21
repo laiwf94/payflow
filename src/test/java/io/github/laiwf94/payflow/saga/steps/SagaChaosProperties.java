@@ -3,8 +3,13 @@ package io.github.laiwf94.payflow.saga.steps;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.laiwf94.payflow.PayflowApplication;
+import io.github.laiwf94.payflow.hold.ExpiryHandler;
 import io.github.laiwf94.payflow.hold.HoldProperties;
+import io.github.laiwf94.payflow.hold.OrderHolds;
+import io.github.laiwf94.payflow.hold.ReauthorizationHandler;
 import io.github.laiwf94.payflow.money.Money;
+import io.github.laiwf94.payflow.order.CancelReason;
+import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderRepository;
@@ -12,6 +17,7 @@ import io.github.laiwf94.payflow.order.OrderService;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.outbox.OutboxWriter;
 import io.github.laiwf94.payflow.refund.Refund;
 import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundRepository;
@@ -33,14 +39,21 @@ import io.github.laiwf94.payflow.sim.ShippingSimulator;
 import io.github.laiwf94.payflow.sim.SimulatorSettings;
 import io.github.laiwf94.payflow.support.Db;
 import io.github.laiwf94.payflow.support.MutableClock;
+import io.github.laiwf94.payflow.timer.TimerHandlers;
+import io.github.laiwf94.payflow.timer.TimerProperties;
+import io.github.laiwf94.payflow.timer.TimerRepository;
+import io.github.laiwf94.payflow.timer.TimerSignal;
+import io.github.laiwf94.payflow.timer.TimerWorker;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -54,12 +67,15 @@ import net.jqwik.api.Combinators;
 import net.jqwik.api.ForAll;
 import net.jqwik.api.Property;
 import net.jqwik.api.Provide;
+import net.jqwik.api.Tuple;
 import net.jqwik.api.lifecycle.AfterContainer;
 import net.jqwik.api.statistics.Statistics;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Random failure schedules across all three dependencies and random crash points in the worker,
@@ -78,8 +94,23 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  *   <li>no refund request was refused unless what had been refunded by the end proves it had to be;
  *   <li>for every product, stock left plus stock held equals the stock it started with, and what is
  *       held is exactly what completed orders bought less what their refunds returned;
- *   <li>each order's events describe a legal path through the state machine.
+ *   <li>each order's events describe a legal path through the state machine;
+ *   <li>no capture ever exceeds its authorization: each payment is authorized for exactly the
+ *       order's amount, captured at most that much, and a hold that lapsed was never captured;
+ *   <li>a manual-capture order was captured only after the merchant asked, an automatic one never
+ *       waited for a request, and every refused capture request was refused for a reason the order
+ *       showed at that moment;
+ *   <li>an authorization was extended at most once, only for a waiting manual-capture order, and
+ *       always between its authorization and its capture;
+ *   <li>an order cancelled without the merchant asking was cancelled by one of its hold timers, and
+ *       once every order has settled no timer is left.
  * </ul>
+ *
+ * <p>Holds are short here so that they run out within a try: stock may be held 45 s, an order may
+ * go 90 s unpaid, and the provider keeps an authorization for 2 minutes, extended 1 minute before
+ * it lapses. Half the orders capture manually, at a random moment or never, and the provider may
+ * drop any hold early. The timer worker runs beside the saga on the same clock, and can crash
+ * before, inside or after a fire like any step.
  *
  * <p>Once every order has settled, refunds arrive in up to four bursts, one per round, so a burst
  * lands while the refunds of the last are still pending, failing or being retried across crashes.
@@ -90,10 +121,8 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  */
 class SagaChaosProperties {
 
-  /** The defaults; every order here captures automatically, so only the lifetime is read. */
-  private static final HoldProperties HOLDS =
-      new HoldProperties(
-          Duration.ofMinutes(15), Duration.ofHours(1), Duration.ofDays(7), Duration.ofDays(1));
+  /** How long the simulated provider keeps an authorization; its holds can also lapse early. */
+  private static final Duration AUTHORIZATION_LIFETIME = Duration.ofMinutes(2);
 
   private static ConfigurableApplicationContext ctx;
 
@@ -101,7 +130,16 @@ class SagaChaosProperties {
   private static synchronized ConfigurableApplicationContext context() {
     if (ctx == null) {
       ctx =
-          new SpringApplicationBuilder(PayflowApplication.class).web(WebApplicationType.NONE).run();
+          new SpringApplicationBuilder(PayflowApplication.class)
+              .web(WebApplicationType.NONE)
+              .properties(
+                  "payflow.holds.reservation-window=45s",
+                  "payflow.holds.payment-window=90s",
+                  "payflow.holds.authorization-lifetime="
+                      + AUTHORIZATION_LIFETIME.toSeconds()
+                      + "s",
+                  "payflow.holds.reauthorize-before=60s")
+              .run();
     }
     return ctx;
   }
@@ -116,7 +154,21 @@ class SagaChaosProperties {
 
   record Rates(double error, double lostBefore, double lostAfter) {}
 
-  record OrderSpec(String method, boolean undeliverable, List<LineItem> lines, int cancelAt) {}
+  /**
+   * One order. The merchant asks to cancel it in round {@code cancelAt} and to capture it in round
+   * {@code captureAt}, or never when the round is -1. Automatic orders are asked too, to check they
+   * are refused.
+   */
+  record OrderSpec(
+      String method,
+      boolean undeliverable,
+      List<LineItem> lines,
+      int cancelAt,
+      CaptureMode mode,
+      int captureAt) {}
+
+  /** What the merchant's capture request got, and the order as it was just after. */
+  record CaptureAsked(UUID orderId, boolean accepted, Order after, Instant at) {}
 
   enum RefundKind {
     /** Part of the money, no goods. */
@@ -142,12 +194,16 @@ class SagaChaosProperties {
 
   record Crash(String point, int occurrence) {}
 
+  /**
+   * Failure rates for each dependency, and the share of the provider's holds that lapse before
+   * their advertised expiry.
+   */
+  record Dependencies(Rates payment, Rates inventory, Rates shipping, double earlyExpiry) {}
+
   record Scenario(
       long seed,
       boolean honorKeys,
-      Rates payment,
-      Rates inventory,
-      Rates shipping,
+      Dependencies deps,
       List<OrderSpec> orders,
       List<Crash> crashes,
       List<RefundSpec> refunds) {}
@@ -180,7 +236,16 @@ class SagaChaosProperties {
                     "pm_card_expired"),
                 Arbitraries.of(false, false, false, true),
                 line.list().ofMinSize(1).ofMaxSize(3),
-                Arbitraries.integers().between(-1, 30))
+                Arbitraries.integers().between(-1, 30),
+                Arbitraries.of(CaptureMode.AUTOMATIC, CaptureMode.MANUAL),
+                // Rounds average 2.5 s, so a capture is mostly asked for while the order waits,
+                // before or after its extension at about round 24, and sometimes after the hold
+                // has lapsed at about round 72, before the authorization, or never.
+                Arbitraries.frequencyOf(
+                    Tuple.of(1, Arbitraries.just(-1)),
+                    Tuple.of(1, Arbitraries.integers().between(0, 2)),
+                    Tuple.of(6, Arbitraries.integers().between(3, 60)),
+                    Tuple.of(1, Arbitraries.integers().between(61, 100))))
             .as(OrderSpec::new);
     Arbitrary<RefundSpec> refund =
         Combinators.combine(
@@ -209,16 +274,18 @@ class SagaChaosProperties {
                                     "CANCELLING_SHIPMENT",
                                     "REVERSING_PAYMENT",
                                     "RELEASING_INVENTORY",
-                                    "REFUND")
+                                    "REFUND",
+                                    "TIMER")
                                 .map(s -> when + ":" + s)),
                 Arbitraries.integers().between(1, 4))
             .as(Crash::new);
+    Arbitrary<Dependencies> deps =
+        Combinators.combine(rates, rates, rates, Arbitraries.of(0.0, 0.0, 0.1, 0.3, 0.7))
+            .as(Dependencies::new);
     return Combinators.combine(
             Arbitraries.longs(),
             Arbitraries.of(true, false),
-            rates,
-            rates,
-            rates,
+            deps,
             order.list().ofMinSize(1).ofMaxSize(8),
             crash.list().ofMaxSize(6),
             refund.list().ofMaxSize(12))
@@ -240,19 +307,24 @@ class SagaChaosProperties {
     RefundRepository refunds = c.getBean(RefundRepository.class);
     RefundTransitions refundTransitions = c.getBean(RefundTransitions.class);
     RefundService refundService = c.getBean(RefundService.class);
+    HoldProperties holds = c.getBean(HoldProperties.class);
+    TransactionTemplate tx = new TransactionTemplate(c.getBean(PlatformTransactionManager.class));
     Db.truncateAll(jdbc);
 
+    MutableClock clock = new MutableClock(Instant.parse("2030-01-01T00:00:00Z"));
     SplittableRandom random = new SplittableRandom(sc.seed());
     Faults faults = new Faults(random.split());
-    SimulatorSettings settings = new SimulatorSettings(Duration.ZERO);
+    SimulatorSettings settings = new SimulatorSettings(Duration.ZERO, AUTHORIZATION_LIFETIME);
     settings.honorIdempotencyKeys(sc.honorKeys());
-    PaymentProviderSimulator payments = new PaymentProviderSimulator(faults, settings);
+    PaymentProviderSimulator payments = new PaymentProviderSimulator(faults, settings, clock);
     InventorySimulator inventory = new InventorySimulator(faults, 1000);
     inventory.setStock("sku-scarce", 2);
     ShippingSimulator shipping = new ShippingSimulator(faults);
-    plan(faults, "payment", sc.payment(), "authorize", "capture", "void", "refund", "lookup");
-    plan(faults, "inventory", sc.inventory(), "reserve", "release", "restock", "lookup");
-    plan(faults, "shipping", sc.shipping(), "create", "cancel", "lookup");
+    Dependencies deps = sc.deps();
+    plan(faults, "payment", deps.payment(), 0, "capture", "void", "refund", "lookup");
+    plan(faults, "payment", deps.payment(), deps.earlyExpiry(), "authorize", "reauthorize");
+    plan(faults, "inventory", deps.inventory(), 0, "reserve", "release", "restock", "lookup");
+    plan(faults, "shipping", deps.shipping(), 0, "create", "cancel", "lookup");
 
     SagaProperties props =
         new SagaProperties(
@@ -274,16 +346,42 @@ class SagaChaosProperties {
     List<SagaStep> steps =
         List.of(
             new ReserveInventoryStep(inv),
-            new AuthorizePaymentStep(pay, props, unknown, HOLDS),
+            new AuthorizePaymentStep(pay, props, unknown, holds),
             new CapturePaymentStep(
-                pay, props, unknown, HOLDS, new ReauthorizeStep(pay, props, unknown, HOLDS)),
+                pay, props, unknown, holds, new ReauthorizeStep(pay, props, unknown, holds)),
             new CreateShipmentStep(ship),
             new CancelShipmentStep(ship),
             new ReversePaymentStep(pay, props, unknown),
             new ReleaseInventoryStep(inv));
     RefundStep refundStep = new RefundStep(pay, inv, props, unknown);
+    // The wired handlers, but on this clock, so an expiry or an extension request is stamped with
+    // the time the saga sees.
+    OutboxWriter outbox = c.getBean(OutboxWriter.class);
+    var wiredSaga = c.getBeanProvider(SagaWorker.class);
+    SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    TimerHandlers handlers =
+        new TimerHandlers(
+            List.of(
+                new ExpiryHandler(
+                    OrderHolds.RESERVATION_EXPIRY,
+                    CancelReason.RESERVATION_EXPIRED,
+                    repo,
+                    outbox,
+                    wiredSaga,
+                    clock,
+                    meters),
+                new ExpiryHandler(
+                    OrderHolds.PAYMENT_EXPIRY,
+                    CancelReason.PAYMENT_EXPIRED,
+                    repo,
+                    outbox,
+                    wiredSaga,
+                    clock,
+                    meters),
+                new ReauthorizationHandler(repo, wiredSaga, clock, meters)));
+    TimerRepository timerRepo = c.getBean(TimerRepository.class);
+    PlatformTransactionManager txManager = c.getBean(PlatformTransactionManager.class);
 
-    MutableClock clock = new MutableClock(Instant.parse("2030-01-01T00:00:00Z"));
     Map<String, Integer> seen = new HashMap<>();
     List<Crash> pendingCrashes = new ArrayList<>(sc.crashes());
     CrashPoints crash =
@@ -301,6 +399,8 @@ class SagaChaosProperties {
           Order.create(
               UUID.randomUUID(),
               "acme",
+              null,
+              spec.mode(),
               Money.of(amount, "EUR"),
               spec.lines(),
               new ShippingAddress(
@@ -318,6 +418,9 @@ class SagaChaosProperties {
     }
 
     SagaWorker worker = worker(repo, transitions, steps, props, clock, crash, random);
+    TimerWorker timerWorker =
+        timerWorker(timerRepo, handlers, props, txManager, clock, crash, random);
+    List<CaptureAsked> captures = new ArrayList<>();
     RefundWorker refundWorker =
         refundWorker(refunds, repo, refundTransitions, refundStep, props, clock, crash, random);
     int lastBurst = sc.refunds().stream().mapToInt(RefundSpec::burst).max().orElse(-1);
@@ -330,6 +433,9 @@ class SagaChaosProperties {
         if (sc.orders().get(i).cancelAt() == round) {
           transitions.requestCancel("acme", orders.get(i).id(), clock.instant());
         }
+        if (sc.orders().get(i).captureAt() == round) {
+          captures.add(askCapture(repo, worker, transitions, tx, clock, orders.get(i).id()));
+        }
       }
       if (refundRound >= 0) {
         int burst = refundRound;
@@ -340,12 +446,14 @@ class SagaChaosProperties {
                 sc.refunds().stream().filter(r -> r.burst() == burst).toList()));
       }
       try {
+        timerWorker.runOnce();
         worker.runOnce();
         refundWorker.runOnce();
       } catch (SimulatedCrash e) {
         // The process died. A new one starts; the dead one's leases run out first.
         clock.advance(props.lease().plusSeconds(1));
         worker = worker(repo, transitions, steps, props, clock, crash, random);
+        timerWorker = timerWorker(timerRepo, handlers, props, txManager, clock, crash, random);
         refundWorker =
             refundWorker(refunds, repo, refundTransitions, refundStep, props, clock, crash, random);
       }
@@ -374,8 +482,23 @@ class SagaChaosProperties {
 
     checkInvariants(jdbc, repo, refunds, orders, payments, inventory, shipping);
     checkRefusals(repo, refunds, asked);
+    checkHolds(jdbc, repo, sc, orders, payments, captures);
     for (Order o : orders) {
-      Statistics.label("final state").collect(repo.findById(o.id()).orElseThrow().state());
+      Order end = repo.findById(o.id()).orElseThrow();
+      Statistics.label("final state").collect(end.captureMode() + " " + end.state());
+      Statistics.label("hold outcomes")
+          .collect(
+              end.cancelReason() != null
+                  ? "cancel " + end.cancelReason()
+                  : end.reauthorizedAt() != null
+                      ? "reauthorized " + end.state()
+                      : "authorization_expired".equals(end.failureCode())
+                          ? "authorization expired"
+                          : "other");
+    }
+    for (CaptureAsked a : captures) {
+      Statistics.label("capture requests")
+          .collect(a.after().captureMode() + (a.accepted() ? " accepted" : " refused"));
     }
     for (Asked a : asked) {
       Statistics.label("refund requests").collect(a.kind() + " " + a.result());
@@ -447,6 +570,141 @@ class SagaChaosProperties {
       assertThat(e.code()).isEqualTo("order_not_refundable");
       return new Asked(order.id(), spec.kind(), amount, lines, "not_refundable");
     }
+  }
+
+  /**
+   * Asks to capture an order as the merchant would, and checks a refusal on the spot against the
+   * order as it then is: nothing else runs between the two, so the reason must show.
+   */
+  private static CaptureAsked askCapture(
+      OrderRepository repo,
+      SagaWorker worker,
+      OrderTransitions transitions,
+      TransactionTemplate tx,
+      MutableClock clock,
+      UUID id) {
+    OrderService service = new OrderService(repo, transitions, worker, clock);
+    Instant now = clock.instant();
+    boolean accepted;
+    try {
+      tx.executeWithoutResult(s -> service.capture("acme", id));
+      accepted = true;
+    } catch (OrderService.WrongState e) {
+      assertThat(e.code()).isEqualTo("order_not_capturable");
+      accepted = false;
+    }
+    Order after = repo.findById(id).orElseThrow();
+    if (accepted) {
+      assertThat(after.captureMode())
+          .as("capture accepted for %s", after)
+          .isEqualTo(CaptureMode.MANUAL);
+      assertThat(after.captureRequested()).as("capture accepted for %s", after).isTrue();
+    } else {
+      boolean expired =
+          after.authorizationExpiresAt() != null && !now.isBefore(after.authorizationExpiresAt());
+      assertThat(
+              after.captureMode() == CaptureMode.AUTOMATIC
+                  || after.state() != OrderState.PAYMENT_AUTHORIZED
+                  || after.cancelRequested()
+                  || expired)
+          .as("capture refused for %s at %s", after, now)
+          .isTrue();
+    }
+    return new CaptureAsked(id, accepted, after, now);
+  }
+
+  /**
+   * The time limits: what was captured never exceeds what was authorized, a manual-capture order is
+   * captured only on request and extended at most once, cancels nobody asked for came from a hold
+   * timer, and no timer outlives the orders.
+   */
+  private static void checkHolds(
+      JdbcClient jdbc,
+      OrderRepository repo,
+      Scenario sc,
+      List<Order> orders,
+      PaymentProviderSimulator payments,
+      List<CaptureAsked> captures) {
+    Set<UUID> askedToCapture = new HashSet<>();
+    captures.stream().filter(CaptureAsked::accepted).forEach(a -> askedToCapture.add(a.orderId()));
+    for (int i = 0; i < orders.size(); i++) {
+      OrderSpec spec = sc.orders().get(i);
+      Order o = repo.findById(orders.get(i).id()).orElseThrow();
+      String ref = o.id().toString();
+      List<PaymentProviderSimulator.LedgerEntry> ledger = payments.ledgerFor(ref);
+      List<String> ops =
+          ledger.stream().map(PaymentProviderSimulator.LedgerEntry::operation).toList();
+      Map<String, Long> authorized = new HashMap<>();
+      for (PaymentProviderSimulator.LedgerEntry e : ledger) {
+        if (e.operation().equals("authorize")) {
+          assertThat(e.amount())
+              .as("%s authorized for its amount", ref)
+              .isEqualTo(o.amount().minorUnits());
+          authorized.put(e.paymentId(), e.amount());
+        }
+      }
+      for (PaymentProviderSimulator.LedgerEntry e : ledger) {
+        if (e.operation().equals("capture")) {
+          assertThat(authorized)
+              .as("capture of %s on a payment it authorized", ref)
+              .containsKey(e.paymentId());
+          assertThat(e.amount())
+              .as("capture of %s within its authorization", ref)
+              .isLessThanOrEqualTo(authorized.get(e.paymentId()));
+        }
+      }
+      for (Payment p : payments.paymentsFor(ref)) {
+        assertThat(p.captured())
+            .as("%s captured within its authorization", ref)
+            .isLessThanOrEqualTo(p.amount());
+        if (p.status() == PaymentProviderSimulator.Status.EXPIRED) {
+          assertThat(p.captured()).as("lapsed hold of %s captured", ref).isZero();
+        }
+      }
+      long reauthorizations = ops.stream().filter("reauthorize"::equals).count();
+      assertThat(reauthorizations).as("extensions of %s: %s", ref, ops).isLessThanOrEqualTo(1);
+      if (reauthorizations == 1) {
+        assertThat(o.captureMode()).as("extended %s", ref).isEqualTo(CaptureMode.MANUAL);
+        assertThat(o.reauthorizationRequested()).as("extended %s was asked to", ref).isTrue();
+        int at = ops.indexOf("reauthorize");
+        assertThat(ops.indexOf("authorize")).as("ledger of %s: %s", ref, ops).isBetween(0, at - 1);
+        if (ops.contains("capture")) {
+          assertThat(ops.indexOf("capture")).as("ledger of %s: %s", ref, ops).isGreaterThan(at);
+        }
+      }
+      if (o.reauthorizedAt() != null) {
+        assertThat(reauthorizations).as("recorded extension of %s at the provider", ref).isOne();
+      }
+      if (o.captureMode() == CaptureMode.MANUAL) {
+        if (ops.contains("capture") || o.capturedMinor() > 0) {
+          assertThat(askedToCapture)
+              .as("manual %s captured unasked: %s", ref, ops)
+              .contains(o.id());
+        }
+        if (o.state() == OrderState.COMPLETED) {
+          assertThat(o.captureRequested()).as("completed manual %s", ref).isTrue();
+        }
+      } else {
+        assertThat(o.captureRequested()).as("automatic %s", ref).isFalse();
+        assertThat(o.reauthorizationRequested()).as("automatic %s", ref).isFalse();
+      }
+      if ("authorization_expired".equals(o.failureCode())) {
+        assertThat(o.state()).isEqualTo(OrderState.FAILED);
+        assertThat(ops).as("%s failed as expired", ref).doesNotContain("capture");
+      }
+      if (o.cancelReason() != null) {
+        assertThat(o.cancelRequested()).as("%s has a cancel reason", ref).isTrue();
+      }
+      if (o.state() == OrderState.CANCELLED) {
+        assertThat(o.cancelReason()).as("cancelled %s has a reason", ref).isNotNull();
+      }
+      if (o.cancelReason() == CancelReason.REQUESTED) {
+        assertThat(spec.cancelAt()).as("%s cancelled as requested", ref).isNotNegative();
+      }
+    }
+    assertThat(jdbc.sql("SELECT kind || ' ' || subject_id FROM timers").query(String.class).list())
+        .as("timers left once every order settled")
+        .isEmpty();
   }
 
   /**
@@ -586,11 +844,41 @@ class SagaChaosProperties {
         new SimpleMeterRegistry());
   }
 
-  private static void plan(Faults faults, String dependency, Rates r, String... ops) {
+  private static TimerWorker timerWorker(
+      TimerRepository timers,
+      TimerHandlers handlers,
+      SagaProperties props,
+      PlatformTransactionManager txManager,
+      MutableClock clock,
+      CrashPoints crash,
+      SplittableRandom random) {
+    return new TimerWorker(
+        timers,
+        handlers,
+        new TimerProperties(
+            false,
+            Duration.ofMillis(100),
+            256,
+            8,
+            props.lease(),
+            Duration.ofMillis(10),
+            Duration.ofMillis(100),
+            Duration.ZERO),
+        new TimerSignal(),
+        txManager,
+        clock,
+        new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), random.split()),
+        crash,
+        new SimpleMeterRegistry());
+  }
+
+  private static void plan(
+      Faults faults, String dependency, Rates r, double earlyExpiry, String... ops) {
     for (String op : ops) {
       faults.set(
           dependency + "." + op,
-          new FaultPlan(r.error(), r.lostBefore(), r.lostAfter(), Duration.ZERO, List.of()));
+          new FaultPlan(
+              r.error(), r.lostBefore(), r.lostAfter(), Duration.ZERO, List.of(), earlyExpiry));
     }
   }
 
