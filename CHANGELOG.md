@@ -79,6 +79,11 @@ notes on GitHub link here.
   payflow processes against one Postgres, failing unless each fires exactly once and none early.
   Three instances drain them in 10-14 s (725-962 timers/s) on a 4-vCPU VM, where one commit per
   timer on the shared database is the limit; results are in docs/DESIGN.md.
+- `examples/holds.sh` (#26): the holds end to end on the compose stack, with the short windows in
+  `examples/holds.compose.yml`. Unpaid orders with a 5 s hold survive a `SIGKILL` inside the
+  window and are cancelled once as `reservation_expired`, with their stock released; a
+  manual-capture order is re-authorized once before its 20 s hold lapses and captured at shipment
+  after the first expiry.
 - The simulated provider's authorizations expire: each carries `expires_at`
   (`payflow.simulator.authorization-lifetime`, 7 days, or `authorization_lifetime_ms` through
   `PUT /sim/control/settings`) and then reads `EXPIRED`, refusing a capture or extension with

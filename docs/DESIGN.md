@@ -706,6 +706,34 @@ requests were accepted, and both hold windows cancelled orders. A run takes abou
 property found #84, a lost authorization whose hold lapsed early being made a second time, on its
 first full-suite run.
 
+### Holds end to end
+
+`examples/holds.sh` runs the holds against the docker compose stack, outside the gate. It
+restarts `app` with the short windows in `examples/holds.compose.yml` (stock held 5 s, a waiting
+authorization extended 10 s before it lapses) and puts the defaults back when it exits.
+
+1. Every authorization answers 503, so three orders sit in `INVENTORY_RESERVED` holding stock.
+   About 1.3 s into their window the process is killed with `SIGKILL`; their timers fall due
+   while nothing is running. The script fails unless each order ends `CANCELLED` with
+   `cancel_reason: reservation_expired` and no failure or payment, its timeline has exactly one
+   `order.cancel_requested` and one `order.cancelled`, the cancel was asked for no earlier than
+   the end of the window, the providers hold no payment, reservation or shipment for it, and the
+   shelf is back where it started.
+2. The simulator keeps authorizations for 20 s. A manual-capture order is authorized, its timer
+   extends the hold once in the last 10 s, the first expiry passes with the order still waiting
+   on a live hold, and the merchant then captures at shipment. The script fails unless the
+   provider's ledger is exactly `authorize`, `reauthorize` and `capture` of the order's amount,
+   with a shipment, and the timeline has one `order.payment_reauthorized` and one
+   `order.capture_requested`.
+
+On a 4-vCPU cloud VM, with the image built from this tree, the timers fell due 3.7 s after the
+kill, with the process still down. The next instance fired them and asked for each cancel
+0.6-0.8 s after the end of its window, 5.6-5.8 s after the reservation and 4.3-4.5 s after the kill;
+the script, polling every half second, saw it ready 4.8-4.9 s after the kill. The extension came 9.9-10.0 s before the
+first hold lapsed, and the new hold was a full 20 s. A run takes about 40 s. As a negative control,
+with `reauthorize-before` set to 0 the second scenario fails with `order ... was never
+re-authorized`. `examples/demo.sh` still passes on the default windows afterwards.
+
 ## When nobody knows what happened
 
 The HTTP adapters sort every call into four results, and the split between the last two is what

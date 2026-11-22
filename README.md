@@ -58,6 +58,19 @@ one reservation and one shipment on the fake providers' ledgers. A request that 
 instance stopping goes to the other one with the same idempotency key. Python 3.10+, standard
 library only; `ORDERS`, `PAGE_LIMIT` and `PAGE_DELAY` change the size and pace.
 
+Holds that run out, with the stack from `docker compose up -d --build`:
+
+```console
+$ ./examples/holds.sh
+```
+
+This restarts `app` with a 5 s reservation window and puts the default back when it exits. Three
+unpaid orders hold stock while every authorization fails, the process is killed with `SIGKILL`
+inside their window, and the next instance cancels each one once, as `reservation_expired`, with
+the stock back on the shelf. Then a manual-capture order on a 20 s authorization is re-authorized
+once before the hold lapses and captured at shipment after the first expiry has passed: the
+provider's ledger shows exactly `authorize`, `reauthorize` and `capture`.
+
 To run it from source, start Postgres and a Kafka-compatible broker, then:
 
 ```console
@@ -222,6 +235,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | API | Every endpoint and error code over real HTTP, and a validation matrix: zero, negative, bounds and bounds+1, wrong types, decimals, strings for numbers, 5,000-character fields, emoji, RTL and CJK text, script tags, control characters, unknown currencies and countries, oversized and chunked bodies. |
 | Listing | jqwik pages through two merchants' orders with random filters and page sizes while orders keep arriving, many tied on `created_at`, and every page boundary goes through a signed cursor: no order is repeated, none that existed when paging began is skipped, and the order is strictly newest first. Over HTTP, two threads insert while 300 orders are paged; a flipped bit, another merchant's cursor or changed filters is a 400. |
 | Rolling restart | Outside the gate, against the compose stack: `examples/rolling-restart.py` pages 10,000 orders of two merchants across two instances while each is stopped with `SIGTERM` and started again under load, and checks every listing and every provider ledger. |
+| Holds end to end | Outside the gate, against the compose stack: `examples/holds.sh` kills the service with `SIGKILL` inside three unpaid orders' 5 s reservation window and checks that the next instance cancels each once, no earlier than due, with its stock released; then a manual-capture order is re-authorized once before its 20 s hold lapses and captured after the first expiry, with exactly `authorize`, `reauthorize` and `capture` on the provider's ledger. |
 | Webhook endpoints | Over HTTP: the secret is in the `201` and nowhere else, neither in any read nor in the database (the endpoint's row and the stored idempotent answer are scanned for it), yet it opens again to sign; a retry replays the same endpoint and secret; changes, deletion, merchant isolation, and ten racing creates against twelve endpoints make exactly four. Raw SQL can't store a bad state, URL, event filter, secret, delivery schedule or attempt. Every bit of a sealed secret is covered by its tag, and a secret moved to another row doesn't open. Loopback, private, metadata, CGNAT, IPv4-mapped and other non-public hosts are refused at registration and on update. |
 | Webhook sender | Real sockets on loopback: a resolver that rebinds after the first answer is looked up once per send and the connection goes to the checked address; one bad address among several refuses the send; mapped, NAT64 and 6to4 literals are judged by the IPv4 address inside; a redirect is an answer, not followed; a head or body sent a byte at a time is cut off at the deadline; a 4 MiB body by length, until close and chunked is read only to 1 KiB; TLS carries the host in SNI and refuses a certificate for another name. No 3xx (301, 302, 303, 307, 308) is followed, wherever it points; checked addresses are tried in order without a second lookup; a name that passed registration and then points at the metadata address is refused at send time; a head that never ends, sent as endless interim answers, one endless header or an endless status line, is a protocol failure at 16 KiB; a body that stalls or trickles in chunks keeps its status at the deadline; chunk sizes that are signed, too large or not hex, and Content-Lengths that are negative, repeated or not a number, end the body there. Every address range is tested on its own. |
 | Receiver's guide | docs/webhooks.md is run: its test vector is recomputed, its example body is Postgres's own rendering, the Python, Node.js and Java examples give payflow's answer on 26 edge cases and 300 generated requests (random bodies, one or two signing secrets, clocks either side of five minutes, bits flipped in transit), the openssl command recomputes the signature, and the complete receiver is started and sent real signed requests: it accepts a rotation in progress, acknowledges a repeat as a duplicate, and refuses a changed body, a secret it doesn't hold and a stale timestamp. |
@@ -291,6 +305,8 @@ src/main/java/io/github/laiwf94/payflow/
 src/main/resources/db/migration   Flyway migrations
 examples/demo.sh                  failure scenarios against docker compose
 examples/rolling-restart.py       10,000 orders paged across two instances while both restart
+examples/holds.sh                 hold expiry across a kill, and re-authorization, against docker compose
+examples/holds.compose.yml        the short hold windows holds.sh runs with
 bench/                            k6 script, benchmark runner and timer drain benchmark
 ```
 

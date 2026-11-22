@@ -1,0 +1,16 @@
+# Short holds for examples/holds.sh, layered over docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f examples/holds.compose.yml up -d app
+#
+# examples/holds.sh applies this itself and puts the default windows back when it exits.
+services:
+  app:
+    environment:
+      # An unpaid order may hold stock for 5 s after its reservation.
+      PAYFLOW_HOLDS_RESERVATIONWINDOW: 5s
+      # Longer than every scenario, so only the reservation window cancels anything.
+      PAYFLOW_HOLDS_PAYMENTWINDOW: 2m
+      # Only used when the provider reports no expiry; the simulator always reports one.
+      PAYFLOW_HOLDS_AUTHORIZATIONLIFETIME: 1m
+      # A waiting manual-capture order is extended 10 s before its authorization lapses.
+      PAYFLOW_HOLDS_REAUTHORIZEBEFORE: 10s
