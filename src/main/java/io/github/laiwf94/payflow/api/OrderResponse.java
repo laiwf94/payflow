@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.api;
 import io.github.laiwf94.payflow.order.LineItem;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.payment.Payment;
 import io.github.laiwf94.payflow.refund.RefundSummary;
 import java.time.Instant;
 import java.util.List;
@@ -13,7 +14,8 @@ import java.util.UUID;
  * cancelReason} says why a cancel was requested ({@code requested}, {@code reservation_expired} or
  * {@code payment_expired}). {@code captureMode} is {@code automatic} or {@code manual}, and {@code
  * captureRequested} says a manual order's capture was asked for. {@code refunds} holds the order's
- * newest refunds and what its pending ones are returning.
+ * newest refunds and what its pending ones are returning. {@code paymentMethod} and {@code payment}
+ * describe the order's tender, read from its {@link Payment} row.
  */
 public record OrderResponse(
     UUID id,
@@ -28,7 +30,7 @@ public record OrderResponse(
     boolean captureRequested,
     boolean cancelRequested,
     String cancelReason,
-    Payment payment,
+    PaymentSummary payment,
     Shipment shipment,
     Failure failure,
     Refunds refunds,
@@ -40,7 +42,7 @@ public record OrderResponse(
    * (absent on orders authorized before it was recorded); {@code reauthorizedAt} is when the
    * authorization was extended, on a manual-capture order that waited long enough for that.
    */
-  public record Payment(
+  public record PaymentSummary(
       String id,
       long capturedAmount,
       long refundedAmount,
@@ -58,12 +60,29 @@ public record OrderResponse(
    */
   public record Refunds(List<RefundResponse> data, boolean hasMore, long pendingAmount) {}
 
-  /** An order that has no refunds: a new one, or one not yet completed. */
-  public static OrderResponse of(Order o) {
-    return of(o, RefundSummary.NONE);
+  /**
+   * An order that has no refunds: a new one, or one not yet completed.
+   *
+   * @param payments the order's tenders by position, as {@code PaymentRepository} reads them
+   */
+  public static OrderResponse of(Order o, List<Payment> payments) {
+    return of(o, payments, RefundSummary.NONE);
   }
 
-  public static OrderResponse of(Order o, RefundSummary refunds) {
+  /**
+   * The order with its tenders and refunds.
+   *
+   * @throws IllegalStateException when {@code payments} is empty or belongs to another order
+   */
+  public static OrderResponse of(Order o, List<Payment> payments, RefundSummary refunds) {
+    if (payments.isEmpty()) {
+      throw new IllegalStateException("order " + o.id() + " has no payment row");
+    }
+    Payment tender = payments.getFirst();
+    if (!tender.orderId().equals(o.id())) {
+      throw new IllegalStateException(
+          "payment " + tender.id() + " belongs to order " + tender.orderId() + ", not " + o.id());
+    }
     return new OrderResponse(
         o.id(),
         o.merchantReference(),
@@ -72,19 +91,19 @@ public record OrderResponse(
         o.amount().currencyCode(),
         o.items(),
         o.shippingAddress(),
-        o.paymentMethod(),
+        tender.method(),
         o.captureMode().code(),
         o.captureRequested(),
         o.cancelRequested(),
         o.cancelReason() == null ? null : o.cancelReason().code(),
-        o.paymentId() == null
+        tender.providerPaymentId() == null
             ? null
-            : new Payment(
-                o.paymentId(),
-                o.capturedMinor(),
-                o.refundedMinor(),
-                o.authorizationExpiresAt(),
-                o.reauthorizedAt()),
+            : new PaymentSummary(
+                tender.providerPaymentId(),
+                tender.capturedMinor(),
+                tender.refundedMinor(),
+                tender.authorizationExpiresAt(),
+                tender.reauthorizedAt()),
         o.shipmentId() == null ? null : new Shipment(o.shipmentId(), o.trackingNumber()),
         o.failureCode() == null ? null : new Failure(o.failureCode(), o.failureMessage()),
         new Refunds(

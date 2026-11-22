@@ -92,7 +92,7 @@ class OrderController {
                 a.name(), a.line1(), a.line2(), a.city(), a.postalCode(), a.country()),
             req.paymentMethod(),
             RequestIds.of(http));
-    return ResponseEntity.created(URI.create("/v1/orders/" + o.id())).body(OrderResponse.of(o));
+    return ResponseEntity.created(URI.create("/v1/orders/" + o.id())).body(views.of(o));
   }
 
   @GetMapping("/{id}")
@@ -103,8 +103,7 @@ class OrderController {
   /** Only an order not yet captured can be cancelled, so it has no refunds to show. */
   @PostMapping("/{id}/cancel")
   ResponseEntity<OrderResponse> cancel(@PathVariable String id, HttpServletRequest http) {
-    return ResponseEntity.accepted()
-        .body(OrderResponse.of(orders.cancel(merchant(http), parse(id))));
+    return ResponseEntity.accepted().body(views.of(orders.cancel(merchant(http), parse(id))));
   }
 
   /**
@@ -113,8 +112,7 @@ class OrderController {
    */
   @PostMapping("/{id}/capture")
   ResponseEntity<OrderResponse> capture(@PathVariable String id, HttpServletRequest http) {
-    return ResponseEntity.accepted()
-        .body(OrderResponse.of(orders.capture(merchant(http), parse(id))));
+    return ResponseEntity.accepted().body(views.of(orders.capture(merchant(http), parse(id))));
   }
 
   /**
@@ -124,7 +122,7 @@ class OrderController {
   @PostMapping("/{id}/refund")
   ResponseEntity<OrderResponse> refund(@PathVariable String id, HttpServletRequest http) {
     OrderRefunds r = refunds.refundRemaining(merchant(http), parse(id));
-    return ResponseEntity.accepted().body(OrderResponse.of(r.order(), r.refunds()));
+    return ResponseEntity.accepted().body(views.of(r.order(), r.refunds()));
   }
 
   /**

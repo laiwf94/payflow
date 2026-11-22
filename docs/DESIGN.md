@@ -37,7 +37,8 @@ the eight-digit ceiling card processors commonly accept for one charge, and ever
 uses `Math.addExact` / `multiplyExact`, so an overflow is a 400 and not a negative total. Codes
 with no minor unit (XAU, XTS, XXX) are refused.
 
-The other tables are `refunds` (one row per refund, below), `outbox` (events waiting for Kafka),
+The other tables are `payments` (one row per tender, below), `refunds` (one row per refund,
+below), `outbox` (events waiting for Kafka),
 `inbox` and `order_timeline` (the consumer's deduplication and its projection), and
 `idempotency_keys`.
 
@@ -124,6 +125,58 @@ instance doesn't start. The old instances finish those refunds in seconds, and t
 goes through. `RefundingMigrationTest` runs exactly that on a database of its own. Orders the old
 step finished keep `previous_state = REFUNDING`, so the pair `(REFUNDING, REFUNDED)` stays legal
 for them, and V15 validates.
+
+### Payments, one row per tender
+
+An order is paid by one or more tenders: a gift card and a card, say. Each has a row in
+`payments`, numbered from 1 by `position` in the order they are authorized:
+
+| Columns | Meaning |
+|---|---|
+| `order_id`, `position` | The order and the tender's place in it; unique together. |
+| `method`, `provider` | What pays and who processes it. Every tender goes to `primary` until routing chooses between providers. |
+| `amount_minor`, `currency` | The tender's share of the order total. |
+| `state` | `pending`, `authorized`, `captured`, `partially_refunded`, `refunded`, `voided`, `expired`, `declined` or `canceled`. |
+| `provider_payment_id` | The provider's id for the authorization, once known. |
+| `authorize_key`, `capture_key`, `reauthorize_key` | The idempotency keys every attempt of that step sends for this tender, stored so a step resumed after an upgrade sends the key its earlier attempt sent. |
+| `captured_minor`, `refunded_minor`, `authorization_expires_at`, `reauthorized_at` | The tender's money and hold, as the order row has them for the whole order. |
+
+The database checks each tender's money as it checks the order's: nothing captured beyond the
+tender's amount, nothing refunded beyond its capture, and a state that agrees with both (a
+`captured` tender holds money and has none refunded, a `voided` one holds none).
+
+`payment/Payment` is how the API reads a tender: an order's `payment_method` and `payment` block
+come from its row. The JSON is the same as before the table existed.
+
+The table arrived expand before contract. Today every order has exactly one tender for its whole
+amount, and the saga's steps still keep their working copy of it on the order row (`payment_id`,
+`payment_method`, `captured_minor`, `refunded_minor` and the hold times). Until the steps write
+tenders themselves, an `AFTER INSERT OR UPDATE` trigger on `orders` writes position 1 from that
+copy in the same statement as every write of it. The API reads the order and its tender in one
+transaction, so the two never disagree. The trigger fires only when the copy changes, so claims,
+lease releases, retries and cancel requests write nothing to `payments`. The tender's state comes
+from the money moved first (`refunded`, `partially_refunded`, `captured`). An order with no money
+captured that is past its payment steps says why in its failure code (`declined`, `expired`), or
+else in whether an authorization was recorded (`voided`, or `canceled` when none was).
+
+While the trigger writes the rows, a write the orders table accepts must not fail on `payments`:
+a legal step would then be refused, and the order would be stuck. So the checks on `payments` are
+ones the orders checks already imply. Two rules wait until the steps own the rows:
+
+- A tender that holds money has a provider id. Today a reversal can find and refund a capture
+  whose answer was lost, and such an order has no recorded id.
+- A provider id belongs to one tender. The in-memory simulator restarts its ids.
+
+V31 gives each order that existed before V30 its tender. It walks orders by id in batches of
+2,000 and commits each batch, so it never holds a lock over the whole table. It runs outside a
+transaction (`V31__backfill_payments.sql.conf`), because a `DO` block may only `COMMIT` there.
+Orders the saga writes during the backfill are safe either way. The trigger upserts the order's
+current values, and the backfill inserts only where no row exists, so whichever comes second finds
+the other's row. A backfill cut short carries on at the next start. `PaymentsBackfillMigrationTest`
+runs V30 and V31 over 4,513 orders in every state, with one order moved on between the two, and
+runs the backfill a second time to show it adds nothing. `SagaChaosProperties` checks after every
+try that each order's tender agrees with its row: method, amount, provider id, money, hold times,
+keys and state.
 
 ## States, and the database that enforces them
 

@@ -18,6 +18,8 @@ import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.ShippingAddress;
 import io.github.laiwf94.payflow.outbox.OutboxWriter;
+import io.github.laiwf94.payflow.payment.PaymentRepository;
+import io.github.laiwf94.payflow.payment.PaymentState;
 import io.github.laiwf94.payflow.refund.Refund;
 import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundRepository;
@@ -882,6 +884,45 @@ class SagaChaosProperties {
     }
   }
 
+  /**
+   * Whatever crashed and whichever path the order took, its one tender agrees with the order: the
+   * same method, amount, provider id, money and hold times, the keys the steps sent, and a state
+   * that says where the money ended up.
+   */
+  private static void checkTender(Order o, List<io.github.laiwf94.payflow.payment.Payment> rows) {
+    String ref = o.id().toString();
+    assertThat(rows).as("tenders of %s", ref).hasSize(1);
+    var t = rows.getFirst();
+    assertThat(t.position()).isOne();
+    assertThat(t.method()).as("method of %s", ref).isEqualTo(o.paymentMethod());
+    assertThat(t.provider()).isEqualTo(io.github.laiwf94.payflow.payment.Payment.PRIMARY_PROVIDER);
+    assertThat(t.amount()).as("amount of %s", ref).isEqualTo(o.amount());
+    assertThat(t.providerPaymentId()).as("provider id of %s", ref).isEqualTo(o.paymentId());
+    assertThat(t.capturedMinor()).as("tender capture of %s", ref).isEqualTo(o.capturedMinor());
+    assertThat(t.refundedMinor()).as("tender refund of %s", ref).isEqualTo(o.refundedMinor());
+    assertThat(t.authorizationExpiresAt()).isEqualTo(o.authorizationExpiresAt());
+    assertThat(t.reauthorizedAt()).isEqualTo(o.reauthorizedAt());
+    assertThat(List.of(t.authorizeKey(), t.captureKey(), t.reauthorizeKey()))
+        .containsExactly(Keys.authorize(o.id()), Keys.capture(o.id()), Keys.reauthorize(o.id()));
+    PaymentState expected;
+    if (o.refundedMinor() > 0) {
+      expected =
+          o.refundedMinor() == o.capturedMinor()
+              ? PaymentState.REFUNDED
+              : PaymentState.PARTIALLY_REFUNDED;
+    } else if (o.capturedMinor() > 0) {
+      expected = PaymentState.CAPTURED;
+    } else if ("payment_declined".equals(o.failureCode())) {
+      expected = PaymentState.DECLINED;
+    } else if (ReauthorizeStep.EXPIRED.equals(o.failureCode())) {
+      expected = PaymentState.EXPIRED;
+    } else {
+      expected = o.paymentId() != null ? PaymentState.VOIDED : PaymentState.CANCELED;
+    }
+    assertThat(t.state()).as("tender state of %s in %s", ref, o.state()).isEqualTo(expected);
+    assertThat(t.state().isSettled()).as("tender of terminal %s", ref).isTrue();
+  }
+
   private static void checkInvariants(
       JdbcClient jdbc,
       OrderRepository repo,
@@ -890,6 +931,7 @@ class SagaChaosProperties {
       PaymentProviderSimulator payments,
       InventorySimulator inventory,
       ShippingSimulator shipping) {
+    PaymentRepository tenders = new PaymentRepository(jdbc);
     for (Order created : orders) {
       Order o = repo.findById(created.id()).orElseThrow();
       String ref = o.id().toString();
@@ -908,6 +950,7 @@ class SagaChaosProperties {
       assertThat(captures).as("captures for %s", ref).isLessThanOrEqualTo(1);
       assertThat(o.capturedMinor()).as("recorded capture matches provider").isEqualTo(captured);
       assertThat(o.refundedMinor()).as("recorded refund matches provider").isEqualTo(refunded);
+      checkTender(o, tenders.forOrder(o.id()));
       List<Refund> rows = refunds.listForOrder(o.id());
       assertThat(rows).as("refunds of %s settled", ref).allMatch(r -> r.state().isTerminal());
       List<Refund> succeeded =
