@@ -7,6 +7,9 @@ import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
+import io.github.laiwf94.payflow.payment.Payment;
+import io.github.laiwf94.payflow.payment.PaymentRepository;
+import io.github.laiwf94.payflow.payment.PaymentState;
 import io.github.laiwf94.payflow.saga.SagaProperties;
 import io.github.laiwf94.payflow.saga.StepOutcome;
 import java.time.Instant;
@@ -30,8 +33,12 @@ import org.springframework.stereotype.Component;
  * but an order that can't be extended would only fail a little later, after the merchant may have
  * shipped on the strength of it.
  *
+ * <p>Every tender's authorization is extended, in position order under its own key, and each is
+ * recorded before the next ({@link StepOutcome.Progress}). The order then waits until the earliest
+ * of the new expiries.
+ *
  * <p>On a retry or resume it asks the provider first: an extension whose answer was lost shows as
- * an expiry later than the one recorded, and the order takes that one rather than extending again.
+ * an expiry later than the one recorded, and the tender takes that one rather than extending again.
  */
 @Component
 class ReauthorizeStep {
@@ -40,30 +47,44 @@ class ReauthorizeStep {
   static final String EXPIRED = "authorization_expired";
 
   private final PaymentGateway payments;
+  private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
   private final HoldProperties holds;
 
   ReauthorizeStep(
       PaymentGateway payments,
+      PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown,
       HoldProperties holds) {
     this.payments = payments;
+    this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
     this.holds = holds;
   }
 
   StepOutcome execute(Order order, boolean resumed) {
+    Tenders all = Tenders.of(tenders, order);
+    Optional<Payment> next =
+        all.first(p -> p.state() == PaymentState.AUTHORIZED && p.reauthorizedAt() == null);
+    if (next.isEmpty()) {
+      return waitAgain(order, all, List.of());
+    }
+    Payment t = next.get();
+    Instant recorded =
+        t.authorizationExpiresAt() != null
+            ? t.authorizationExpiresAt()
+            : order.authorizationExpiresAt();
     if (resumed) {
-      CallResult<List<PaymentInfo>> found = payments.findByReference(order.id().toString());
+      CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
         return new StepOutcome.Retry(
             "payment lookup failed: " + found, props.unknownOutcomeDelay());
       }
       Optional<PaymentInfo> ours =
-          s.value().stream().filter(p -> p.id().equals(order.paymentId())).findFirst();
+          s.value().stream().filter(p -> p.id().equals(t.providerPaymentId())).findFirst();
       if (ours.isEmpty()) {
         return refused("missing");
       }
@@ -75,19 +96,17 @@ class ReauthorizeStep {
       if (p.status() != PaymentStatus.AUTHORIZED) {
         return refused(p.status().name().toLowerCase(Locale.ROOT));
       }
-      if (p.expiresAt() != null
-          && order.authorizationExpiresAt() != null
-          && p.expiresAt().isAfter(order.authorizationExpiresAt())) {
+      if (p.expiresAt() != null && recorded != null && p.expiresAt().isAfter(recorded)) {
         unknown.resolved("reauthorize", true);
-        return extended(order, p);
+        return extended(order, all, t, p);
       }
       unknown.resolved("reauthorize", false);
     }
-    return switch (payments.reauthorize(Keys.reauthorize(order.id()), order.paymentId())) {
-      case CallResult.Success<PaymentInfo> s -> extended(order, s.value());
+    return switch (payments.reauthorize(t.reauthorizeKey(), t.providerPaymentId())) {
+      case CallResult.Success<PaymentInfo> s -> extended(order, all, t, s.value());
       case CallResult.Rejected<PaymentInfo> r ->
           EXPIRED.equals(r.code()) ? lapsed() : refused(r.code());
-      case CallResult.Transient<PaymentInfo> t -> new StepOutcome.Retry(t.reason());
+      case CallResult.Transient<PaymentInfo> t2 -> new StepOutcome.Retry(t2.reason());
       case CallResult.Unknown<PaymentInfo> u -> {
         unknown.seen("reauthorize");
         yield new StepOutcome.Retry(u.reason(), props.unknownOutcomeDelay());
@@ -95,15 +114,31 @@ class ReauthorizeStep {
     };
   }
 
-  private StepOutcome extended(Order order, PaymentInfo p) {
+  private StepOutcome extended(Order order, Tenders all, Payment t, PaymentInfo p) {
     Instant started = order.stepStartedAt();
     Instant expires =
         p.expiresAt() != null ? p.expiresAt() : started.plus(holds.authorizationLifetime());
+    Payment done = t.reauthorized(expires, started);
+    Tenders after = all.with(done);
+    if (after.any(x -> x.state() == PaymentState.AUTHORIZED && x.reauthorizedAt() == null)) {
+      return new StepOutcome.Progress(StepOutcome.Fields.NONE, List.of(done));
+    }
+    return waitAgain(order, after, List.of(done));
+  }
+
+  /** Every tender is extended: wait for the capture until the first of them lapses. */
+  private StepOutcome waitAgain(Order order, Tenders all, List<Payment> changed) {
+    Instant started = order.stepStartedAt();
+    Instant expires = all.earliestExpiry();
+    if (expires == null) {
+      expires = started.plus(holds.authorizationLifetime());
+    }
     return new StepOutcome.Await(
         "re-authorized; waiting for the merchant to capture",
         expires,
         CapturePaymentStep.authorizationExpired(),
-        StepOutcome.Fields.reauthorization(expires, started));
+        StepOutcome.Fields.reauthorization(expires, started),
+        changed);
   }
 
   private static StepOutcome lapsed() {

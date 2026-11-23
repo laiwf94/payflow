@@ -1,8 +1,13 @@
 package io.github.laiwf94.payflow.order;
 
 import io.github.laiwf94.payflow.hold.OrderHolds;
+import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.outbox.OutboxWriter;
+import io.github.laiwf94.payflow.payment.Payment;
+import io.github.laiwf94.payflow.payment.PaymentRepository;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -38,22 +43,61 @@ public class OrderTransitions {
   private final OrderRepository repo;
   private final OutboxWriter outbox;
   private final OrderHolds holds;
+  private final PaymentRepository payments;
 
-  public OrderTransitions(OrderRepository repo, OutboxWriter outbox, OrderHolds holds) {
+  public OrderTransitions(
+      OrderRepository repo, OutboxWriter outbox, OrderHolds holds, PaymentRepository payments) {
     this.repo = repo;
     this.outbox = outbox;
     this.holds = holds;
+    this.payments = payments;
   }
 
+  /** A tender of a new order: {@code amount} of it paid with {@code method}. */
+  public record Tender(String method, Money amount) {}
+
   /**
-   * Stores a new order, its {@code order.created} event and the timer that cancels it if it is not
-   * paid in time. Returns false, writing nothing, when the merchant already has an order with the
-   * same reference.
+   * Stores a new order paid with one tender, its {@code paymentMethod}, for the whole amount: see
+   * {@link #create(Order, List)}.
    */
   @Transactional
   public boolean create(Order order) {
+    return create(order, List.of(new Tender(order.paymentMethod(), order.amount())));
+  }
+
+  /**
+   * Stores a new order, one payment row per tender (authorized in the order given), its {@code
+   * order.created} event and the timer that cancels it if it is not paid in time. Returns false,
+   * writing nothing, when the merchant already has an order with the same reference.
+   *
+   * @throws IllegalArgumentException when there are no tenders, more than 16, or their amounts are
+   *     not in the order's currency or don't add up to its amount
+   */
+  @Transactional
+  public boolean create(Order order, List<Tender> tenders) {
+    if (tenders.isEmpty() || tenders.size() > 16) {
+      throw new IllegalArgumentException("an order has 1 to 16 tenders, not " + tenders.size());
+    }
+    Money sum = null;
+    for (Tender t : tenders) {
+      sum = sum == null ? t.amount() : sum.plus(t.amount());
+    }
+    if (!order.amount().equals(sum)) {
+      throw new IllegalArgumentException(
+          "tenders add up to " + sum + ", not the order's " + order.amount());
+    }
     if (!repo.insert(order)) {
       return false;
+    }
+    if (tenders.size() > 1) {
+      List<Payment> rows = new ArrayList<>(tenders.size());
+      for (int i = 0; i < tenders.size(); i++) {
+        Tender t = tenders.get(i);
+        rows.add(
+            Payment.create(
+                UUID.randomUUID(), order.id(), i + 1, t.method(), t.amount(), order.createdAt()));
+      }
+      payments.split(rows);
     }
     outbox.write(CREATED, order, null, order.createdAt());
     holds.created(order);
@@ -66,6 +110,17 @@ public class OrderTransitions {
    */
   @Transactional
   public Optional<Order> apply(Order before, UUID leaseToken, StateChange change, Instant now) {
+    return apply(before, leaseToken, change, List.of(), now);
+  }
+
+  /**
+   * {@link #apply(Order, UUID, StateChange, Instant)}, also recording what the step learned about
+   * {@code tenders}, the order's payment rows, in the same transaction. The order's write is the
+   * fence: when it is refused, no tender is written.
+   */
+  @Transactional
+  public Optional<Order> apply(
+      Order before, UUID leaseToken, StateChange change, List<Payment> tenders, Instant now) {
     boolean moves = change.state() != before.state();
     if (moves) {
       holds.beforeMove(before, change.state());
@@ -78,6 +133,11 @@ public class OrderTransitions {
         TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
       }
       return after;
+    }
+    payments.save(before.id(), tenders, now);
+    if (after.get().state() == OrderState.FAILED || after.get().state() == OrderState.CANCELLED) {
+      // A tender still pending was never tried: the order failed before reaching it.
+      payments.cancelPending(before.id(), now);
     }
     if (moves) {
       outbox.write(eventType(after.get().state()), after.get(), before.state(), now);
@@ -120,6 +180,11 @@ public class OrderTransitions {
         repo.addRefunded(orderId, amount, now)
             .orElseThrow(
                 () -> new IllegalStateException("order " + orderId + " is not refundable"));
+    // Refunds are made against the order's payment id, which is its first tender's.
+    if (!payments.addRefunded(orderId, after.paymentId(), amount, now)) {
+      throw new IllegalStateException(
+          "order " + orderId + " has no tender " + after.paymentId() + " to refund");
+    }
     OrderState before =
         after.refundedMinor() == amount ? OrderState.COMPLETED : OrderState.PARTIALLY_REFUNDED;
     outbox.write(eventType(after.state()), after, before, now);

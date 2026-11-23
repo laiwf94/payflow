@@ -8,6 +8,9 @@ import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.order.CaptureMode;
 import io.github.laiwf94.payflow.order.Order;
 import io.github.laiwf94.payflow.order.OrderState;
+import io.github.laiwf94.payflow.payment.Payment;
+import io.github.laiwf94.payflow.payment.PaymentRepository;
+import io.github.laiwf94.payflow.payment.PaymentState;
 import io.github.laiwf94.payflow.saga.SagaProperties;
 import io.github.laiwf94.payflow.saga.SagaStep;
 import io.github.laiwf94.payflow.saga.StepOutcome;
@@ -17,7 +20,8 @@ import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
- * Takes the authorized money, on one of two paths.
+ * Takes the authorized money, tender by tender in position order, each under its own capture key,
+ * on one of two paths.
  *
  * <ul>
  *   <li><b>Automatic</b>: captures straight away.
@@ -30,6 +34,11 @@ import org.springframework.stereotype.Component;
  *       {@link ReauthorizeStep} does that, once, and the order goes back to waiting until the new
  *       expiry.
  * </ul>
+ *
+ * <p>Each captured tender is recorded before the next ({@link StepOutcome.Progress}), so a retry or
+ * resume carries on with the first tender still only authorized. If one can't be captured, the
+ * order goes to {@code REVERSING_PAYMENT}, which refunds the tenders already captured and voids the
+ * rest, last tender first.
  *
  * <p>A provider that refuses the capture because the hold already lapsed (issuers sometimes drop
  * one before the expiry the provider advertised) fails the order as {@code authorization_expired}:
@@ -44,6 +53,7 @@ import org.springframework.stereotype.Component;
 class CapturePaymentStep implements SagaStep {
 
   private final PaymentGateway payments;
+  private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
   private final HoldProperties holds;
@@ -51,11 +61,13 @@ class CapturePaymentStep implements SagaStep {
 
   CapturePaymentStep(
       PaymentGateway payments,
+      PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown,
       HoldProperties holds,
       ReauthorizeStep reauthorize) {
     this.payments = payments;
+    this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
     this.holds = holds;
@@ -98,34 +110,47 @@ class CapturePaymentStep implements SagaStep {
   }
 
   private StepOutcome capture(Order order, boolean resumed) {
+    Tenders all = Tenders.of(tenders, order);
+    Optional<Payment> unexpected =
+        all.first(p -> p.state() != PaymentState.AUTHORIZED && p.state() != PaymentState.CAPTURED);
+    if (unexpected.isPresent()) {
+      throw new IllegalStateException(
+          "tender " + unexpected.get().position() + " is " + unexpected.get().state().code());
+    }
+    Optional<Payment> next = all.first(p -> p.state() == PaymentState.AUTHORIZED);
+    if (next.isEmpty()) {
+      return new StepOutcome.Advance(OrderState.PAYMENT_CAPTURED, all.money());
+    }
+    Payment t = next.get();
     if (resumed) {
-      CallResult<List<PaymentInfo>> found = payments.findByReference(order.id().toString());
+      CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
         return new StepOutcome.Retry(
             "payment lookup failed: " + found, props.unknownOutcomeDelay());
       }
       Optional<PaymentInfo> ours =
-          s.value().stream().filter(p -> p.id().equals(order.paymentId())).findFirst();
+          s.value().stream().filter(p -> p.id().equals(t.providerPaymentId())).findFirst();
       if (ours.isPresent() && ours.get().status() == PaymentStatus.CAPTURED) {
         unknown.resolved("capture", true);
-        return captured(ours.get());
+        return captured(all, t, ours.get());
       }
       if (ours.isPresent() && ours.get().status() == PaymentStatus.EXPIRED) {
         unknown.resolved("capture", false);
-        return lapsed();
+        return lapsed(all, t);
       }
       if (ours.isEmpty() || ours.get().status() != PaymentStatus.AUTHORIZED) {
         return refused(
+            all,
             ours.map(p -> p.status().name().toLowerCase(java.util.Locale.ROOT)).orElse("missing"));
       }
       unknown.resolved("capture", false);
     }
-    long amount = order.amount().minorUnits();
-    return switch (payments.capture(Keys.capture(order.id()), order.paymentId(), amount)) {
-      case CallResult.Success<PaymentInfo> s -> captured(s.value());
+    long amount = t.amount().minorUnits();
+    return switch (payments.capture(t.captureKey(), t.providerPaymentId(), amount)) {
+      case CallResult.Success<PaymentInfo> s -> captured(all, t, s.value());
       case CallResult.Rejected<PaymentInfo> r ->
-          ReauthorizeStep.EXPIRED.equals(r.code()) ? lapsed() : refused(r.code());
-      case CallResult.Transient<PaymentInfo> t -> new StepOutcome.Retry(t.reason());
+          ReauthorizeStep.EXPIRED.equals(r.code()) ? lapsed(all, t) : refused(all, r.code());
+      case CallResult.Transient<PaymentInfo> t2 -> new StepOutcome.Retry(t2.reason());
       case CallResult.Unknown<PaymentInfo> u -> {
         unknown.seen("capture");
         yield new StepOutcome.Retry(u.reason(), props.unknownOutcomeDelay());
@@ -133,21 +158,35 @@ class CapturePaymentStep implements SagaStep {
     };
   }
 
-  private static StepOutcome captured(PaymentInfo p) {
-    return new StepOutcome.Advance(
-        OrderState.PAYMENT_CAPTURED, StepOutcome.Fields.money(p.captured(), p.refunded()));
+  private static StepOutcome captured(Tenders all, Payment t, PaymentInfo p) {
+    Payment done = t.settled(p.id(), p.captured(), p.refunded(), PaymentState.CAPTURED);
+    Tenders after = all.with(done);
+    if (after.any(x -> x.state() == PaymentState.AUTHORIZED)) {
+      return new StepOutcome.Progress(after.money(), List.of(done));
+    }
+    return new StepOutcome.Advance(OrderState.PAYMENT_CAPTURED, after.money(), List.of(done));
   }
 
-  /** The issuer dropped the hold before we could take the money. */
-  private static StepOutcome lapsed() {
+  /**
+   * The issuer dropped tender {@code t}'s hold before we could take the money. Tenders captured
+   * before it are given back by the reversal.
+   */
+  private static StepOutcome lapsed(Tenders all, Payment t) {
+    Payment ended = t.settled(null, 0, 0, PaymentState.EXPIRED);
     return new StepOutcome.Fail(
         "authorization_expired",
         "the authorization lapsed at the issuer before the capture",
-        OrderState.REVERSING_PAYMENT);
+        OrderState.REVERSING_PAYMENT,
+        all.with(ended).money(),
+        List.of(ended));
   }
 
-  private static StepOutcome refused(String why) {
+  private static StepOutcome refused(Tenders all, String why) {
     return new StepOutcome.Fail(
-        "capture_failed", "provider refused the capture: " + why, OrderState.REVERSING_PAYMENT);
+        "capture_failed",
+        "provider refused the capture: " + why,
+        OrderState.REVERSING_PAYMENT,
+        all.money(),
+        List.of());
   }
 }

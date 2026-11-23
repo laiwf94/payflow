@@ -343,17 +343,23 @@ class SagaChaosProperties {
             Duration.ofSeconds(5));
     UnknownOutcomes unknown = new UnknownOutcomes(new SimpleMeterRegistry());
     var pay = DirectGateways.payments(payments);
+    PaymentRepository tenderRows = new PaymentRepository(jdbc);
     var inv = DirectGateways.inventory(inventory);
     var ship = DirectGateways.shipping(shipping);
     List<SagaStep> steps =
         List.of(
             new ReserveInventoryStep(inv),
-            new AuthorizePaymentStep(pay, props, unknown, holds),
+            new AuthorizePaymentStep(pay, tenderRows, props, unknown, holds),
             new CapturePaymentStep(
-                pay, props, unknown, holds, new ReauthorizeStep(pay, props, unknown, holds)),
+                pay,
+                tenderRows,
+                props,
+                unknown,
+                holds,
+                new ReauthorizeStep(pay, tenderRows, props, unknown, holds)),
             new CreateShipmentStep(ship),
             new CancelShipmentStep(ship),
-            new ReversePaymentStep(pay, props, unknown),
+            new ReversePaymentStep(pay, tenderRows, props, unknown),
             new ReleaseInventoryStep(inv));
     RefundStep refundStep = new RefundStep(pay, inv, props, unknown);
     // The wired handlers, but on this clock, so an expiry or an extension request is stamped with
@@ -885,19 +891,26 @@ class SagaChaosProperties {
   }
 
   /**
-   * Whatever crashed and whichever path the order took, its one tender agrees with the order: the
-   * same method, amount, provider id, money and hold times, the keys the steps sent, and a state
-   * that says where the money ended up.
+   * Whatever crashed and whichever path the order took, its one tender agrees with the order (the
+   * same method, amount, money and hold times, and the keys the steps sent) and with the provider:
+   * the payment it records is one the provider holds under its reference, and its state says where
+   * the provider has the money. An order's own provider id, when it recorded one, is the tender's;
+   * a tender can also have learned one the order never did, from a reversal that found a lost
+   * authorization.
    */
-  private static void checkTender(Order o, List<io.github.laiwf94.payflow.payment.Payment> rows) {
+  private static void checkTender(
+      Order o, List<io.github.laiwf94.payflow.payment.Payment> rows, List<Payment> atProvider) {
     String ref = o.id().toString();
     assertThat(rows).as("tenders of %s", ref).hasSize(1);
     var t = rows.getFirst();
     assertThat(t.position()).isOne();
+    assertThat(t.providerReference()).isEqualTo(ref);
     assertThat(t.method()).as("method of %s", ref).isEqualTo(o.paymentMethod());
     assertThat(t.provider()).isEqualTo(io.github.laiwf94.payflow.payment.Payment.PRIMARY_PROVIDER);
     assertThat(t.amount()).as("amount of %s", ref).isEqualTo(o.amount());
-    assertThat(t.providerPaymentId()).as("provider id of %s", ref).isEqualTo(o.paymentId());
+    if (o.paymentId() != null) {
+      assertThat(t.providerPaymentId()).as("provider id of %s", ref).isEqualTo(o.paymentId());
+    }
     assertThat(t.capturedMinor()).as("tender capture of %s", ref).isEqualTo(o.capturedMinor());
     assertThat(t.refundedMinor()).as("tender refund of %s", ref).isEqualTo(o.refundedMinor());
     assertThat(t.authorizationExpiresAt()).isEqualTo(o.authorizationExpiresAt());
@@ -905,19 +918,42 @@ class SagaChaosProperties {
     assertThat(List.of(t.authorizeKey(), t.captureKey(), t.reauthorizeKey()))
         .containsExactly(Keys.authorize(o.id()), Keys.capture(o.id()), Keys.reauthorize(o.id()));
     PaymentState expected;
-    if (o.refundedMinor() > 0) {
+    if (t.refundedMinor() > 0) {
       expected =
-          o.refundedMinor() == o.capturedMinor()
+          t.refundedMinor() == t.capturedMinor()
               ? PaymentState.REFUNDED
               : PaymentState.PARTIALLY_REFUNDED;
-    } else if (o.capturedMinor() > 0) {
+    } else if (t.capturedMinor() > 0) {
       expected = PaymentState.CAPTURED;
-    } else if ("payment_declined".equals(o.failureCode())) {
-      expected = PaymentState.DECLINED;
-    } else if (ReauthorizeStep.EXPIRED.equals(o.failureCode())) {
-      expected = PaymentState.EXPIRED;
+    } else if (t.providerPaymentId() != null) {
+      Payment own =
+          atProvider.stream()
+              .filter(p -> p.id().equals(t.providerPaymentId()))
+              .findFirst()
+              .orElseThrow(() -> new AssertionError("provider has no " + t.providerPaymentId()));
+      expected =
+          switch (own.status()) {
+            case DECLINED -> PaymentState.DECLINED;
+            case EXPIRED -> PaymentState.EXPIRED;
+            case VOIDED -> PaymentState.VOIDED;
+            default -> throw new AssertionError(ref + " ended holding " + own);
+          };
     } else {
-      expected = o.paymentId() != null ? PaymentState.VOIDED : PaymentState.CANCELED;
+      assertThat(atProvider)
+          .as("payments the tender of %s never recorded", ref)
+          .noneMatch(
+              p ->
+                  p.status() == PaymentProviderSimulator.Status.AUTHORIZED
+                      || p.captured() > p.refunded());
+      if (atProvider.stream()
+          .anyMatch(p -> p.status() == PaymentProviderSimulator.Status.DECLINED)) {
+        expected = PaymentState.DECLINED;
+      } else if (atProvider.stream()
+          .anyMatch(p -> p.status() == PaymentProviderSimulator.Status.EXPIRED)) {
+        expected = PaymentState.EXPIRED;
+      } else {
+        expected = PaymentState.CANCELED;
+      }
     }
     assertThat(t.state()).as("tender state of %s in %s", ref, o.state()).isEqualTo(expected);
     assertThat(t.state().isSettled()).as("tender of terminal %s", ref).isTrue();
@@ -950,7 +986,7 @@ class SagaChaosProperties {
       assertThat(captures).as("captures for %s", ref).isLessThanOrEqualTo(1);
       assertThat(o.capturedMinor()).as("recorded capture matches provider").isEqualTo(captured);
       assertThat(o.refundedMinor()).as("recorded refund matches provider").isEqualTo(refunded);
-      checkTender(o, tenders.forOrder(o.id()));
+      checkTender(o, tenders.forOrder(o.id()), ps);
       List<Refund> rows = refunds.listForOrder(o.id());
       assertThat(rows).as("refunds of %s settled", ref).allMatch(r -> r.state().isTerminal());
       List<Refund> succeeded =

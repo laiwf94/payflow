@@ -6,11 +6,13 @@ import io.github.laiwf94.payflow.order.OrderRepository;
 import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.StateChange;
+import io.github.laiwf94.payflow.payment.Payment;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -159,7 +161,8 @@ public class SagaWorker implements SmartLifecycle {
   private Order step(Order order, UUID token, boolean resumed) {
     OrderState state = order.state();
     if (order.cancelRequested() && isForward(state)) {
-      return move(order, token, state.compensation(), StepOutcome.Fields.NONE, null, null);
+      return move(
+          order, token, state.compensation(), StepOutcome.Fields.NONE, List.of(), null, null);
     }
     SagaStep step = steps.get(state);
     StepOutcome outcome;
@@ -183,12 +186,38 @@ public class SagaWorker implements SmartLifecycle {
       crash.at("after:" + state);
     }
     return switch (outcome) {
-      case StepOutcome.Advance a -> move(order, token, a.next(), a.fields(), null, null);
+      case StepOutcome.Advance a ->
+          move(order, token, a.next(), a.fields(), a.tenders(), null, null);
       case StepOutcome.Fail f ->
-          move(order, token, f.compensateTo(), StepOutcome.Fields.NONE, f.code(), f.message());
+          move(order, token, f.compensateTo(), f.fields(), f.tenders(), f.code(), f.message());
+      case StepOutcome.Progress p -> progress(order, token, p);
       case StepOutcome.Retry r -> retry(order, token, r);
       case StepOutcome.Await a -> await(order, token, a);
     };
+  }
+
+  /**
+   * Records part of a step's work and keeps the lease, so the same step runs again at once from
+   * where this left off. The attempt count and the step's start stay as they are: progress is not a
+   * new attempt, and the step's timeout covers all of its parts.
+   */
+  private Order progress(Order order, UUID token, StepOutcome.Progress p) {
+    Instant now = clock.instant();
+    OrderState state = order.state();
+    StateChange.Builder b =
+        StateChange.to(state)
+            .attempt(order.attempt())
+            .nextAttemptAt(now)
+            .keepLeaseUntil(now.plus(props.lease()));
+    record(b, p.fields());
+    Optional<Order> updated = transitions.apply(order, token, b.build(), p.tenders(), now);
+    if (updated.isEmpty()) {
+      log.warn("lost the lease on order in {}; another worker has it", state);
+      return null;
+    }
+    meters.counter("payflow.saga.progress", "state", state.name()).increment();
+    crash.at("committed:" + state);
+    return updated.get();
   }
 
   /**
@@ -203,7 +232,9 @@ public class SagaWorker implements SmartLifecycle {
     if (!now.isBefore(a.until())) {
       StepOutcome.Fail f = a.onDeadline();
       log.warn("{} waited until {} with nothing to do: {}", state, a.until(), f.message());
-      return move(order, token, f.compensateTo(), StepOutcome.Fields.NONE, f.code(), f.message());
+      List<Payment> tenders = new ArrayList<>(a.tenders());
+      tenders.addAll(f.tenders());
+      return move(order, token, f.compensateTo(), f.fields(), tenders, f.code(), f.message());
     }
     StateChange.Builder wait = StateChange.to(state).attempt(0).nextAttemptAt(a.until());
     if (a.fields().authorizationExpiresAt() != null) {
@@ -212,7 +243,7 @@ public class SagaWorker implements SmartLifecycle {
     if (a.fields().reauthorizedAt() != null) {
       wait.reauthorizedAt(a.fields().reauthorizedAt());
     }
-    Optional<Order> parked = transitions.apply(order, token, wait.build(), now);
+    Optional<Order> parked = transitions.apply(order, token, wait.build(), a.tenders(), now);
     if (parked.isPresent()) {
       log.info("{} waits until {}: {}", state, a.until(), a.reason());
       meters.counter("payflow.saga.waits", "state", state.name()).increment();
@@ -234,6 +265,7 @@ public class SagaWorker implements SmartLifecycle {
           token,
           state.compensation(),
           StepOutcome.Fields.NONE,
+          List.of(),
           "step_timeout",
           stepName(state) + " did not succeed in time: " + r.reason());
     }
@@ -261,6 +293,7 @@ public class SagaWorker implements SmartLifecycle {
       UUID token,
       OrderState next,
       StepOutcome.Fields f,
+      List<Payment> tenders,
       String failureCode,
       String failureMessage) {
     Instant now = clock.instant();
@@ -268,6 +301,25 @@ public class SagaWorker implements SmartLifecycle {
     if (!next.isTerminal()) {
       b.nextAttemptAt(now).keepLeaseUntil(now.plus(props.lease()));
     }
+    record(b, f);
+    if (failureCode != null) {
+      b.failure(failureCode, failureMessage);
+    }
+    Optional<Order> updated = transitions.apply(order, token, b.build(), tenders, now);
+    if (updated.isEmpty()) {
+      log.warn("lost the lease on order in {}; another worker has it", order.state());
+      return null;
+    }
+    log.info("order {} -> {}", order.state(), next);
+    meters
+        .counter("payflow.saga.transitions", "from", order.state().name(), "to", next.name())
+        .increment();
+    crash.at("committed:" + order.state());
+    return updated.get();
+  }
+
+  /** Puts what a step learned from its dependencies into the write. */
+  private static void record(StateChange.Builder b, StepOutcome.Fields f) {
     if (f.reservationId() != null) {
       b.reservationId(f.reservationId());
     }
@@ -289,20 +341,6 @@ public class SagaWorker implements SmartLifecycle {
     if (f.reauthorizedAt() != null) {
       b.reauthorizedAt(f.reauthorizedAt());
     }
-    if (failureCode != null) {
-      b.failure(failureCode, failureMessage);
-    }
-    Optional<Order> updated = transitions.apply(order, token, b.build(), now);
-    if (updated.isEmpty()) {
-      log.warn("lost the lease on order in {}; another worker has it", order.state());
-      return null;
-    }
-    log.info("order {} -> {}", order.state(), next);
-    meters
-        .counter("payflow.saga.transitions", "from", order.state().name(), "to", next.name())
-        .increment();
-    crash.at("committed:" + order.state());
-    return updated.get();
   }
 
   private static boolean isForward(OrderState s) {

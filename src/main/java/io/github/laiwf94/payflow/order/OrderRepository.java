@@ -24,6 +24,13 @@ import tools.jackson.databind.ObjectMapper;
  *
  * <p>Times are passed in from the caller's clock rather than taken from {@code now()} in SQL, which
  * keeps scheduling testable with a controlled clock.
+ *
+ * <p>Every statement that changes an order's money, payment id, hold times, state or failure also
+ * runs {@code set_config('payflow.payment_writer', 'tenders', true)}, as a condition that is always
+ * true. It tells the database that this transaction writes the order's tenders itself, so the
+ * mirror trigger kept for older binaries must not (see {@code V32__payments_owned.sql}); set inside
+ * the statement it costs no round trip, and it holds until the transaction ends. Callers write the
+ * tenders with {@code PaymentRepository} in the same transaction.
  */
 @Repository
 public class OrderRepository {
@@ -40,7 +47,9 @@ public class OrderRepository {
 
   /**
    * Stores a new order. Returns false, writing nothing, when the merchant already has an order with
-   * the same {@code merchant_reference}.
+   * the same {@code merchant_reference}. The database gives it one tender, {@code pending}, for its
+   * whole amount with its payment method (see {@code V30__payments.sql}); {@link
+   * OrderTransitions#create(Order, List)} splits that into several when asked to.
    *
    * <p>{@code ON CONFLICT DO NOTHING} rather than catching the unique violation: an error would
    * abort the surrounding transaction, and the idempotency filter must still commit the 409 in that
@@ -240,6 +249,7 @@ public class OrderRepository {
                 version = version + 1,
                 updated_at = :now
             WHERE id = :id AND lease_token = :token AND state = :expected
+                AND set_config('payflow.payment_writer', 'tenders', true) = 'tenders'
             RETURNING *
             """)
         .param("state", change.state().name())
@@ -392,6 +402,7 @@ public class OrderRepository {
                              THEN 'REFUNDED' ELSE 'PARTIALLY_REFUNDED' END,
                 version = version + 1, updated_at = :now
             WHERE id = :id AND state IN ('COMPLETED', 'PARTIALLY_REFUNDED')
+                AND set_config('payflow.payment_writer', 'tenders', true) = 'tenders'
             RETURNING *
             """)
         .param("amount", amount)

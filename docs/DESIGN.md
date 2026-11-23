@@ -148,23 +148,73 @@ tender's amount, nothing refunded beyond its capture, and a state that agrees wi
 `payment/Payment` is how the API reads a tender: an order's `payment_method` and `payment` block
 come from its row. The JSON is the same as before the table existed.
 
-The table arrived expand before contract. Today every order has exactly one tender for its whole
-amount, and the saga's steps still keep their working copy of it on the order row (`payment_id`,
-`payment_method`, `captured_minor`, `refunded_minor` and the hold times). Until the steps write
-tenders themselves, an `AFTER INSERT OR UPDATE` trigger on `orders` writes position 1 from that
-copy in the same statement as every write of it. The API reads the order and its tender in one
-transaction, so the two never disagree. The trigger fires only when the copy changes, so claims,
-lease releases, retries and cancel requests write nothing to `payments`. The tender's state comes
-from the money moved first (`refunded`, `partially_refunded`, `captured`). An order with no money
-captured that is past its payment steps says why in its failure code (`declined`, `expired`), or
-else in whether an authorization was recorded (`voided`, or `canceled` when none was).
+#### How the payment steps use the tenders
 
-While the trigger writes the rows, a write the orders table accepts must not fail on `payments`:
-a legal step would then be refused, and the order would be stuck. So the checks on `payments` are
-ones the orders checks already imply. Two rules wait until the steps own the rows:
+The payment steps own the rows. Each works through the tenders one at a time, under the keys
+stored on the row and the tender's own provider reference: the order id for position 1, as before
+split tender, and `<order id>-<position>` for the others, so a lookup by reference finds only that
+tender's payments.
 
-- A tender that holds money has a provider id. Today a reversal can find and refund a capture
-  whose answer was lost, and such an order has no recorded id.
+| Step | Order | What one tender's turn does |
+|---|---|---|
+| Authorize (`INVENTORY_RESERVED`) | position 1 first | Authorizes the first `pending` tender, after a lookup if the step is resumed, and records it `authorized` with its provider id and expiry. A decline or a lapsed hold fails the order: to `REVERSING_PAYMENT` if earlier tenders hold money, or else straight to releasing the stock. |
+| Capture (`PAYMENT_AUTHORIZED`) | position 1 first | Captures the first `authorized` tender for its amount. A refusal or a lapsed hold fails the order into the reversal. |
+| Re-authorize (manual capture, before the hold lapses) | position 1 first | Extends the first tender not yet extended. Once all are, the order waits until the earliest new expiry. |
+| Reverse (`REVERSING_PAYMENT`) | last position first | Looks up the last tender that may still hold money, voids or refunds everything the provider has under its reference, and records how it ended. |
+
+Every tender but the last is recorded with a `Progress` outcome: one fenced write of the tender
+and the order's summary, keeping the lease. The worker then runs the same step again at once. A
+crash or retry therefore resumes at the next tender, and only that tender is looked up. Progress
+is not an attempt and doesn't restart the step's clock, so `max-attempts` and `step-timeout`
+cover the whole step. The last tender's write is the step's ordinary `Advance` or `Fail`. A
+single-tender order makes exactly the calls and commits it made before.
+
+The order row keeps a summary of its tenders, written in the same statement:
+
+- `payment_id`: the first tender's provider id. Refunds are made against it until refund
+  allocation spreads them over tenders.
+- `captured_minor` and `refunded_minor`: the sums.
+- `authorization_expires_at`: the earliest hold to lapse, which is when a manual order must be
+  captured by.
+
+`OrderTransitions.apply` writes the order first, then the tenders. If the order's write is
+fenced, nothing is written. A move to `FAILED` or `CANCELLED` also settles any tender still
+`pending` as `canceled`: the saga never reached it.
+
+A new order gets one `pending` tender for its whole amount from the insert trigger.
+`OrderTransitions.create(order, tenders)` splits that row into several in the same transaction,
+up to 16 tenders, which must add up to the order in its currency. The API takes one tender until
+the tenders array arrives.
+
+#### The mirror for older binaries
+
+The table arrived expand before contract. Before the steps owned the rows, an `AFTER INSERT OR
+UPDATE` trigger on `orders` wrote position 1 from the order row. It ran in the same statement as
+every write of the copy (`payment_id`, `captured_minor`, `refunded_minor`, the hold times, the
+state and the failure code). The tender's state came from the money moved first (`refunded`,
+`partially_refunded`, `captured`). With no money captured, it came from the failure code
+(`declined`, `expired`), or else from whether an authorization was recorded (`voided`, or
+`canceled` when none was).
+
+During a rolling upgrade, a binary from before V32 still writes only the order row. So the update
+trigger stays, but this binary turns it off for its own writes (V32):
+
+- Every `OrderRepository` statement that changes those columns also evaluates
+  `set_config('payflow.payment_writer', 'tenders', true)`, as an always-true condition.
+- The trigger's `WHEN` skips any transaction where that setting is on.
+- The setting lasts only until the transaction ends, so it costs no round trip and never carries
+  over to the next borrower of a pooled connection.
+- The trigger also leaves alone any order with more than one tender.
+
+`SplitTenderSagaTest` checks both sides: a write that sets the flag leaves the tender as the steps
+wrote it, and a write from an older binary is still mirrored.
+
+While the mirror can still write the rows, a write the orders table accepts must not fail on
+`payments`. If it did, a legal step from an older binary would be refused and its order would be
+stuck. Two rules therefore wait for the contract migration that drops the mirror:
+
+- A tender that holds money has a provider id. An older binary's reversal can refund a capture
+  whose answer was lost and record no id.
 - A provider id belongs to one tender. The in-memory simulator restarts its ids.
 
 V31 gives each order that existed before V30 its tender. It walks orders by id in batches of
@@ -174,9 +224,11 @@ Orders the saga writes during the backfill are safe either way. The trigger upse
 current values, and the backfill inserts only where no row exists, so whichever comes second finds
 the other's row. A backfill cut short carries on at the next start. `PaymentsBackfillMigrationTest`
 runs V30 and V31 over 4,513 orders in every state, with one order moved on between the two, and
-runs the backfill a second time to show it adds nothing. `SagaChaosProperties` checks after every
-try that each order's tender agrees with its row: method, amount, provider id, money, hold times,
-keys and state.
+runs the backfill a second time to show it adds nothing. After every try, `SagaChaosProperties` checks each
+order's tender against its row (method, amount, money, hold times, keys) and against the
+provider. The tender's provider id is a payment the provider holds under its reference. Its state
+matches the money, or, with nothing captured, the provider's status for that payment. A tender
+with no provider id must have nothing held at the provider.
 
 ## States, and the database that enforces them
 
