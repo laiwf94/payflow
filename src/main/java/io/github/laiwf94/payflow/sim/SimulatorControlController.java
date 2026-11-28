@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.SplittableRandom;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -32,6 +33,12 @@ class SimulatorControlController {
           "payment.void",
           "payment.refund",
           "payment.lookup",
+          "secondary.authorize",
+          "secondary.reauthorize",
+          "secondary.capture",
+          "secondary.void",
+          "secondary.refund",
+          "secondary.lookup",
           "inventory.reserve",
           "inventory.release",
           "inventory.restock",
@@ -49,7 +56,12 @@ class SimulatorControlController {
       Double earlyExpiryRate) {}
 
   /** The operations that place a hold on a card, and so can have it expire early. */
-  static final Set<String> HOLDS = Set.of("payment.authorize", "payment.reauthorize");
+  static final Set<String> HOLDS =
+      Set.of(
+          "payment.authorize",
+          "payment.reauthorize",
+          "secondary.authorize",
+          "secondary.reauthorize");
 
   record SettingsRequest(
       Boolean honorIdempotencyKeys, Long answerDelayMs, Long authorizationLifetimeMs) {}
@@ -59,6 +71,7 @@ class SimulatorControlController {
   private final Faults faults;
   private final SimulatorSettings settings;
   private final PaymentProviderSimulator payments;
+  private final PaymentProviderSimulator secondary;
   private final InventorySimulator inventory;
   private final ShippingSimulator shipping;
 
@@ -66,11 +79,13 @@ class SimulatorControlController {
       Faults faults,
       SimulatorSettings settings,
       PaymentProviderSimulator payments,
+      @Qualifier(SimulatorConfig.SECONDARY) PaymentProviderSimulator secondary,
       InventorySimulator inventory,
       ShippingSimulator shipping) {
     this.faults = faults;
     this.settings = settings;
     this.payments = payments;
+    this.secondary = secondary;
     this.inventory = inventory;
     this.shipping = shipping;
   }
@@ -133,10 +148,13 @@ class SimulatorControlController {
             "authorization_lifetime_ms", settings.authorizationLifetime().toMillis()));
   }
 
-  /** The issuer drops a live authorization's hold now. 404 when there is none to drop. */
+  /**
+   * The issuer drops a live authorization's hold now, at whichever provider holds {@code id}. 404
+   * when there is none to drop.
+   */
   @PostMapping("/payments/{id}/expire")
   ResponseEntity<?> expire(@PathVariable String id) {
-    if (!payments.expireNow(id)) {
+    if (!payments.expireNow(id) && !secondary.expireNow(id)) {
       throw new SimulatorException(404, "not_found", "no live authorization " + id);
     }
     return ResponseEntity.noContent().build();
@@ -157,9 +175,11 @@ class SimulatorControlController {
   }
 
   /**
-   * Everything the three providers know about one order reference: its payments, every applied
-   * payment operation, the refund objects of its payments, its reservation, the restocks from that
-   * reservation, and its shipment.
+   * Everything the simulated providers know about one order reference: its payments at the first
+   * payment provider, every operation applied to them and their refund objects; the same at the
+   * second provider ({@code secondary_*}); its reservation, the restocks from that reservation, and
+   * its shipment. A tender's reference is the order id, or the order id and its position, so a
+   * split order's later tenders are asked for by their own references.
    */
   @GetMapping("/ledger")
   ResponseEntity<?> ledger(@RequestParam String reference) {
@@ -168,6 +188,12 @@ class SimulatorControlController {
     body.put("payments", ps);
     body.put("payment_operations", payments.ledgerFor(reference));
     body.put("refunds", ps.stream().flatMap(p -> payments.refundsFor(p.id()).stream()).toList());
+    List<PaymentProviderSimulator.Payment> ss = secondary.paymentsFor(reference);
+    body.put("secondary_payments", ss);
+    body.put("secondary_payment_operations", secondary.ledgerFor(reference));
+    body.put(
+        "secondary_refunds",
+        ss.stream().flatMap(p -> secondary.refundsFor(p.id()).stream()).toList());
     body.put("reservation", inventory.reservation(reference).orElse(null));
     body.put("restocks", inventory.restocksOf(reference));
     body.put("shipment", shipping.shipment(reference).orElse(null));
@@ -178,6 +204,7 @@ class SimulatorControlController {
   ResponseEntity<?> reset() {
     faults.reset(new SplittableRandom());
     payments.reset();
+    secondary.reset();
     inventory.reset();
     shipping.reset();
     settings.honorIdempotencyKeys(true);

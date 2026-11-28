@@ -27,6 +27,7 @@ import org.springframework.boot.test.context.SpringBootTest;
     properties = {
       "payflow.simulator.answer-delay=700ms",
       "payflow.dependencies.payment.read-timeout=300ms",
+      "payflow.dependencies.secondary.read-timeout=300ms",
       "payflow.dependencies.inventory.read-timeout=300ms",
       "payflow.dependencies.shipping.read-timeout=300ms"
     })

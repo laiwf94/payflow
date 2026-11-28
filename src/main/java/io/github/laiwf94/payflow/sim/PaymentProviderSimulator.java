@@ -74,6 +74,12 @@ public final class PaymentProviderSimulator {
 
   private record Stored(String fingerprint, Object result) {}
 
+  /** The fault-plan operations of the first provider: {@code payment.authorize} and so on. */
+  public static final String PRIMARY_OPERATIONS = "payment";
+
+  private final String operations;
+  private final String paymentIdPrefix;
+  private final String refundIdPrefix;
   private final Faults faults;
   private final SimulatorSettings settings;
   private final Map<String, Payment> payments = new LinkedHashMap<>();
@@ -94,6 +100,25 @@ public final class PaymentProviderSimulator {
   }
 
   public PaymentProviderSimulator(Faults faults, SimulatorSettings settings, Clock clock) {
+    this(PRIMARY_OPERATIONS, "pay_", "re_", faults, settings, clock);
+  }
+
+  /**
+   * A provider of its own: its payments, refunds, keys and ledger are separate from any other
+   * instance's, its ids start with {@code paymentIdPrefix} and {@code refundIdPrefix}, and its
+   * fault plans are the {@code operations.*} ones ({@code operations.authorize}, {@code
+   * operations.capture} and so on), so faults can be set on one provider without the other.
+   */
+  public PaymentProviderSimulator(
+      String operations,
+      String paymentIdPrefix,
+      String refundIdPrefix,
+      Faults faults,
+      SimulatorSettings settings,
+      Clock clock) {
+    this.operations = operations;
+    this.paymentIdPrefix = paymentIdPrefix;
+    this.refundIdPrefix = refundIdPrefix;
     this.faults = faults;
     this.settings = settings;
     this.defaultClock = clock;
@@ -117,13 +142,13 @@ public final class PaymentProviderSimulator {
     }
     String fp = "authorize|" + reference + "|" + amount + "|" + currency + "|" + method;
     return faults.run(
-        "payment.authorize",
+        op("authorize"),
         () ->
             idempotent(
                 idempotencyKey,
                 fp,
                 () -> {
-                  String id = "pay_" + String.format("%08d", nextId++);
+                  String id = paymentIdPrefix + String.format("%08d", nextId++);
                   String decline = DECLINES.get(method);
                   Instant now = clock.instant();
                   Instant expires =
@@ -141,7 +166,7 @@ public final class PaymentProviderSimulator {
                           expires);
                   payments.put(id, p);
                   if (expires != null) {
-                    lapses.put(id, lapse("payment.authorize", now, expires));
+                    lapses.put(id, lapse(op("authorize"), now, expires));
                   }
                   ledger.add(
                       new LedgerEntry(
@@ -152,7 +177,7 @@ public final class PaymentProviderSimulator {
 
   public Simulated<Payment> capture(String idempotencyKey, String paymentId, long amount) {
     return faults.run(
-        "payment.capture",
+        op("capture"),
         () ->
             idempotent(
                 idempotencyKey,
@@ -180,7 +205,7 @@ public final class PaymentProviderSimulator {
 
   public Simulated<Payment> voidAuthorization(String idempotencyKey, String paymentId) {
     return faults.run(
-        "payment.void",
+        op("void"),
         () ->
             idempotent(
                 idempotencyKey,
@@ -207,7 +232,7 @@ public final class PaymentProviderSimulator {
    */
   public Simulated<Payment> reauthorize(String idempotencyKey, String paymentId) {
     return faults.run(
-        "payment.reauthorize",
+        op("reauthorize"),
         () ->
             idempotent(
                 idempotencyKey,
@@ -229,7 +254,7 @@ public final class PaymentProviderSimulator {
                           p.declineCode(),
                           expires);
                   payments.put(p.id(), r);
-                  lapses.put(p.id(), lapse("payment.reauthorize", now, expires));
+                  lapses.put(p.id(), lapse(op("reauthorize"), now, expires));
                   ledger.add(new LedgerEntry("reauthorize", p.id(), p.reference(), p.amount()));
                   return r;
                 }));
@@ -256,7 +281,7 @@ public final class PaymentProviderSimulator {
       String idempotencyKey, String paymentId, long amount, String reference) {
     requireText(reference, "reference");
     return faults.run(
-        "payment.refund",
+        op("refund"),
         () ->
             idempotent(
                 idempotencyKey,
@@ -271,7 +296,10 @@ public final class PaymentProviderSimulator {
                   with(p, Status.CAPTURED, p.captured(), p.refunded() + amount);
                   Refund r =
                       new Refund(
-                          "re_" + String.format("%08d", nextRefundId++), p.id(), reference, amount);
+                          refundIdPrefix + String.format("%08d", nextRefundId++),
+                          p.id(),
+                          reference,
+                          amount);
                   refunds.put(r.id(), r);
                   ledger.add(new LedgerEntry("refund", p.id(), p.reference(), amount));
                   return r;
@@ -282,7 +310,7 @@ public final class PaymentProviderSimulator {
   /** Every refund of a payment, oldest first. */
   public Simulated<List<Refund>> findRefunds(String paymentId) {
     return faults.run(
-        "payment.lookup",
+        op("lookup"),
         () -> {
           synchronized (this) {
             find(paymentId);
@@ -297,7 +325,7 @@ public final class PaymentProviderSimulator {
 
   /** Every payment ever created for a reference, oldest first. */
   public Simulated<List<Payment>> findByReference(String reference) {
-    return faults.run("payment.lookup", () -> paymentsFor(reference));
+    return faults.run(op("lookup"), () -> paymentsFor(reference));
   }
 
   public synchronized List<Payment> paymentsFor(String reference) {
@@ -328,6 +356,11 @@ public final class PaymentProviderSimulator {
     clock = defaultClock;
     nextId = 1;
     nextRefundId = 1;
+  }
+
+  /** The fault-plan operation {@code name} of this provider, such as {@code payment.capture}. */
+  private String op(String name) {
+    return operations + "." + name;
   }
 
   private Payment idempotent(String key, String fingerprint, Supplier<Payment> effect) {

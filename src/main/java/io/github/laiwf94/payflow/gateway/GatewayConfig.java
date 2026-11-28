@@ -3,6 +3,8 @@ package io.github.laiwf94.payflow.gateway;
 import io.github.laiwf94.payflow.api.ApiConfig;
 import io.github.laiwf94.payflow.sim.SimulatorKey;
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.ObjectProvider;
@@ -15,7 +17,7 @@ import org.springframework.web.client.RestClient;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.ObjectMapper;
 
-/** HTTP clients for the payment provider, inventory and carrier. */
+/** HTTP clients for the payment providers, inventory and carrier. */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(DependencyProperties.class)
 public class GatewayConfig {
@@ -54,6 +56,36 @@ public class GatewayConfig {
       ObjectMapper json) {
     return new HttpPaymentGateway(
         dependency("payment", "/sim/payments", props.payment(), port, simKey, builder, json));
+  }
+
+  /**
+   * Every payment provider by the name tenders record: the first always, the second when it has a
+   * base URL or the in-process simulator can stand in for it.
+   */
+  @Bean
+  PaymentProviders paymentProviders(
+      PaymentGateway primary,
+      DependencyProperties props,
+      LocalPort port,
+      ObjectProvider<SimulatorKey> simKey,
+      RestClient.Builder builder,
+      ObjectMapper json) {
+    Map<String, PaymentGateway> byName = new LinkedHashMap<>();
+    byName.put(PaymentProviders.PRIMARY, primary);
+    if (!props.secondary().baseUrl().isBlank() || simKey.getIfAvailable() != null) {
+      byName.put(
+          PaymentProviders.SECONDARY,
+          new HttpSecondaryPaymentGateway(
+              dependency(
+                  "secondary",
+                  "/sim/secondary/payments",
+                  props.secondary(),
+                  port,
+                  simKey,
+                  builder,
+                  json)));
+    }
+    return new PaymentProviders(byName);
   }
 
   @Bean

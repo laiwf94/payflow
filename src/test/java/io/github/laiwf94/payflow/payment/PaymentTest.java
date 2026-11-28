@@ -19,6 +19,7 @@ class PaymentTest {
         position,
         "pm_card_ok",
         Payment.PRIMARY_PROVIDER,
+        Payment.DEFAULT_RULE,
         Money.of(1000, "EUR"),
         PaymentState.CAPTURED,
         "pay_1",

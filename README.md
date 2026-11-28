@@ -229,6 +229,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 | Refund bounds | Raw SQL refunds race each other in `READ COMMITTED` and `SERIALIZABLE`; the database never lets them add up to more than the capture, or return more of a line than was bought. Ten requests for 6.00 of a 25.00 order race through the service, and exactly four are made. Over HTTP, ten amount refunds and six one-mug refunds of a two-mug order race: exactly four and two are made, the rest are `409`, and the provider holds exactly those refunds. A line refund is priced from the order's lines, however its units are split. |
 | Refund worker | Partial refunds settle on their own and add up to a full one, each with its `refund.created` and `refund.succeeded` events under versions of their own; a refused refund fails and frees its share; an unavailable provider is retried with backoff; a worker killed after the provider refunded, with key handling off, is resumed without a second refund; a stale lease can't settle; `SIGTERM` hands back a refund still waiting for the provider. |
 | Split refunds | Each allocation policy on orders paid with two or three tenders: shares made in the policy's order at each tender's own payment and recorded one by one, each tender refunded no more than it captured, and the rest always balancing to a full refund. A tender that refuses leaves the refund `PARTIALLY_FAILED` with the rest free to refund again; every tender refusing fails it whole and frees its lines; a partly failed line refund restocks once. A crash after a share was recorded, and another after the provider refunded but before the share was, resume without a second refund, with the provider's key handling off. The database refuses shares over a tender's capture, shares that don't add up, another order's tender and a refund settled ahead of its shares. A refund the previous release created is split when first claimed, and one it settles has its share settled with it. A property checks every policy over 2,000 random sets of 1 to 16 tenders. |
+| Routing | Router rules on currency, method and merchant: first match wins, every set condition must hold, prefixes and exact methods, the default route, and a decision counted per provider and rule; a configuration with an unknown provider, a duplicate, malformed or reserved id, no condition, a bad currency, method or merchant, or over 100 rules is refused at startup. The second provider's adapter against its simulator over real sockets: a whole payment life there and none at the first, refusals as the first provider's decline codes, its numeric error codes as the codes the steps act on, outages and lost answers classified the same way, fault plans of its own, its own wire format, and bodies it would never send refused. End to end on both simulators: a euro card order runs wholly at the second provider, a tender no rule matches takes the default, a split order pays each tender at its own provider, a decline at the second voids the tender held at the first, lost answers there are found and not repeated, and a split refund goes back through each tender's provider. The database refuses a malformed rule, and an older binary's insert still gets the default route. |
 | Timers | Real Postgres: a timer fires at its due time and not a microsecond before, once; a failing handler's writes roll back and it is retried with full-jitter backoff without giving up; a reschedule or cancel after the claim fences the fire out, and a cancel waits for a fire that is committing; a crash mid-fire rolls back and the timer fires once when the lease runs out; a stop gives back unstarted claims at once and leaves a fire in flight to finish. Four instances fire 3,000 timers due within one second exactly once each and none early, while one crashes mid-fire and another is replaced. Schedules commit or roll back with the caller's transaction, and need one. Raw SQL can't store a malformed timer. |
 | Holds that run out | Real steps over HTTP, the wired expiry handlers and one clock for the saga and timer workers: stock held past the reservation window is released and the order cancelled once, not a microsecond early; an authorized order is voided; an order stuck before reserving is cancelled at the end of its payment window; a paid order leaves no timer behind; the first reason to cancel is kept; a timer that fires after the order moved on changes nothing; a fenced move keeps its timers; a fire holding its timer while the saga captures neither deadlocks nor keeps the money. The packaged jar is killed with `SIGKILL` inside a 5 s window and the next instance cancels the order once, no earlier than it was due. Raw SQL can't store a cancel reason without a cancel. |
 | Manual capture | Real steps over HTTP and one clock: a manual order waits authorized, unleased and off the due list, with no hold timers, until the capture request, then captures and ships once; asking twice gives the same answer; automatic, unauthorized, cancelling and expired orders are refused and nothing is written; an authorization nobody captures fails the order at its expiry, not a microsecond early, voided with its stock released; a cancel while waiting voids it; a capture or cancel landing between the step's read and its wait still leaves the order due now; a capture asked for 50 minutes after authorizing gets the whole 2-minute step timeout. Raw SQL can't ask a non-manual order to capture. |
@@ -252,7 +253,7 @@ Errors look like `{"error":{"code":"...","message":"...","request_id":"..."}}` w
 All of it runs against real Postgres and Redpanda through Testcontainers.
 
 ```console
-$ ./gradlew check          # format, Error Prone, 616 tests, 90% line coverage floor (currently 94%)
+$ ./gradlew check          # format, Error Prone, 638 tests, 90% line coverage floor (currently 94%)
 $ ./bench/run.sh           # end-to-end benchmark
 $ ./bench/timers.sh        # 10,000 timers due in one second, three instances
 ```
@@ -297,7 +298,9 @@ src/main/java/io/github/laiwf94/payflow/
   order       Order, the state machine, the repository and the service the API calls
   payment     Payment, one row per tender of an order, and its repository
   saga        worker, leases, backoff, step contract; saga/steps holds each step
-  gateway     payment, inventory and shipping interfaces, HTTP adapters, outcome rules
+  gateway     payment, inventory and shipping interfaces, HTTP adapters for both payment
+              providers, the providers by name, outcome rules
+  routing     the router that picks each tender's payment provider
   outbox      outbox writer and Kafka relay
   timeline    idempotent consumer and the order timeline
   idempotency Idempotency-Key filter and store
@@ -305,7 +308,8 @@ src/main/java/io/github/laiwf94/payflow/
   webhook     merchant webhook endpoints, event types, URL rules, the SSRF-safe sender, signing
               and the delivery dispatcher
   api         controllers, request ids, errors, body limit
-  sim         the fake providers and their control API
+  sim         the fake providers (two payment providers with different APIs) and their control
+              API
 src/main/resources/db/migration   Flyway migrations
 examples/demo.sh                  failure scenarios against docker compose
 examples/rolling-restart.py       10,000 orders paged across two instances while both restart

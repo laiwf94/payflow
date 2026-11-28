@@ -5,6 +5,8 @@ import io.github.laiwf94.payflow.money.Money;
 import io.github.laiwf94.payflow.outbox.OutboxWriter;
 import io.github.laiwf94.payflow.payment.Payment;
 import io.github.laiwf94.payflow.payment.PaymentRepository;
+import io.github.laiwf94.payflow.routing.Router;
+import io.github.laiwf94.payflow.routing.RoutingDecision;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,13 +47,19 @@ public class OrderTransitions {
   private final OutboxWriter outbox;
   private final OrderHolds holds;
   private final PaymentRepository payments;
+  private final Router router;
 
   public OrderTransitions(
-      OrderRepository repo, OutboxWriter outbox, OrderHolds holds, PaymentRepository payments) {
+      OrderRepository repo,
+      OutboxWriter outbox,
+      OrderHolds holds,
+      PaymentRepository payments,
+      Router router) {
     this.repo = repo;
     this.outbox = outbox;
     this.holds = holds;
     this.payments = payments;
+    this.router = router;
   }
 
   /** A tender of a new order: {@code amount} of it paid with {@code method}. */
@@ -70,6 +78,11 @@ public class OrderTransitions {
    * Stores a new order, one payment row per tender (authorized in the order given), its {@code
    * order.created} event and the timer that cancels it if it is not paid in time. Returns false,
    * writing nothing, when the merchant already has an order with the same reference.
+   *
+   * <p>Each tender is routed here, once: the {@link Router} picks its provider from the merchant,
+   * the tender's currency and its method, and the row records the provider and the rule that chose
+   * it. A single tender the default route sends to the first provider is the row the order's insert
+   * already made, so it costs no extra statement.
    *
    * @throws IllegalArgumentException when there are no tenders, more than 16, or their amounts are
    *     not in the order's currency or don't add up to its amount
@@ -90,14 +103,22 @@ public class OrderTransitions {
     if (!repo.insert(order)) {
       return false;
     }
-    if (tenders.size() > 1) {
-      List<Payment> rows = new ArrayList<>(tenders.size());
-      for (int i = 0; i < tenders.size(); i++) {
-        Tender t = tenders.get(i);
-        rows.add(
-            Payment.create(
-                UUID.randomUUID(), order.id(), i + 1, t.method(), t.amount(), order.createdAt()));
-      }
+    List<Payment> rows = new ArrayList<>(tenders.size());
+    for (int i = 0; i < tenders.size(); i++) {
+      Tender t = tenders.get(i);
+      RoutingDecision d = router.route(order.merchantId(), t.amount().currencyCode(), t.method());
+      rows.add(
+          Payment.create(
+              UUID.randomUUID(),
+              order.id(),
+              i + 1,
+              t.method(),
+              d.provider(),
+              d.rule(),
+              t.amount(),
+              order.createdAt()));
+    }
+    if (rows.size() > 1 || !rows.getFirst().defaultRoute()) {
       payments.split(rows);
     }
     outbox.write(CREATED, order, null, order.createdAt());

@@ -1,8 +1,8 @@
 package io.github.laiwf94.payflow.saga.steps;
 
 import io.github.laiwf94.payflow.gateway.CallResult;
-import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.order.Order;
@@ -44,19 +44,19 @@ import org.springframework.stereotype.Component;
 @Component
 class AuthorizePaymentStep implements SagaStep {
 
-  private final PaymentGateway payments;
+  private final PaymentProviders providers;
   private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
   private final HoldProperties holds;
 
   AuthorizePaymentStep(
-      PaymentGateway payments,
+      PaymentProviders providers,
       PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown,
       HoldProperties holds) {
-    this.payments = payments;
+    this.providers = providers;
     this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
@@ -84,7 +84,8 @@ class AuthorizePaymentStep implements SagaStep {
     }
     Payment t = next.get();
     if (resumed) {
-      CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
+      CallResult<List<PaymentInfo>> found =
+          providers.get(t.provider()).findByReference(t.providerReference());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
         return new StepOutcome.Retry(
             "payment lookup failed: " + found, props.unknownOutcomeDelay());
@@ -120,7 +121,9 @@ class AuthorizePaymentStep implements SagaStep {
       unknown.resolved("authorize", false);
     }
     CallResult<PaymentInfo> result =
-        payments.authorize(t.authorizeKey(), t.providerReference(), t.amount(), t.method());
+        providers
+            .get(t.provider())
+            .authorize(t.authorizeKey(), t.providerReference(), t.amount(), t.method());
     return switch (result) {
       case CallResult.Success<PaymentInfo> s -> authorized(order, all, t, s.value());
       case CallResult.Rejected<PaymentInfo> r -> declined(all, t, r.code());

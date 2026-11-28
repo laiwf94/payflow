@@ -13,6 +13,10 @@ import java.util.UUID;
  * same transaction as the order's own step write, so the order's money columns are always the sum
  * of its tenders'. The provider knows the tender by {@link #providerReference()}.
  *
+ * @param provider the provider this tender's money goes through, chosen once when its order was
+ *     created ({@link io.github.laiwf94.payflow.routing.Router})
+ * @param routingRule the routing rule that chose {@code provider}, or {@value #DEFAULT_RULE} when
+ *     none matched
  * @param providerPaymentId the provider's id for the authorization, once it is known
  * @param authorizeKey the idempotency key every authorization attempt for this tender sends
  * @param captureKey the idempotency key every capture attempt for this tender sends
@@ -29,6 +33,7 @@ public record Payment(
     int position,
     String method,
     String provider,
+    String routingRule,
     Money amount,
     PaymentState state,
     String providerPaymentId,
@@ -42,12 +47,16 @@ public record Payment(
     Instant createdAt,
     Instant updatedAt) {
 
-  /** The provider every tender goes to until routing chooses between several. */
+  /** The provider a tender goes to when nothing routed it elsewhere. */
   public static final String PRIMARY_PROVIDER = "primary";
 
+  /** The routing rule recorded on a tender that no rule matched, and on every older tender. */
+  public static final String DEFAULT_RULE = "default";
+
   public Payment {
-    if (amount == null || state == null) {
-      throw new IllegalArgumentException("a tender needs an amount and a state");
+    if (amount == null || state == null || provider == null || routingRule == null) {
+      throw new IllegalArgumentException(
+          "a tender needs a provider, a routing rule, an amount and a state");
     }
     if (position < 1) {
       throw new IllegalArgumentException("position starts at 1: " + position);
@@ -70,13 +79,30 @@ public record Payment(
    */
   public static Payment create(
       UUID id, UUID orderId, int position, String method, Money amount, Instant now) {
+    return create(id, orderId, position, method, PRIMARY_PROVIDER, DEFAULT_RULE, amount, now);
+  }
+
+  /**
+   * {@link #create(UUID, UUID, int, String, Money, Instant)}, routed to {@code provider} by rule
+   * {@code routingRule}.
+   */
+  public static Payment create(
+      UUID id,
+      UUID orderId,
+      int position,
+      String method,
+      String provider,
+      String routingRule,
+      Money amount,
+      Instant now) {
     String suffix = position == 1 ? "" : "-" + position;
     return new Payment(
         id,
         orderId,
         position,
         method,
-        PRIMARY_PROVIDER,
+        provider,
+        routingRule,
         amount,
         PaymentState.PENDING,
         null,
@@ -98,6 +124,11 @@ public record Payment(
    */
   public String providerReference() {
     return position == 1 ? orderId.toString() : orderId + "-" + position;
+  }
+
+  /** True when the tender went where any tender goes without routing rules. */
+  public boolean defaultRoute() {
+    return PRIMARY_PROVIDER.equals(provider) && DEFAULT_RULE.equals(routingRule);
   }
 
   /** What the tender holds of the customer's money after refunds, in minor units. */
@@ -160,6 +191,7 @@ public record Payment(
         position,
         method,
         provider,
+        routingRule,
         amount,
         state,
         providerPaymentId,

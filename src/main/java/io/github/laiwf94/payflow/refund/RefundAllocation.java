@@ -11,6 +11,7 @@ import java.util.UUID;
  * refund has at most one share per tender.
  *
  * @param state {@code PENDING}, then {@code SUCCEEDED} or {@code FAILED}
+ * @param provider the tender's provider, which the share is made at
  * @param providerPaymentId the tender's payment at the provider, absent if it was never recorded
  */
 public record RefundAllocation(
@@ -19,6 +20,7 @@ public record RefundAllocation(
     int seq,
     int position,
     String method,
+    String provider,
     String providerPaymentId,
     long amountMinor,
     RefundState state,

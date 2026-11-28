@@ -134,7 +134,7 @@ An order is paid by one or more tenders: a gift card and a card, say. Each has a
 | Columns | Meaning |
 |---|---|
 | `order_id`, `position` | The order and the tender's place in it; unique together. |
-| `method`, `provider` | What pays and who processes it. Every tender goes to `primary` until routing chooses between providers. |
+| `method`, `provider`, `routing_rule` | What pays, which provider processes it, and the routing rule that chose that provider (`default` when none matched; see [Routing between providers](#routing-between-providers)). |
 | `amount_minor`, `currency` | The tender's share of the order total. |
 | `state` | `pending`, `authorized`, `captured`, `partially_refunded`, `refunded`, `voided`, `expired`, `declined` or `canceled`. |
 | `provider_payment_id` | The provider's id for the authorization, once known. |
@@ -185,6 +185,85 @@ A new order gets one `pending` tender for its whole amount from the insert trigg
 `OrderTransitions.create(order, tenders)` splits that row into several in the same transaction,
 up to 16 tenders, which must add up to the order in its currency. The API takes one tender until
 the tenders array arrives.
+
+#### Routing between providers
+
+payflow can call two payment providers. `primary` is `payflow.dependencies.payment`, as before.
+`secondary` is `payflow.dependencies.secondary`, and it exists only when it has a base URL or the
+in-process simulator runs. `gateway/PaymentProviders` holds them by the name a tender records.
+Every payment and refund step calls the provider its tender names, so one order can hold money at
+both: a gift card at the first and a card at the second, say.
+
+`routing/Router` picks each tender's provider once, in the order's insert transaction
+(`OrderTransitions.create`), from `payflow.routing`:
+
+```yaml
+payflow:
+  routing:
+    default-provider: primary
+    rules:
+      - id: eur-cards          # recorded on each tender it routes
+        provider: secondary
+        currencies: [EUR]
+        methods: [pm_card_*]   # exact, or a prefix ending in *
+      - id: globex-all
+        provider: secondary
+        merchants: [globex]
+```
+
+The first rule whose conditions all hold decides. An empty list sets no condition, but a rule must
+set at least one; to send everything elsewhere, change `default-provider`. A tender no rule matches
+goes to the default with `routing_rule = 'default'`. The configuration is checked at startup and
+the process refuses to start on any of these: a provider that isn't configured, a duplicate or
+malformed id, the id `default`, a rule with no condition, a malformed currency, method or
+merchant, or more than 100 rules. Each decision counts on
+`payflow.routing.decisions{provider, rule}`.
+
+The decision is stored and never made again. The saga, the refund worker, a resumed step on
+another instance, and a step after a restart with different rules all call the provider the row
+names. Changing the rules changes where new tenders go and nothing else. Removing a provider that
+tenders still use doesn't misroute them: their steps fail with "payment provider ... is not
+configured" and retry until it is put back.
+
+Cost: a single tender on the default route to `primary` is the row the insert trigger already
+wrote, so it costs no extra statement. Any other single tender costs one `UPDATE` of that row in
+the same transaction, as split tender already does.
+
+Rolling upgrade: V35 adds `routing_rule` with a constant default, which is a catalog change with
+no table rewrite. Rows from before it, and rows an older binary's insert trigger writes, read
+`default`, which is what happened to them. An older binary knows only `primary`. It would send a
+tender routed to `secondary` to the wrong provider if it resumed that tender's step. So rules that
+name `secondary` should be turned on only once every instance runs this release. With no rules,
+which is the default, routing changes nothing.
+
+The second simulator (`/sim/secondary/payments`) has the same state machine as the first, its own
+payments, keys, refunds and ledger, and `secondary.*` fault plans, so faults can hit one provider
+without the other. It speaks a different dialect, and the adapter (`HttpSecondaryPaymentGateway`)
+translates it so the steps can't tell the two apart:
+
+| | First provider | Second provider |
+|---|---|---|
+| Bodies | snake_case, amounts in minor units | camelCase, amounts as `{"value", "currency"}` |
+| Payment id | `pay_...` | `pspReference`, `psp_...` |
+| Declined authorization | `402` with `error.decline_code` | `200` with `resultCode: Refused` and a numeric `refusalReasonCode` (`2`, `12`, `6`) |
+| Errors | `{"error": {"code", "message"}}`, 400/404/409 | `{"status", "errorCode", "errorType", "message"}`, 422 or 404, numeric codes (`169` is an expired authorization, `168` already captured, `167` the wrong state) |
+| Capture, extend, void | `POST /{id}/capture`, `/reauthorize`, `/void` | `POST /{psp}/captures`, `/extensions`, `/cancels` |
+| Statuses | `AUTHORIZED`, `DECLINED`, `CAPTURED`, `VOIDED`, `EXPIRED` | `authorised`, `refused`, `captured`, `cancelled`, `expired` |
+
+An error code the adapter doesn't know comes through as `secondary_<code>`, so it still says where
+it came from. A status or body it doesn't recognize is an error, and the step retries rather than
+guess. Timeouts, 5xx, 503 and 429 go through the same `HttpDependency` rules as the first
+provider's, so unknown outcomes work the same at both. `SecondaryGatewayHttpTest` covers the
+adapter over real sockets. `RoutingSagaTest` runs routed orders end to end on both simulators:
+
+- a euro card order completes at the second provider alone
+- a split order pays each tender at its own provider
+- a decline at the second provider voids the tender held at the first
+- lost answers at the second provider are found there and not repeated
+- a split refund returns each share through its tender's provider
+
+The control API's ledger shows both providers (`secondary_payments`,
+`secondary_payment_operations`, `secondary_refunds`). `reset` clears both.
 
 #### The mirror for older binaries
 
@@ -1401,6 +1480,7 @@ response without the other fails the build.
 | Forward step limit | 8 attempts or 2 min | `payflow.saga.max-attempts`, `step-timeout` |
 | Delay before resolving an unknown outcome | 2 s | `payflow.saga.unknown-outcome-delay` |
 | Dependency connect / read timeout | 500 ms / 2 s | `payflow.dependencies.*` |
+| Routing rules / rule id | 100 / 1-64 of `a-z 0-9 _ -`, starting with a letter | `Router.MAX_RULES`, `payments_routing_rule_format` |
 | Outbox batch / send timeout / retention | 100 orders / 10 s / 7 days | `payflow.outbox.*` |
 | Inbox retention | 14 days | `TimelineProjection.INBOX_RETENTION` |
 | Events returned per timeline | 1,000 | `TimelineProjection.forOrder` |

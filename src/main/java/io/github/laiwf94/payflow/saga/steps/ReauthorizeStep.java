@@ -1,8 +1,8 @@
 package io.github.laiwf94.payflow.saga.steps;
 
 import io.github.laiwf94.payflow.gateway.CallResult;
-import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.order.Order;
@@ -46,19 +46,19 @@ class ReauthorizeStep {
   /** The provider's code for a capture or extension of a hold that has lapsed. */
   static final String EXPIRED = "authorization_expired";
 
-  private final PaymentGateway payments;
+  private final PaymentProviders providers;
   private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
   private final HoldProperties holds;
 
   ReauthorizeStep(
-      PaymentGateway payments,
+      PaymentProviders providers,
       PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown,
       HoldProperties holds) {
-    this.payments = payments;
+    this.providers = providers;
     this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
@@ -78,7 +78,8 @@ class ReauthorizeStep {
             ? t.authorizationExpiresAt()
             : order.authorizationExpiresAt();
     if (resumed) {
-      CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
+      CallResult<List<PaymentInfo>> found =
+          providers.get(t.provider()).findByReference(t.providerReference());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
         return new StepOutcome.Retry(
             "payment lookup failed: " + found, props.unknownOutcomeDelay());
@@ -102,7 +103,9 @@ class ReauthorizeStep {
       }
       unknown.resolved("reauthorize", false);
     }
-    return switch (payments.reauthorize(t.reauthorizeKey(), t.providerPaymentId())) {
+    return switch (providers
+        .get(t.provider())
+        .reauthorize(t.reauthorizeKey(), t.providerPaymentId())) {
       case CallResult.Success<PaymentInfo> s -> extended(order, all, t, s.value());
       case CallResult.Rejected<PaymentInfo> r ->
           EXPIRED.equals(r.code()) ? lapsed() : refused(r.code());

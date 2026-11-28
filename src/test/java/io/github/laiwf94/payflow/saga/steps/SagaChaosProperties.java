@@ -3,6 +3,7 @@ package io.github.laiwf94.payflow.saga.steps;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.laiwf94.payflow.PayflowApplication;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.hold.ExpiryHandler;
 import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.hold.OrderHolds;
@@ -343,7 +344,7 @@ class SagaChaosProperties {
             Duration.ofSeconds(1),
             Duration.ofSeconds(5));
     UnknownOutcomes unknown = new UnknownOutcomes(new SimpleMeterRegistry());
-    var pay = DirectGateways.payments(payments);
+    var pay = PaymentProviders.of(DirectGateways.payments(payments));
     PaymentRepository tenderRows = new PaymentRepository(jdbc);
     var inv = DirectGateways.inventory(inventory);
     var ship = DirectGateways.shipping(shipping);

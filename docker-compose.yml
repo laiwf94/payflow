@@ -65,6 +65,9 @@ services:
       PAYFLOW_SIMULATOR_ENABLED: "false"
       PAYFLOW_DEPENDENCIES_PAYMENT_BASE_URL: http://simulator:8090/sim/payments
       PAYFLOW_DEPENDENCIES_PAYMENT_API_KEY: sim_demo_key_0123456789abcdef
+      # The second payment provider; tenders go there only when routing rules say so.
+      PAYFLOW_DEPENDENCIES_SECONDARY_BASE_URL: http://simulator:8090/sim/secondary/payments
+      PAYFLOW_DEPENDENCIES_SECONDARY_API_KEY: sim_demo_key_0123456789abcdef
       PAYFLOW_DEPENDENCIES_INVENTORY_BASE_URL: http://simulator:8090/sim/inventory/reservations
       PAYFLOW_DEPENDENCIES_INVENTORY_API_KEY: sim_demo_key_0123456789abcdef
       PAYFLOW_DEPENDENCIES_SHIPPING_BASE_URL: http://simulator:8090/sim/shipping/shipments

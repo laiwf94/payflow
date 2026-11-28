@@ -21,6 +21,7 @@ import org.springframework.core.env.MapPropertySource;
   SimulatorConfig.class,
   SimulatorErrors.class,
   PaymentSimulatorController.class,
+  SecondaryProviderController.class,
   InventorySimulatorController.class,
   ShippingSimulatorController.class,
   SimulatorControlController.class

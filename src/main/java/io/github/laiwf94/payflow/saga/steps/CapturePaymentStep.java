@@ -1,8 +1,8 @@
 package io.github.laiwf94.payflow.saga.steps;
 
 import io.github.laiwf94.payflow.gateway.CallResult;
-import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.hold.HoldProperties;
 import io.github.laiwf94.payflow.order.CaptureMode;
@@ -52,7 +52,7 @@ import org.springframework.stereotype.Component;
 @Component
 class CapturePaymentStep implements SagaStep {
 
-  private final PaymentGateway payments;
+  private final PaymentProviders providers;
   private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
@@ -60,13 +60,13 @@ class CapturePaymentStep implements SagaStep {
   private final ReauthorizeStep reauthorize;
 
   CapturePaymentStep(
-      PaymentGateway payments,
+      PaymentProviders providers,
       PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown,
       HoldProperties holds,
       ReauthorizeStep reauthorize) {
-    this.payments = payments;
+    this.providers = providers;
     this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
@@ -123,7 +123,8 @@ class CapturePaymentStep implements SagaStep {
     }
     Payment t = next.get();
     if (resumed) {
-      CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
+      CallResult<List<PaymentInfo>> found =
+          providers.get(t.provider()).findByReference(t.providerReference());
       if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
         return new StepOutcome.Retry(
             "payment lookup failed: " + found, props.unknownOutcomeDelay());
@@ -146,7 +147,9 @@ class CapturePaymentStep implements SagaStep {
       unknown.resolved("capture", false);
     }
     long amount = t.amount().minorUnits();
-    return switch (payments.capture(t.captureKey(), t.providerPaymentId(), amount)) {
+    return switch (providers
+        .get(t.provider())
+        .capture(t.captureKey(), t.providerPaymentId(), amount)) {
       case CallResult.Success<PaymentInfo> s -> captured(all, t, s.value());
       case CallResult.Rejected<PaymentInfo> r ->
           ReauthorizeStep.EXPIRED.equals(r.code()) ? lapsed(all, t) : refused(all, r.code());

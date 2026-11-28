@@ -24,6 +24,7 @@ class OrderResponseTest {
         1,
         "pm_tender",
         Payment.PRIMARY_PROVIDER,
+        Payment.DEFAULT_RULE,
         o.amount(),
         providerId == null ? PaymentState.PENDING : PaymentState.CAPTURED,
         providerId,

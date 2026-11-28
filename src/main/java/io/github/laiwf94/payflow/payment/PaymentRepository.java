@@ -39,7 +39,8 @@ public class PaymentRepository {
   /**
    * Makes a new order's single tender, the one the database gave it for the whole amount, into the
    * first of {@code tenders} and adds the others, in the order's insert transaction. The first
-   * keeps its row and its keys; positions run from 1 in the order given.
+   * keeps its row and its keys but takes the method, amount and routing of {@code tenders}' first;
+   * positions run from 1 in the order given. With one tender this only routes it.
    *
    * @throws IllegalStateException when the order has no single pending tender to split
    */
@@ -48,7 +49,8 @@ public class PaymentRepository {
     int n =
         jdbc.sql(
                 """
-                UPDATE payments SET method = :method, amount_minor = :amount, currency = :currency
+                UPDATE payments SET method = :method, amount_minor = :amount, currency = :currency,
+                    provider = :provider, routing_rule = :rule
                 WHERE order_id = :order AND position = 1 AND state = 'pending'
                   AND NOT EXISTS (
                       SELECT 1 FROM payments o WHERE o.order_id = :order AND o.position > 1)
@@ -56,6 +58,8 @@ public class PaymentRepository {
             .param("method", first.method())
             .param("amount", first.amount().minorUnits())
             .param("currency", first.amount().currencyCode())
+            .param("provider", first.provider())
+            .param("rule", first.routingRule())
             .param("order", first.orderId())
             .update();
     if (n != 1) {
@@ -64,11 +68,12 @@ public class PaymentRepository {
     for (Payment p : tenders.subList(1, tenders.size())) {
       jdbc.sql(
               """
-              INSERT INTO payments (id, order_id, position, method, provider, amount_minor,
-                  currency, state, provider_payment_id, authorize_key, capture_key,
+              INSERT INTO payments (id, order_id, position, method, provider, routing_rule,
+                  amount_minor, currency, state, provider_payment_id, authorize_key, capture_key,
                   reauthorize_key, captured_minor, refunded_minor, authorization_expires_at,
                   reauthorized_at, created_at, updated_at)
-              VALUES (:id, :order, :position, :method, :provider, :amount, :currency, :state,
+              VALUES (:id, :order, :position, :method, :provider, :rule, :amount, :currency,
+                  :state,
                   :providerPaymentId, :authorizeKey, :captureKey, :reauthorizeKey, :captured,
                   :refunded, :expires, :reauthorizedAt, :createdAt, :updatedAt)
               """)
@@ -77,6 +82,7 @@ public class PaymentRepository {
           .param("position", p.position())
           .param("method", p.method())
           .param("provider", p.provider())
+          .param("rule", p.routingRule())
           .param("amount", p.amount().minorUnits())
           .param("currency", p.amount().currencyCode())
           .param("state", p.state().code())
@@ -200,6 +206,7 @@ public class PaymentRepository {
         rs.getInt("position"),
         rs.getString("method"),
         rs.getString("provider"),
+        rs.getString("routing_rule"),
         Money.of(rs.getLong("amount_minor"), rs.getString("currency")),
         PaymentState.fromCode(rs.getString("state")),
         rs.getString("provider_payment_id"),

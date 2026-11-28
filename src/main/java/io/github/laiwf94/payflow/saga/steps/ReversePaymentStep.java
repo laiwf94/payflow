@@ -1,8 +1,8 @@
 package io.github.laiwf94.payflow.saga.steps;
 
 import io.github.laiwf94.payflow.gateway.CallResult;
-import io.github.laiwf94.payflow.gateway.PaymentGateway;
 import io.github.laiwf94.payflow.gateway.PaymentInfo;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.gateway.PaymentStatus;
 import io.github.laiwf94.payflow.gateway.RefundInfo;
 import io.github.laiwf94.payflow.order.Order;
@@ -34,17 +34,17 @@ import org.springframework.stereotype.Component;
 @Component
 class ReversePaymentStep implements SagaStep {
 
-  private final PaymentGateway payments;
+  private final PaymentProviders providers;
   private final PaymentRepository tenders;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
 
   ReversePaymentStep(
-      PaymentGateway payments,
+      PaymentProviders providers,
       PaymentRepository tenders,
       SagaProperties props,
       UnknownOutcomes unknown) {
-    this.payments = payments;
+    this.providers = providers;
     this.tenders = tenders;
     this.props = props;
     this.unknown = unknown;
@@ -63,7 +63,8 @@ class ReversePaymentStep implements SagaStep {
       return new StepOutcome.Advance(OrderState.RELEASING_INVENTORY, all.money());
     }
     Payment t = next.get();
-    CallResult<List<PaymentInfo>> found = payments.findByReference(t.providerReference());
+    CallResult<List<PaymentInfo>> found =
+        providers.get(t.provider()).findByReference(t.providerReference());
     if (!(found instanceof CallResult.Success<List<PaymentInfo>> s)) {
       return new StepOutcome.Retry("payment lookup failed: " + found);
     }
@@ -73,7 +74,8 @@ class ReversePaymentStep implements SagaStep {
       PaymentInfo now = p;
       long refunded = p.refunded();
       if (p.status() == PaymentStatus.AUTHORIZED) {
-        CallResult<PaymentInfo> v = payments.voidAuthorization(Keys.voidPayment(p.id()), p.id());
+        CallResult<PaymentInfo> v =
+            providers.get(t.provider()).voidAuthorization(Keys.voidPayment(p.id()), p.id());
         if (!(v instanceof CallResult.Success<PaymentInfo> ok)) {
           return notDone(v);
         }
@@ -81,7 +83,8 @@ class ReversePaymentStep implements SagaStep {
         refunded = now.refunded();
       } else if (p.status() == PaymentStatus.CAPTURED && p.netCaptured() > 0) {
         String key = Keys.reverse(p.id());
-        CallResult<RefundInfo> r = payments.refund(key, p.id(), p.netCaptured(), key);
+        CallResult<RefundInfo> r =
+            providers.get(t.provider()).refund(key, p.id(), p.netCaptured(), key);
         if (!(r instanceof CallResult.Success<RefundInfo> ok)) {
           return notDone(r);
         }

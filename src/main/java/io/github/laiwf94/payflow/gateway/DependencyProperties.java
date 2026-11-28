@@ -5,12 +5,18 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 /**
- * Where the payment provider, inventory and carrier live ({@code payflow.dependencies.*}). A blank
+ * Where the payment providers, inventory and carrier live ({@code payflow.dependencies.*}). A blank
  * base URL means the in-process simulator on this server's own port.
+ *
+ * @param payment the first payment provider, which every tender goes to unless routing says
+ *     otherwise
+ * @param secondary the second payment provider; with the simulator off and no base URL it is not
+ *     configured, and routing to it is refused at startup
  */
 @ConfigurationProperties("payflow.dependencies")
 public record DependencyProperties(
     @DefaultValue Endpoint payment,
+    @DefaultValue Endpoint secondary,
     @DefaultValue Endpoint inventory,
     @DefaultValue Endpoint shipping) {
 

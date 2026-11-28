@@ -208,7 +208,7 @@ public class RefundRepository {
     Map<UUID, List<RefundAllocation>> byRefund = new HashMap<>();
     jdbc.sql(
             """
-            SELECT a.*, p.position, p.method, p.provider_payment_id
+            SELECT a.*, p.position, p.method, p.provider, p.provider_payment_id
             FROM refund_allocations a JOIN payments p ON p.id = a.payment_id
             WHERE a.refund_id IN (:ids)
             ORDER BY a.refund_id, a.seq
@@ -233,6 +233,7 @@ public class RefundRepository {
         rs.getInt("seq"),
         rs.getInt("position"),
         rs.getString("method"),
+        rs.getString("provider"),
         rs.getString("provider_payment_id"),
         rs.getLong("amount_minor"),
         RefundState.valueOf(rs.getString("state")),

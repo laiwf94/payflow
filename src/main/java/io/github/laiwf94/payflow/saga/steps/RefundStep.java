@@ -2,7 +2,7 @@ package io.github.laiwf94.payflow.saga.steps;
 
 import io.github.laiwf94.payflow.gateway.CallResult;
 import io.github.laiwf94.payflow.gateway.InventoryService;
-import io.github.laiwf94.payflow.gateway.PaymentGateway;
+import io.github.laiwf94.payflow.gateway.PaymentProviders;
 import io.github.laiwf94.payflow.gateway.RefundInfo;
 import io.github.laiwf94.payflow.gateway.StockLine;
 import io.github.laiwf94.payflow.order.Order;
@@ -45,17 +45,17 @@ public class RefundStep implements RefundAttempt {
 
   private static final Logger log = LoggerFactory.getLogger(RefundStep.class);
 
-  private final PaymentGateway payments;
+  private final PaymentProviders providers;
   private final InventoryService inventory;
   private final SagaProperties props;
   private final UnknownOutcomes unknown;
 
   RefundStep(
-      PaymentGateway payments,
+      PaymentProviders providers,
       InventoryService inventory,
       SagaProperties props,
       UnknownOutcomes unknown) {
-    this.payments = payments;
+    this.providers = providers;
     this.inventory = inventory;
     this.props = props;
     this.unknown = unknown;
@@ -90,7 +90,8 @@ public class RefundStep implements RefundAttempt {
           share.paymentId(), "no_payment", "tender has no captured payment to refund");
     }
     String reference = refund.id().toString();
-    CallResult<List<RefundInfo>> found = payments.findRefunds(share.providerPaymentId());
+    CallResult<List<RefundInfo>> found =
+        providers.get(share.provider()).findRefunds(share.providerPaymentId());
     if (!(found instanceof CallResult.Success<List<RefundInfo>> s)) {
       return new RefundOutcome.Retry("refund lookup failed: " + found);
     }
@@ -102,8 +103,13 @@ public class RefundStep implements RefundAttempt {
     if (made.isPresent()) {
       return RefundOutcome.ShareSettled.succeeded(share.paymentId(), made.get().id());
     }
-    return switch (payments.refund(
-        key(refund, share.position()), share.providerPaymentId(), share.amountMinor(), reference)) {
+    return switch (providers
+        .get(share.provider())
+        .refund(
+            key(refund, share.position()),
+            share.providerPaymentId(),
+            share.amountMinor(),
+            reference)) {
       case CallResult.Success<RefundInfo> ok ->
           RefundOutcome.ShareSettled.succeeded(share.paymentId(), ok.value().id());
       case CallResult.Rejected<RefundInfo> r ->
