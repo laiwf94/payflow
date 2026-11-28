@@ -101,6 +101,7 @@ class RefundWorkerTest {
         transitions,
         attempt,
         p,
+        AllocationPolicy.REVERSE_ORDER,
         clock,
         new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
         crash,
@@ -466,7 +467,17 @@ class RefundWorkerTest {
     assertThat(transitions.succeed(r, UUID.randomUUID(), "re_x", now)).isEmpty();
     assertThat(transitions.fail(r, UUID.randomUUID(), "x", "y", now)).isEmpty();
     assertThat(refunds.retry(r.id(), UUID.randomUUID(), 1, now, now)).isFalse();
+    RefundOutcome.ShareSettled share =
+        RefundOutcome.ShareSettled.succeeded(r.allocations().getFirst().paymentId(), "re_x");
+    assertThat(transitions.settleShare(r, UUID.randomUUID(), share, now))
+        .as("nor a share of it")
+        .isFalse();
     assertThat(order(o).refundedMinor()).as("the order is untouched").isZero();
+    assertThat(transitions.settleShare(r, claim.leaseToken(), share, now)).isTrue();
+    assertThat(transitions.settleShare(r, claim.leaseToken(), share, now))
+        .as("a share settles once")
+        .isFalse();
+    r = refund(r);
     assertThat(transitions.succeed(r, claim.leaseToken(), "re_x", now)).isPresent();
     assertThat(transitions.succeed(r, claim.leaseToken(), "re_x", now))
         .as("settled once")

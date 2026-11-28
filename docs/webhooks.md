@@ -64,7 +64,9 @@ nothing, so never verify a re-serialized copy):
   order that is still waiting for its capture; the order stays `PAYMENT_AUTHORIZED`. From then
   until it is captured or cancelled, its events carry the new `authorization_expires_at`.
 - Refund events (`refund.created`, `refund.succeeded`, `refund.failed`) add a `refund` object
-  with its `id`, `amount`, `state`, any `lines`, and `failure_code` when it failed.
+  with its `id`, `amount`, `state`, any `lines`, and `failure_code` when it failed. A refund of
+  an order paid several ways can end `PARTIALLY_FAILED`, when some tenders returned their share
+  and others refused: its `refund.failed` also carries `refunded`, the amount that went back.
 
 The types are `order.created`, `order.cancel_requested`, `order.capture_requested`,
 `order.payment_reauthorized`, `order.inventory_reserved`,

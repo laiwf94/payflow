@@ -1166,7 +1166,7 @@ components:
     Refund:
       type: object
       additionalProperties: false
-      required: [id, order_id, state, amount, currency, created_at, updated_at]
+      required: [id, order_id, state, amount, refunded, currency, created_at, updated_at]
       properties:
         id:
           type: string
@@ -1176,36 +1176,87 @@ components:
           format: uuid
         state:
           type: string
-          enum: [PENDING, SUCCEEDED, FAILED]
+          enum: [PENDING, SUCCEEDED, FAILED, PARTIALLY_FAILED]
           description: >-
-            `PENDING` until the provider answers; then `SUCCEEDED`, or `FAILED` when the provider
-            refused it, which gives its share back.
+            `PENDING` until every tender's provider has answered; then `SUCCEEDED`, `FAILED` when
+            the provider refused all of it, which gives its share back, or `PARTIALLY_FAILED`
+            when the order was paid several ways and some tenders returned their share while
+            others refused: `refunded` went back, and the rest can be refunded again.
         amount:
           type: integer
-          description: Minor units returned to the customer; for a line refund, the lines' share.
+          description: Minor units asked back for the customer; for a line refund, the lines' share.
+        refunded:
+          type: integer
+          description: >-
+            Minor units that went back: 0 while `PENDING` or once `FAILED`, `amount` once
+            `SUCCEEDED`, and part of it once `PARTIALLY_FAILED`.
         currency:
           type: string
         lines:
           type: array
-          description: Present for a refund of goods.
+          description: >-
+            Present for a refund of goods. The goods count as returned unless the refund `FAILED`.
           items:
             $ref: '#/components/schemas/RefundLine'
+        allocation_policy:
+          type: string
+          enum: [reverse_order, proportional, card_first]
+          description: >-
+            How the refund was split between the order's tenders (`payflow.refunds.allocation-policy`
+            when it was created): `reverse_order` takes from the last tender first,
+            `proportional` in proportion to what each tender can still return, and `card_first`
+            from card tenders before any other, each group last first. No tender is ever asked
+            for more than it captured less what other refunds take from it. Absent only for a
+            refund an older version created that has not been worked on yet.
+        tenders:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: >-
+            Each tender's share, in the order they are made, present once the refund is split.
+          items:
+            $ref: '#/components/schemas/RefundShare'
         failure:
-          type: object
-          additionalProperties: false
-          required: [code, message]
-          description: Present when the refund `FAILED`.
-          properties:
-            code:
-              type: string
-            message:
-              type: string
+          $ref: '#/components/schemas/RefundFailure'
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    RefundFailure:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      description: >-
+        Present when the provider refused the refund, or a tender's share: on a refund, when it
+        `FAILED` or `PARTIALLY_FAILED`, naming each tender that refused.
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    RefundShare:
+      type: object
+      additionalProperties: false
+      required: [tender, payment_method, amount, state]
+      properties:
+        tender:
+          type: integer
+          minimum: 1
+          maximum: 16
+          description: The tender's position on the order, from 1.
+        payment_method:
+          type: string
+        amount:
+          type: integer
+          minimum: 1
+          description: Minor units this tender gives back.
+        state:
+          type: string
+          enum: [PENDING, SUCCEEDED, FAILED]
+        failure:
+          $ref: '#/components/schemas/RefundFailure'
     LineItem:
       type: object
       additionalProperties: false

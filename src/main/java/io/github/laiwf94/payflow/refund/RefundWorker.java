@@ -35,8 +35,10 @@ import org.springframework.context.SmartLifecycle;
  * thread leases due refunds from Postgres and hands each to a virtual thread; no transaction is
  * open while the provider is asked; the lease token, checked on every write, keeps two workers from
  * settling one refund. A refund is one step, so a claim ends with exactly one write: settled, or
- * scheduled for another try. Refunds are retried until the provider answers, the way a saga's
- * compensation is: once a merchant asked for the money back, giving up would keep it.
+ * scheduled for another try. A refund split between several tenders settles each tender's share in
+ * its own fenced write first, keeping the lease, so a crash between two shares resumes at the next
+ * one. Refunds are retried until the provider answers, the way a saga's compensation is: once a
+ * merchant asked for the money back, giving up would keep it.
  *
  * <p>A worker that dies mid-call leaves the lease to expire, and the next claim is told the refund
  * was {@code recovered}. A clean stop hands back what is still mid-call when {@link
@@ -54,6 +56,7 @@ public class RefundWorker implements SmartLifecycle {
   private final RefundTransitions transitions;
   private final RefundAttempt attempt;
   private final SagaProperties props;
+  private final AllocationPolicy policy;
   private final Clock clock;
   private final Backoff backoff;
   private final CrashPoints crash;
@@ -76,6 +79,7 @@ public class RefundWorker implements SmartLifecycle {
       RefundTransitions transitions,
       RefundAttempt attempt,
       SagaProperties props,
+      AllocationPolicy policy,
       Clock clock,
       Backoff backoff,
       CrashPoints crash,
@@ -85,6 +89,7 @@ public class RefundWorker implements SmartLifecycle {
     this.transitions = transitions;
     this.attempt = attempt;
     this.props = props;
+    this.policy = policy;
     this.clock = clock;
     this.backoff = backoff;
     this.crash = crash;
@@ -124,27 +129,57 @@ public class RefundWorker implements SmartLifecycle {
         log.info("resuming refund after a lease that was not released");
       }
       Order order = orders.findById(refund.orderId()).orElseThrow();
-      crash.at("before:REFUND");
-      long started = System.nanoTime();
-      RefundOutcome outcome;
-      try {
-        outcome = attempt.execute(refund, order, claim.recovered() || refund.attempt() > 0);
-      } catch (RuntimeException e) {
-        log.warn("refund attempt failed unexpectedly", e);
-        outcome = new RefundOutcome.Retry("unexpected " + e.getClass().getSimpleName());
+      if (refund.allocations().isEmpty()) {
+        // An older binary created it; split it now, under the order's lock, before any call.
+        Optional<Refund> split =
+            transitions.allocate(refund, order, token, policy, clock.instant());
+        if (split.isEmpty()) {
+          log.warn("lost the lease on a refund; another worker has it");
+          return;
+        }
+        refund = split.get();
       }
-      Timer.builder("payflow.refund.attempt")
-          .tag("outcome", outcome.getClass().getSimpleName().toLowerCase(Locale.ROOT))
-          .register(meters)
-          .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
-      crash.at("after:REFUND");
-      settle(refund, token, outcome);
-      crash.at("committed:REFUND");
+      boolean resumed = claim.recovered() || refund.attempt() > 0;
+      // One share settles per pass, so a refund takes at most one pass per share and a last one.
+      for (int pass = 0; pass <= refund.allocations().size(); pass++) {
+        crash.at("before:REFUND");
+        RefundOutcome outcome = attemptOnce(refund, order, resumed);
+        crash.at("after:REFUND");
+        if (outcome instanceof RefundOutcome.ShareSettled share) {
+          if (!transitions.settleShare(refund, token, share, clock.instant())) {
+            log.warn("lost the lease on a refund; another worker has it");
+            return;
+          }
+          crash.at("share:REFUND");
+          refund = refunds.findById(refund.id()).orElseThrow();
+          continue;
+        }
+        settle(refund, token, outcome);
+        crash.at("committed:REFUND");
+        return;
+      }
+      throw new IllegalStateException("refund " + refund.id() + " did not settle its shares");
     } finally {
       inFlight.remove(refund.id());
       MDC.remove("refund_id");
       MDC.remove("order_id");
     }
+  }
+
+  private RefundOutcome attemptOnce(Refund refund, Order order, boolean resumed) {
+    long started = System.nanoTime();
+    RefundOutcome outcome;
+    try {
+      outcome = attempt.execute(refund, order, resumed);
+    } catch (RuntimeException e) {
+      log.warn("refund attempt failed unexpectedly", e);
+      outcome = new RefundOutcome.Retry("unexpected " + e.getClass().getSimpleName());
+    }
+    Timer.builder("payflow.refund.attempt")
+        .tag("outcome", outcome.getClass().getSimpleName().toLowerCase(Locale.ROOT))
+        .register(meters)
+        .record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+    return outcome;
   }
 
   private void settle(Refund refund, UUID token, RefundOutcome outcome) {
@@ -168,6 +203,21 @@ public class RefundWorker implements SmartLifecycle {
         log.error("refund of {} failed: {}", refund.amountMinor(), f.message());
         meters.counter("payflow.refunds.settled", "state", "failed").increment();
       }
+      case RefundOutcome.PartiallyFailed p -> {
+        if (transitions.partiallyFail(refund, token, p, now).isEmpty()) {
+          log.warn("lost the lease on a refund; another worker has it");
+          return;
+        }
+        // Part went back; the merchant has to decide what happens to the rest.
+        log.error(
+            "refund of {} partly failed, {} returned: {}",
+            refund.amountMinor(),
+            p.returnedMinor(),
+            p.message());
+        meters.counter("payflow.refunds.settled", "state", "partially_failed").increment();
+      }
+      case RefundOutcome.ShareSettled s ->
+          throw new IllegalStateException("a share is recorded before the refund settles");
       case RefundOutcome.Retry r -> {
         int next = refund.attempt() + 1;
         Duration delay = backoff.delay(refund.attempt());

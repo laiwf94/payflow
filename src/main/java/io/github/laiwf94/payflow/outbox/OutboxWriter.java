@@ -37,10 +37,11 @@ public class OutboxWriter {
 
   /**
    * What a refund event says about its refund, as it is after the change. {@code lines} is empty
-   * for a refund of an amount; {@code failureCode} is set only for a refused one.
+   * for a refund of an amount; {@code failureCode} is set only for a refused one, and {@code
+   * returned} (published as {@code refunded}) only for one that partly failed.
    */
   public record RefundDetails(
-      UUID id, long amount, List<?> lines, String state, String failureCode) {
+      UUID id, long amount, List<?> lines, String state, String failureCode, Long returned) {
     public RefundDetails {
       lines = lines == null ? List.of() : List.copyOf(lines);
     }
@@ -105,6 +106,9 @@ public class OutboxWriter {
         r.put("lines", refund.lines());
       }
       r.put("state", refund.state());
+      if (refund.returned() != null) {
+        r.put("refunded", refund.returned());
+      }
       if (refund.failureCode() != null) {
         r.put("failure_code", refund.failureCode());
       }

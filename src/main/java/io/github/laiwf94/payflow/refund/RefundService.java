@@ -24,8 +24,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * RefundWorker} then makes at the provider; the order moves only when a refund succeeds.
  *
  * <p>Every refund is sized under the order's row lock, the one the database's refund check takes,
- * so two requests can't both be given the last of the capture. The database checks the result again
- * at commit whatever this code does.
+ * so two requests can't both be given the last of the capture, and split between the order's
+ * tenders under it by the configured {@link AllocationPolicy}, so no tender is promised more than
+ * it captured. The database checks both again at commit whatever this code does.
  */
 @Service
 public class RefundService {
@@ -82,6 +83,7 @@ public class RefundService {
   private final RefundRepository refunds;
   private final RefundTransitions transitions;
   private final RefundWorker worker;
+  private final RefundProperties props;
   private final Clock clock;
 
   public RefundService(
@@ -89,11 +91,13 @@ public class RefundService {
       RefundRepository refunds,
       RefundTransitions transitions,
       RefundWorker worker,
+      RefundProperties props,
       Clock clock) {
     this.orders = orders;
     this.refunds = refunds;
     this.transitions = transitions;
     this.worker = worker;
+    this.props = props;
     this.clock = clock;
   }
 
@@ -252,7 +256,8 @@ public class RefundService {
 
   private Started start(Order order, long amountMinor, List<RefundLine> lines) {
     Refund r = Refund.pending(UUID.randomUUID(), order.id(), amountMinor, lines, clock.instant());
-    Order after = transitions.create(r, r.createdAt());
+    RefundTransitions.Created created =
+        transitions.create(r, props.allocationPolicy(), r.createdAt());
     TransactionSynchronizationManager.registerSynchronization(
         new TransactionSynchronization() {
           @Override
@@ -260,8 +265,13 @@ public class RefundService {
             worker.wakeUp();
           }
         });
-    log.info("refund {} of {} started", r.id(), amountMinor);
-    return new Started(r, after);
+    log.info(
+        "refund {} of {} started, split {} by {}",
+        r.id(),
+        amountMinor,
+        created.refund().allocations().size(),
+        props.allocationPolicy().code());
+    return new Started(created.refund(), created.order());
   }
 
   private static OrderService.WrongState notRefundable(OrderState state) {

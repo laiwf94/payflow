@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Component;
@@ -168,23 +169,32 @@ public class OrderTransitions {
   }
 
   /**
-   * Records a succeeded refund of {@code amount} on its order and writes the order's event, in the
-   * caller's transaction (the refund row changes in the same one).
+   * Records what a settled refund returned on its order and on each tender that returned part of it
+   * ({@code byTender}, payment id to amount), and writes the order's event, in the caller's
+   * transaction (the refund row changes in the same one). The order's refunded total grows by the
+   * shares' sum, so it stays the sum of its tenders'.
    *
-   * @throws IllegalStateException when the order is not refundable; the database refuses a refund
-   *     row for such an order, so this means the two disagree and the transaction must not commit
+   * @throws IllegalStateException when the order is not refundable, or a share names a payment that
+   *     isn't one of its tenders; the database refuses a refund row for such an order, so this
+   *     means the two disagree and the transaction must not commit
    */
   @Transactional
-  public Order recordRefund(UUID orderId, long amount, Instant now) {
+  public Order recordRefund(UUID orderId, Map<UUID, Long> byTender, Instant now) {
+    long amount = byTender.values().stream().mapToLong(Long::longValue).sum();
+    if (amount < 1) {
+      throw new IllegalArgumentException("a refund returns something: " + byTender);
+    }
     Order after =
         repo.addRefunded(orderId, amount, now)
             .orElseThrow(
                 () -> new IllegalStateException("order " + orderId + " is not refundable"));
-    // Refunds are made against the order's payment id, which is its first tender's.
-    if (!payments.addRefunded(orderId, after.paymentId(), amount, now)) {
-      throw new IllegalStateException(
-          "order " + orderId + " has no tender " + after.paymentId() + " to refund");
-    }
+    byTender.forEach(
+        (payment, share) -> {
+          if (!payments.addRefunded(orderId, payment, share, now)) {
+            throw new IllegalStateException(
+                "order " + orderId + " has no tender " + payment + " to refund");
+          }
+        });
     OrderState before =
         after.refundedMinor() == amount ? OrderState.COMPLETED : OrderState.PARTIALLY_REFUNDED;
     outbox.write(eventType(after.state()), after, before, now);

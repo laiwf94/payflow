@@ -20,6 +20,7 @@ import io.github.laiwf94.payflow.order.ShippingAddress;
 import io.github.laiwf94.payflow.outbox.OutboxWriter;
 import io.github.laiwf94.payflow.payment.PaymentRepository;
 import io.github.laiwf94.payflow.payment.PaymentState;
+import io.github.laiwf94.payflow.refund.AllocationPolicy;
 import io.github.laiwf94.payflow.refund.Refund;
 import io.github.laiwf94.payflow.refund.RefundLine;
 import io.github.laiwf94.payflow.refund.RefundRepository;
@@ -846,6 +847,7 @@ class SagaChaosProperties {
         transitions,
         step,
         props,
+        AllocationPolicy.REVERSE_ORDER,
         clock,
         new Backoff(props.backoffBase(), props.backoffCap(), random.split()),
         crash,
@@ -1010,6 +1012,24 @@ class SagaChaosProperties {
         assertThat(succeeded.stream().mapToLong(Refund::amountMinor).sum())
             .as("succeeded refunds of %s add up to its refunded total", ref)
             .isEqualTo(o.refundedMinor());
+        // Each refund was split onto the order's one tender, whatever crashed, and its share
+        // settled as it did, under the same provider refund.
+        UUID tender = tenders.forOrder(o.id()).getFirst().id();
+        for (Refund r : rows) {
+          assertThat(r.allocationPolicy()).as("policy of %s", r.id()).isNotNull();
+          assertThat(r.allocations())
+              .as("shares of refund %s of %s", r.id(), ref)
+              .singleElement()
+              .satisfies(
+                  a -> {
+                    assertThat(a.paymentId()).isEqualTo(tender);
+                    assertThat(a.amountMinor()).isEqualTo(r.amountMinor());
+                    assertThat(a.state()).isEqualTo(r.state());
+                    assertThat(a.providerRefundId()).isEqualTo(r.providerRefundId());
+                  });
+          assertThat(r.returnedMinor())
+              .isEqualTo(r.state() == RefundState.SUCCEEDED ? r.amountMinor() : 0);
+        }
         // The provider never refuses a refund of money it holds, so none may fail here.
         assertThat(rows).as("refunds of %s", ref).allMatch(r -> r.state() != RefundState.FAILED);
         List<PaymentProviderSimulator.LedgerEntry> ledgerRefunds =

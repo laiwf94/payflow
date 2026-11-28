@@ -395,6 +395,72 @@ checks what must hold for every interleaving:
 Two deliberately broken versions fail it within a run: a refund step that skips the restock, and
 a line price that ignores units earlier refunds took.
 
+### Refunds across tenders
+
+An order paid with a gift card and a card is refunded from both, so each refund is split between
+the order's tenders when it is created, under the same order lock that sizes it. The split is a
+row per tender in `refund_allocations` (V33): the tender, its share `amount_minor`, `seq` (the
+order the shares are made in), and the share's own `state` (`PENDING`, `SUCCEEDED` or `FAILED`),
+provider refund id and failure. `refund/AllocationPolicy` decides the split, and
+`payflow.refunds.allocation-policy` (`PAYFLOW_REFUND_ALLOCATION_POLICY`) chooses the policy for new
+refunds. Each refund records the policy it used, and the API returns it as `allocation_policy`:
+
+| Policy | Split |
+|---|---|
+| `reverse_order` (default) | The last tender first, the way the saga undoes a payment: the card that topped up a gift card gives back first. |
+| `proportional` | In proportion to what each tender can still return, rounded down, with the leftover units going one each to the largest remainders (ties to the later tender). Refunding everything left returns each tender's rest exactly. |
+| `card_first` | Card tenders (`pm_card_...`) first, then the others, each group last first, so money reaches the customer's card before any stored value is restored. |
+
+What a tender "can still return" is what it captured less the shares of refunds that haven't
+failed. Every policy gives the whole amount out, never more than a tender can return, and leaves
+out tenders that get nothing (`AllocationPolicyTest`, with a 2,000-try property over 1 to 16
+tenders and every policy). The database holds the same rules at commit, under the order's lock,
+in `refund_allocations_check`: a refund's shares add up to it (`refund_allocations_add_up`), sit
+on its own order's tenders (`refund_allocations_own_tenders`), and never promise a tender more
+than it captured (`refund_allocations_within_tender`). A share's tender and amount never change
+and its state only leaves `PENDING` (`refund_allocations_immutable`,
+`refund_allocations_legal_transition`).
+
+The worker makes the shares in `seq` order, each at its own tender's provider payment. A share
+is asked about first, by the refund's id as its reference. The id is unique at that payment,
+since a refund has at most one share per tender, so a share whose answer was lost is found
+rather than made twice. Its idempotency key is `refund-<refund>` on the first tender, as before,
+and `refund-<refund>-<position>` on the others. Each settled share is one fenced write that keeps
+the lease, and the attempt then runs again for the next share. So a crash between shares resumes
+at the next one, and a refund of three tenders takes four writes: one per share and the
+settlement. A share the provider refuses is recorded as refused, and the next share is still
+made: money promised back goes back wherever it can.
+
+When every share has settled, the refund settles once, with the tenders' and the order's money in
+the same transaction:
+
+| Shares | Refund | Counts against the capture | Lines |
+|---|---|---|---|
+| all succeeded | `SUCCEEDED` | its amount | restocked, stay refunded |
+| none succeeded | `FAILED`, naming each tender that refused | nothing | not restocked, free again |
+| some succeeded | `PARTIALLY_FAILED`, `returned_minor` (`refunded` in the API) what came back, the failure naming each tender that refused | only `returned_minor` | restocked, stay refunded: the goods came back |
+
+A partial failure is a refusal, so its event is `refund.failed`, with the refund's `state` and a
+`refunded` amount. The order then moves by what came back, in the same transaction, and the
+unreturned rest can be refunded again. Each tender's `refunded_minor` grows by its own succeeded
+share, so the order's refunded total stays the sum of its tenders'. The database checks a settled
+refund against its shares: none pending, all succeeded for `SUCCEEDED`, none for `FAILED`, and
+for `PARTIALLY_FAILED` a mix whose succeeded shares add up to `returned_minor`
+(`refund_allocations_settled`, `refunds_returned`).
+
+Expand before contract, as with the payment rows. V33 gives every existing refund one share, on
+its order's first tender. During a rolling upgrade the previous release still creates refunds
+without shares, and this binary's worker splits such a refund under the order's lock when it
+first claims it. That release also settles refunds by their state alone, so a trigger
+(`refund_allocations_mirror_settle`) settles the single pending share of a refund it settles. This
+binary's settling write sets `payflow.refund_writer` for its transaction and is left alone, so the
+commit-time check would catch it settling with a share still pending. The previous release only
+ever sees single-tender orders, so its refunds have one share and its own bookkeeping (the
+order's first tender) is right. `SplitTenderRefundTest` covers each policy on real orders, a
+tender refusing, every tender refusing, a line refund partly failing, two crashes between and
+inside shares with the provider's key handling off, the database's rules with raw SQL, and both
+upgrade paths.
+
 ### Refund events and what an order shows
 
 Each refund puts its own events into its order's stream: `refund.created` when it is started,
@@ -402,9 +468,10 @@ then exactly one of `refund.succeeded` and `refund.failed`. Each is written in t
 that makes the change, by `RefundTransitions`, so it exists exactly when the change committed. A
 refund event carries the order's usual fields (its state at that moment, with no
 `previous_state`, since the order didn't change state) and a `refund` object: `id`, `amount`,
-`lines` for a refund of goods, its `state`, and `failure_code` when the provider refused it. A
-success is followed in the same transaction by the order's `order.partially_refunded` or
-`order.refunded`, so a consumer always sees the refund before the change it caused.
+`lines` for a refund of goods, its `state`, `failure_code` when the provider refused it, and
+`refunded` when it partly failed. A success or partial failure is followed in the same
+transaction by the order's `order.partially_refunded` or `order.refunded`, so a consumer always
+sees the refund before the change it caused.
 
 An event's sequence number is the order's `version`, and the outbox holds `(order, seq)` unique,
 so a refund event needs a version of its own: `OrderRepository.touch` adds one (and moves
@@ -1318,6 +1385,7 @@ response without the other fails the build.
 | API key length | 256 characters | `ApiKeys` |
 | Merchant id | 1-64 of `a-z 0-9 _ -` | `ApiKeys`, `orders_merchant_format` |
 | Refunds of an order | add up to at most the capture, and at most each line's quantity | `refunds_within_order` trigger, `RefundService` |
+| A refund's shares | at most one per tender, adding up to the refund; a tender's shares at most what it captured | `refund_allocations_within_refund` trigger, `AllocationPolicy` |
 | Refund amount / lines per refund / quantity per line | 1-99,999,999 minor units / 1-50 / 1-1,000 | `CreateRefundRequest` |
 | Refunds claimed per poll and in flight | 64 | `payflow.saga.batch-size` |
 | Saga lease | 30 s | `payflow.saga.lease` |

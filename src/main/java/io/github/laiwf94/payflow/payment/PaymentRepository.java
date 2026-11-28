@@ -130,23 +130,23 @@ public class PaymentRepository {
   }
 
   /**
-   * Adds a succeeded refund of {@code amount} to the tender of {@code orderId} that the provider
-   * knows as {@code providerPaymentId}, in the refund's transaction. Returns false when the order
-   * has no such tender. The tender's checks refuse more refunded than it captured.
+   * Adds {@code amount}, a tender's share of a settled refund, to tender {@code paymentId} of
+   * {@code orderId}, in the refund's transaction. Returns false when the order has no such tender.
+   * The tender's checks refuse more refunded than it captured.
    */
-  public boolean addRefunded(UUID orderId, String providerPaymentId, long amount, Instant now) {
+  public boolean addRefunded(UUID orderId, UUID paymentId, long amount, Instant now) {
     return jdbc.sql(
                 """
                 UPDATE payments SET refunded_minor = refunded_minor + :amount,
                     state = CASE WHEN refunded_minor + :amount = captured_minor
                                  THEN 'refunded' ELSE 'partially_refunded' END,
                     updated_at = :now
-                WHERE order_id = :order AND provider_payment_id = :providerPaymentId
+                WHERE order_id = :order AND id = :payment
                 """)
             .param("amount", amount)
             .param("now", ts(now))
             .param("order", orderId)
-            .param("providerPaymentId", providerPaymentId)
+            .param("payment", paymentId)
             .update()
         == 1;
   }

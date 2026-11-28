@@ -4,6 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.laiwf94.payflow.idempotency.IdempotencyFilter;
+import io.github.laiwf94.payflow.money.Money;
+import io.github.laiwf94.payflow.order.LineItem;
+import io.github.laiwf94.payflow.order.Order;
+import io.github.laiwf94.payflow.order.OrderTransitions;
+import io.github.laiwf94.payflow.payment.Payment;
+import io.github.laiwf94.payflow.payment.PaymentRepository;
 import io.github.laiwf94.payflow.saga.SagaWorker;
 import io.github.laiwf94.payflow.support.Api;
 import io.github.laiwf94.payflow.support.Db;
@@ -15,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +33,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.web.servlet.mvc.method.RequestMappingInfo;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 import org.yaml.snakeyaml.Yaml;
+import tools.jackson.databind.JsonNode;
 
 /**
  * The served OpenAPI document against the running application: the same routes in both, every
@@ -42,6 +50,10 @@ class OpenApiContractTest {
   RequestMappingHandlerMapping mappings;
 
   @Autowired SagaWorker worker;
+  @Autowired io.github.laiwf94.payflow.refund.RefundWorker refundWorker;
+  @Autowired OrderTransitions orderTransitions;
+  @Autowired PaymentRepository tenders;
+  @Autowired io.github.laiwf94.payflow.sim.PaymentProviderSimulator simulator;
   @Autowired FilterRegistrationBean<IdempotencyFilter> idempotency;
   @Autowired JdbcClient jdbc;
   @Autowired io.github.laiwf94.payflow.sim.Faults faults;
@@ -229,6 +241,69 @@ class OpenApiContractTest {
     webhookLog(anonymous, missing, tooLarge);
 
     assertThat(exercised).isEqualTo(documentedResponses());
+  }
+
+  /**
+   * A refund split between two tenders, one of which refuses, as the API shows it on the order and
+   * in its refund list: {@code PARTIALLY_FAILED}, what went back, and each tender's share.
+   */
+  @Test
+  void aSplitRefundThatPartlyFailedMatchesTheSpec() {
+    Order o =
+        Order.create(
+            UUID.randomUUID(),
+            "acme",
+            Money.of(2500, "EUR"),
+            List.of(new LineItem("sku-1", 2, 1000), new LineItem("sku-2", 1, 500)),
+            io.github.laiwf94.payflow.order.Orders.ADDRESS,
+            "pm_giftcard_ok",
+            "corr-contract",
+            java.time.Instant.now());
+    assertThat(
+            orderTransitions.create(
+                o,
+                List.of(
+                    new OrderTransitions.Tender("pm_giftcard_ok", Money.of(1000, "EUR")),
+                    new OrderTransitions.Tender("pm_card_ok", Money.of(1500, "EUR")))))
+        .isTrue();
+    while (worker.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+    Payment card = tenders.forOrder(o.id()).get(1);
+    simulator.refund(null, card.providerPaymentId(), card.capturedMinor(), "out-of-band");
+    String refunds = "/v1/orders/" + o.id() + "/refunds";
+    record("POST /v1/orders/{id}/refunds", api.post(refunds, "{\"amount\":2000}"));
+    while (refundWorker.runOnce() > 0) {
+      Thread.onSpinWait();
+    }
+
+    Api.Response list = api.get(refunds);
+    record("GET /v1/orders/{id}/refunds", list);
+    JsonNode r = list.json().get("data").get(0);
+    assertThat(r.get("state").asString()).isEqualTo("PARTIALLY_FAILED");
+    assertThat(r.get("amount").asLong()).isEqualTo(2000);
+    assertThat(r.get("refunded").asLong()).isEqualTo(500);
+    assertThat(r.get("allocation_policy").asString()).isEqualTo("reverse_order");
+    assertThat(r.get("failure").get("code").asString()).isEqualTo("provider_refused");
+    assertThat(r.get("tenders"))
+        .extracting(
+            t ->
+                t.get("tender").asInt()
+                    + ":"
+                    + t.get("payment_method").asString()
+                    + ":"
+                    + t.get("amount").asLong()
+                    + ":"
+                    + t.get("state").asString())
+        .containsExactly("2:pm_card_ok:1500:FAILED", "1:pm_giftcard_ok:500:SUCCEEDED");
+    assertThat(r.get("tenders").get(0).get("failure").get("code").asString())
+        .isEqualTo("invalid_amount");
+
+    Api.Response order = api.get("/v1/orders/" + o.id());
+    record("GET /v1/orders/{id}", order);
+    assertThat(order.json().get("state").asString()).isEqualTo("PARTIALLY_REFUNDED");
+    assertThat(order.json().get("refunds").get("data").get(0).get("state").asString())
+        .isEqualTo("PARTIALLY_FAILED");
   }
 
   /** Every documented answer of the webhook endpoint routes. */

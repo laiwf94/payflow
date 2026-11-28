@@ -66,6 +66,10 @@ payflow:
   # open). Every instance needs the same list. Unset means a random per-process key, and those
   # secrets are unreadable after a restart.
   secret-keys: ${PAYFLOW_SECRET_KEYS:}
+  refunds:
+    # How a refund of an order paid with several tenders is split between them: reverse_order
+    # (last tender first), proportional, or card_first. Each refund records the one it used.
+    allocation-policy: ${PAYFLOW_REFUND_ALLOCATION_POLICY:reverse_order}
   webhooks:
     # Networks webhooks may go to although they aren't public, as a comma-separated CIDR list
     # (172.18.0.0/16,::1/128); only for a development stack whose merchant server is on a private

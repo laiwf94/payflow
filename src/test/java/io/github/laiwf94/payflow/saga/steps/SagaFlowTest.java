@@ -13,6 +13,7 @@ import io.github.laiwf94.payflow.order.OrderState;
 import io.github.laiwf94.payflow.order.OrderTransitions;
 import io.github.laiwf94.payflow.order.Orders;
 import io.github.laiwf94.payflow.order.ShippingAddress;
+import io.github.laiwf94.payflow.refund.AllocationPolicy;
 import io.github.laiwf94.payflow.refund.RefundRepository;
 import io.github.laiwf94.payflow.refund.RefundService;
 import io.github.laiwf94.payflow.refund.RefundState;
@@ -100,6 +101,7 @@ class SagaFlowTest {
             refundTransitions,
             refundStep,
             props,
+            AllocationPolicy.REVERSE_ORDER,
             clock,
             new Backoff(Duration.ofMillis(10), Duration.ofMillis(100), new SplittableRandom(1)),
             crash,

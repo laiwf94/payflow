@@ -7,11 +7,13 @@ import io.github.laiwf94.payflow.saga.SagaProperties;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /** Wires the refund worker, on the saga worker's settings and backoff. */
 @Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(RefundProperties.class)
 public class RefundConfig {
 
   @Bean
@@ -21,6 +23,7 @@ public class RefundConfig {
       RefundTransitions transitions,
       RefundAttempt attempt,
       SagaProperties props,
+      RefundProperties refundProps,
       Clock clock,
       Backoff backoff,
       ObjectProvider<CrashPoints> crash,
@@ -31,6 +34,7 @@ public class RefundConfig {
         transitions,
         attempt,
         props,
+        refundProps.allocationPolicy(),
         clock,
         backoff,
         crash.getIfAvailable(() -> CrashPoints.NONE),
